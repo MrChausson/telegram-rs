@@ -1,4 +1,4 @@
-//! Data model for the UI: chat, message, etc.
+//! Data model for the UI: chat, message, media, etc.
 
 use grammers_session::types::{PeerId, PeerRef};
 
@@ -15,6 +15,12 @@ pub struct ChatInfo {
     pub peer_ref: PeerRef,
 }
 
+/// Kind of media attached to a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    Photo { width: u32, height: u32 },
+}
+
 /// A message from a chat (history).
 #[derive(Debug, Clone)]
 pub struct MessageInfo {
@@ -24,4 +30,6 @@ pub struct MessageInfo {
     pub date: i32,
     /// True if the message was sent by us.
     pub out: bool,
+    /// Media attached to the message, if any.
+    pub media: Option<MediaKind>,
 }

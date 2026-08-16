@@ -5,6 +5,7 @@ pub mod blit;
 pub mod bridge;
 pub mod chatlist;
 pub mod icons;
+pub mod image;
 pub mod messages;
 pub mod renderer;
 pub mod state;

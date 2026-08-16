@@ -204,6 +204,10 @@ async fn serve(
                                     text: m.text,
                                     date: m.date,
                                     out: m.out,
+                                    photo: m.media.map(|k| match k {
+                                        tg::model::MediaKind::Photo { width, height } => (width, height),
+                                    }),
+                                    photo_path: None,
                                 })
                                 .collect();
                             let _ = ui_tx.send(UiMessage::Messages {
@@ -255,6 +259,9 @@ fn handle_update(ui_tx: &mpsc::UnboundedSender<UiMessage>, update: Update) {
                     text: msg.text().to_string(),
                     date: msg.date().timestamp() as i32,
                     out: msg.outgoing(),
+                    photo: tg::client::media_kind(msg.media().as_ref()).and_then(|k| match k {
+                        tg::model::MediaKind::Photo { width, height } => Some((width, height)),
+                    }),
                 });
             }
         }
@@ -277,6 +284,13 @@ fn handle_update(ui_tx: &mpsc::UnboundedSender<UiMessage>, update: Update) {
     }
 }
 
+fn cache_dir() -> std::path::PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    home.join(".cache").join("tg")
+}
+
 /// Handles a UI request.
 async fn handle_request(
     tg: &Telegram,
@@ -295,6 +309,10 @@ async fn handle_request(
                             text: m.text,
                             date: m.date,
                             out: m.out,
+                            photo: m.media.map(|k| match k {
+                                tg::model::MediaKind::Photo { width, height } => (width, height),
+                            }),
+                            photo_path: None,
                         })
                         .collect();
                     let _ = ui_tx.send(UiMessage::Messages {
@@ -312,6 +330,21 @@ async fn handle_request(
             None => {
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
             }
+        },
+        Request::DownloadPhoto { chat_id, msg_id } => match peers.get(&chat_id) {
+            Some((_, peer_ref)) => {
+                let dir = cache_dir().join("media").join(chat_id.to_string());
+                let path = match tg.download_photo(peer_ref, msg_id, &dir).await {
+                    Ok(p) => p.map(|p| p.to_string_lossy().into_owned()),
+                    Err(_) => None,
+                };
+                let _ = ui_tx.send(UiMessage::PhotoReady {
+                    chat_id,
+                    msg_id,
+                    path,
+                });
+            }
+            None => {}
         },
         Request::SendMessage { id, text } => match peers.get(&id) {
             Some((_, peer_ref)) => {

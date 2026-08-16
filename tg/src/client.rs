@@ -4,11 +4,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use grammers_client::client::{LoginToken, PasswordToken, SignInError};
+use grammers_client::media::{Media, Photo, PhotoSize};
 use grammers_client::Client;
 use grammers_mtsender::SenderPool;
 use grammers_session::updates::UpdatesLike;
 
-use crate::model::{ChatInfo, MessageInfo};
+use crate::model::{ChatInfo, MediaKind, MessageInfo};
 use crate::session::FileSession;
 
 /// Wrapped Telegram client with the network runtime running in the background.
@@ -130,10 +131,46 @@ impl Telegram {
                 text: msg.text().to_string(),
                 date: msg.date().timestamp() as i32,
                 out: msg.outgoing(),
+                media: media_kind(msg.media().as_ref()),
             });
         }
         out.reverse();
         Ok(out)
+    }
+
+    /// Downloads a message's photo (a small thumbnail, ~256 px) into `dir`,
+    /// returning the saved path, or `None` if the message has no photo.
+    pub async fn download_photo(
+        &self,
+        peer_ref: &grammers_session::types::PeerRef,
+        msg_id: i32,
+        dir: &std::path::Path,
+    ) -> Result<Option<std::path::PathBuf>> {
+        let msgs = self
+            .client
+            .get_messages_by_id(peer_ref.clone(), &[msg_id])
+            .await
+            .context("fetching message")?;
+        let Some(Some(msg)) = msgs.into_iter().next() else {
+            return Ok(None);
+        };
+        let Some(size) = media_downloadable(msg.media().as_ref()) else {
+            return Ok(None);
+        };
+        let mut it = self.client.iter_download(&size);
+        let mut bytes = Vec::new();
+        while let Some(chunk) = it.next().await? {
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join(format!("{msg_id}.jpg"));
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &bytes)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(Some(path))
     }
 
     /// Sends a text message to a chat.
@@ -157,4 +194,48 @@ impl Telegram {
         drop(self.client);
         let _ = self.runner.await;
     }
+}
+
+/// Media kind (for layout) of a message attachment.
+pub fn media_kind(media: Option<&Media>) -> Option<MediaKind> {
+    let Media::Photo(photo) = media? else {
+        return None;
+    };
+    let thumb = pick_photo_size(photo)?;
+    Some(MediaKind::Photo {
+        width: thumb.0,
+        height: thumb.1,
+    })
+}
+
+/// A lightweight downloadable for a photo (a ~256 px thumbnail).
+fn media_downloadable(media: Option<&Media>) -> Option<PhotoSize> {
+    let Media::Photo(photo) = media? else {
+        return None;
+    };
+    let (_, _, size) = pick_photo_size(photo)?;
+    Some(size)
+}
+
+/// Chooses a `PhotoSize`: the smallest downloadable one of at least 256 px
+/// wide, otherwise the largest available. Returns `(width, height, size)`.
+fn pick_photo_size(photo: &Photo) -> Option<(u32, u32, PhotoSize)> {
+    let thumbs = photo.thumbs();
+    let mut downloadables: Vec<(u32, u32, PhotoSize)> = Vec::new();
+    for thumb in thumbs {
+        if let PhotoSize::Size(size) = &thumb {
+            let (w, h) = (size.width.max(0) as u32, size.height.max(0) as u32);
+            downloadables.push((w, h, thumb.clone()));
+        }
+    }
+    if downloadables.is_empty() {
+        return None;
+    }
+    downloadables.sort_by_key(|(w, _, _)| *w);
+    let chosen = downloadables
+        .iter()
+        .find(|(w, _, _)| *w >= 256)
+        .or_else(|| downloadables.last())
+        .cloned()?;
+    Some(chosen)
 }

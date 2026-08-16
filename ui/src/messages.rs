@@ -3,6 +3,7 @@
 
 use tiny_skia::{Color, Paint, Pixmap, Transform};
 
+use crate::image::PhotoCache;
 use crate::text::TextRenderer;
 use crate::theme::{self, font, layout};
 
@@ -15,6 +16,10 @@ pub struct MsgRow {
     pub date: i32,
     /// True if the message was sent by us.
     pub out: bool,
+    /// Dimensions of an attached photo, if any.
+    pub photo: Option<(u32, u32)>,
+    /// On-disk path of the downloaded photo thumbnail, once ready.
+    pub photo_path: Option<String>,
 }
 
 /// Scrollable message list.
@@ -53,8 +58,15 @@ impl MessageList {
     /// Height of a message row after wrapping (in px).
     ///
     /// The line count is computed from the *bubble* width (which depends on
-    /// `msg.out`), otherwise sent messages would be clipped.
+    /// `msg.out`), otherwise sent messages would be clipped. Photo messages
+    /// reserve a box proportional to their aspect ratio.
     pub fn row_height(&self, text: &TextRenderer, msg: &MsgRow, width: f32) -> f32 {
+        if let Some((pw, ph)) = msg.photo {
+            let bw = Self::bubble_width(msg.out, width);
+            let aspect = ph as f32 / pw as f32;
+            let box_h = (bw * aspect).clamp(40.0, 200.0);
+            return box_h + self.row_padding * 2.0;
+        }
         if msg.text.is_empty() {
             return self.line_height + self.row_padding * 2.0;
         }
@@ -93,6 +105,7 @@ impl MessageList {
         w: f32,
         h: f32,
         scale: f32,
+        photos: &PhotoCache,
     ) {
         if w <= 0.0 || h <= 0.0 {
             return;
@@ -108,7 +121,7 @@ impl MessageList {
             let phys_top = y + cursor * s;
             if phys_top + rh * s > y {
                 if phys_top < y + h {
-                    self.draw_bubble(pixmap, text, x, phys_top, w, rh, msg, s);
+                    self.draw_bubble(pixmap, text, x, phys_top, w, rh, msg, s, photos);
                 }
             }
             if phys_top >= y + h {
@@ -124,6 +137,74 @@ impl MessageList {
         pixmap.fill_rect(tiny_skia::Rect::from_xywh(x, y, w, h).unwrap(), &bg, Transform::identity(), None);
     }
 
+    /// Draws a photo bubble: the downloaded thumbnail (or a placeholder while
+    /// it loads), rounded, fitted within the bubble.
+    fn draw_photo(
+        &self,
+        pixmap: &mut Pixmap,
+        text: &TextRenderer,
+        x: f32,
+        top: f32,
+        bw: f32,
+        box_h: f32,
+        msg: &MsgRow,
+        s: f32,
+        photos: &PhotoCache,
+    ) {
+        let box_w = bw;
+        let radius = layout::BUBBLE_RADIUS * s;
+
+        // Placeholder background (also the bubble when no image is decoded).
+        let (br, bg, bb) = if msg.out { theme::BUBBLE_SENT } else { theme::BUBBLE_RECV };
+        let mut bp = Paint::default();
+        bp.set_color(Color::from_rgba8(br, bg, bb, 255));
+        pixmap.fill_path(
+            &theme::rounded_rect(x, top, box_w, box_h, radius),
+            &bp,
+            tiny_skia::FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+
+        if let Some(path) = &msg.photo_path {
+            if let Some(img) = photos.get(path) {
+                let inset = 4.0 * s;
+                let iw = img.width() as f32;
+                let ih = img.height() as f32;
+                let max_w = (bw - 2.0 * inset).max(1.0);
+                let max_h = (box_h - 2.0 * inset).max(1.0);
+                let i_aspect = ih / iw;
+                let mut dw = max_w;
+                let mut dh = dw * i_aspect;
+                if dh > max_h {
+                    dh = max_h;
+                    dw = dh / i_aspect;
+                }
+                let ix = x + (box_w - dw) / 2.0;
+                let iy = top + (box_h - dh) / 2.0;
+                let scale = dw / iw;
+                let clip = theme::rounded_rect(ix, iy, dw, dh, radius * 0.75);
+                let mut mask =
+                    tiny_skia::Mask::new(pixmap.width(), pixmap.height()).unwrap();
+                mask.fill_path(&clip, tiny_skia::FillRule::Winding, true, Transform::identity());
+                pixmap.draw_pixmap(
+                    ix.round() as i32,
+                    iy.round() as i32,
+                    (*img).as_ref(),
+                    &tiny_skia::PixmapPaint::default(),
+                    Transform::from_scale(scale, scale),
+                    Some(&mask),
+                );
+                return;
+            }
+        }
+        // Placeholder cue while the thumbnail is not ready.
+        let cue = "…";
+        let px = font::MESSAGE * s;
+        let (tw, _) = text.measure(cue, px);
+        text.draw(pixmap, cue, x + (box_w - tw) / 2.0, top + box_h / 2.0, px, theme::TEXT_SECONDARY);
+    }
+
     fn draw_bubble(
         &self,
         pixmap: &mut Pixmap,
@@ -134,6 +215,7 @@ impl MessageList {
         height_log: f32,
         msg: &MsgRow,
         s: f32,
+        photos: &PhotoCache,
     ) {
         let pad = 10.0 * s;
         let v_pad = 8.0 * s;
@@ -146,6 +228,10 @@ impl MessageList {
         // Bubble aligned left (received) or right (sent), with rounded corners.
         let bw = Self::bubble_width(msg.out, w);
         let bx = if msg.out { x + w - bw - pad } else { x + pad };
+
+        if msg.photo.is_some() {
+            return self.draw_photo(pixmap, text, bx, bubble_top, bw, (height_log * s - 2.0 * v_pad).max(8.0), msg, s, photos);
+        }
         let radius = layout::BUBBLE_RADIUS * s;
         let (br, bg_, bb) = if msg.out {
             theme::BUBBLE_SENT
@@ -234,6 +320,8 @@ mod tests {
             text: s.to_string(),
             date: 0,
             out: false,
+            photo: None,
+            photo_path: None,
         }
     }
 
@@ -243,6 +331,8 @@ mod tests {
             text: s.to_string(),
             date: 0,
             out: true,
+            photo: None,
+            photo_path: None,
         }
     }
 
@@ -282,7 +372,7 @@ mod tests {
         let mut list = MessageList::new();
         list.rows = vec![msg("first chat message"), msg("second")];
         let mut pixmap = Pixmap::new(300, 200).unwrap();
-        list.draw(&mut pixmap, &text(), 0.0, 0.0, 300.0, 200.0, 1.0);
+        list.draw(&mut pixmap, &text(), 0.0, 0.0, 300.0, 200.0, 1.0, &PhotoCache::new());
 
         let mut changed = 0;
         for y in 0..200 {
@@ -300,11 +390,11 @@ mod tests {
     fn draw_renders_bubble_timestamps() {
         let mut list = MessageList::new();
         list.rows = vec![
-            MsgRow { id: 1, text: "hey".into(), date: 1_700_000_000, out: false },
-            MsgRow { id: 2, text: "yo".into(), date: 1_700_000_800, out: true },
+            MsgRow { id: 1, text: "hey".into(), date: 1_700_000_000, out: false, photo: None, photo_path: None },
+            MsgRow { id: 2, text: "yo".into(), date: 1_700_000_800, out: true, photo: None, photo_path: None },
         ];
         let mut pixmap = Pixmap::new(300, 200).unwrap();
-        list.draw(&mut pixmap, &text(), 0.0, 0.0, 300.0, 200.0, 1.0);
+        list.draw(&mut pixmap, &text(), 0.0, 0.0, 300.0, 200.0, 1.0, &PhotoCache::new());
         // No panic; timestamps rendered somewhere off the bubbles.
         assert!(list.rows.len() == 2);
     }
@@ -319,10 +409,12 @@ mod tests {
             text: "Hello world, this is a message.".into(),
             date: 0,
             out: false,
+            photo: None,
+            photo_path: None,
         }];
         let s = 4.0;
         let mut pixmap = Pixmap::new(300, 200).unwrap();
-        list.draw(&mut pixmap, &text(), 0.0, 0.0, 300.0, 200.0, s);
+        list.draw(&mut pixmap, &text(), 0.0, 0.0, 300.0, 200.0, s, &PhotoCache::new());
 
         // The strip strictly above the bubble top (8 px of v_pad, minus margin).
         let strip = (8.0 * s - 2.0).max(0.0) as u32;

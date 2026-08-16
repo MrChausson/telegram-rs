@@ -8,6 +8,7 @@ use tiny_skia::{Color, Paint, Pixmap, Transform};
 
 use crate::chatlist::ChatList;
 use crate::icons;
+use crate::image::PhotoCache;
 use crate::messages::MessageList;
 use crate::state::Screen;
 use crate::text::TextRenderer;
@@ -24,6 +25,7 @@ pub fn render(
     messages: &MessageList,
     status: &str,
     input: &str,
+    photos: &PhotoCache,
     scale: f32,
 ) -> Result<(), &'static str> {
     if pixmap.width() == 0 || pixmap.height() == 0 {
@@ -101,7 +103,7 @@ pub fn render(
                     );
                 }
             } else {
-                messages.draw(pixmap, text, rx, area_y, rw, bottom - area_y, s);
+                messages.draw(pixmap, text, rx, area_y, rw, bottom - area_y, s, photos);
             }
 
             draw_composer(pixmap, text, input, rx, height - layout::INPUT_H * s, rw, s);

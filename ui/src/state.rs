@@ -97,7 +97,7 @@ impl UiState {
                     }
                 }
             }
-            UiMessage::NewMessage { chat_id, id, text, date, out } => {
+            UiMessage::NewMessage { chat_id, id, text, date, out, photo } => {
                 // Open chat? Merge the message (dedupe the optimistic local
                 // send, which is tagged id=0).
                 if let Screen::Chat { id: opened, .. } = &self.screen {
@@ -111,7 +111,14 @@ impl UiState {
                             m.id = id;
                             m.out = out;
                         } else {
-                            rows.push(MsgRow { id, text, date, out });
+                            rows.push(MsgRow {
+                                id,
+                                text,
+                                date,
+                                out,
+                                photo,
+                                photo_path: None,
+                            });
                             self.needs_scroll_bottom = true;
                         }
                         return;
@@ -140,6 +147,15 @@ impl UiState {
                 // Otherwise: update the list preview.
                 if let Some(row) = self.list.rows.iter_mut().find(|r| r.id == chat_id) {
                     row.subtitle = text;
+                }
+            }
+            UiMessage::PhotoReady { chat_id, msg_id, path } => {
+                if let Screen::Chat { id: open, .. } = &self.screen {
+                    if *open == chat_id {
+                        if let Some(m) = self.messages.rows.iter_mut().find(|m| m.id == msg_id) {
+                            m.photo_path = path;
+                        }
+                    }
                 }
             }
             UiMessage::MessageDeleted { ids } => {
@@ -228,7 +244,14 @@ impl UiState {
         // updates will provide them).
         self.messages
             .rows
-            .push(MsgRow { id: 0, text: text.clone(), date: 0, out: true });
+            .push(MsgRow {
+                id: 0,
+                text: text.clone(),
+                date: 0,
+                out: true,
+                photo: None,
+                photo_path: None,
+            });
         Some(Request::SendMessage { id, text })
     }
 
@@ -327,6 +350,8 @@ mod tests {
                 text: "first".into(),
             date: 0,
                 out: false,
+            photo: None,
+            photo_path: None,
             }],
         });
 
@@ -351,6 +376,8 @@ mod tests {
                 text: "other".into(),
             date: 0,
                 out: true,
+            photo: None,
+            photo_path: None,
             }],
         });
 
@@ -388,6 +415,7 @@ mod tests {
             text: "sent from phone".into(),
             date: 0,
             out: true,
+            photo: None,
         });
 
         assert_eq!(state.messages.rows.len(), before + 1);
@@ -412,6 +440,7 @@ mod tests {
             text: "hello".into(),
             date: 0,
             out: true,
+            photo: None,
         });
 
         assert_eq!(state.messages.rows.len(), count, "no duplicate");
@@ -445,6 +474,8 @@ mod tests {
                 text: "already here".into(),
             date: 0,
                 out: false,
+            photo: None,
+            photo_path: None,
             }],
         });
     }
@@ -508,6 +539,7 @@ mod tests {
             text: "coucou en direct".into(),
             date: 0,
             out: false,
+            photo: None,
         });
 
         assert_eq!(state.messages.rows.len(), 2);
@@ -527,6 +559,7 @@ mod tests {
             text: "for Alpha".into(),
             date: 0,
             out: false,
+            photo: None,
         });
 
         let alpha = state.list.rows.iter().find(|r| r.id == 1).unwrap();
@@ -547,6 +580,7 @@ mod tests {
             text: "Gamma parle".into(),
             date: 0,
             out: false,
+            photo: None,
         });
         let gamma = state.list.rows.iter().find(|r| r.id == 3).unwrap();
         assert_eq!(gamma.unread, 1);

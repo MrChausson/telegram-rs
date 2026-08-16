@@ -1,5 +1,6 @@
 //! winit window loop + softbuffer surface + tiny-skia rendering.
 
+use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
@@ -13,6 +14,7 @@ use winit::window::{Window, WindowId};
 
 use crate::blit::blit_pixmap;
 use crate::bridge::{Request, UiMessage};
+use crate::image::PhotoCache;
 use crate::renderer::render;
 use crate::state::{Screen, UiState};
 
@@ -52,6 +54,10 @@ struct App {
     pending: Vec<UiMessage>,
     /// Pixmap reused between frames (avoids allocating on every render).
     frame: tiny_skia::Pixmap,
+    /// Decoded photo thumbnails (LRU, bounded memory).
+    photos: PhotoCache,
+    /// (chat, message) pairs already asked to be downloaded.
+    requested_photos: HashSet<(i64, i32)>,
 }
 
 impl App {
@@ -69,6 +75,8 @@ impl App {
             ui_scale: 1.0,
             pending: Vec::new(),
             frame: tiny_skia::Pixmap::new(1, 1).expect("pixmap"),
+            photos: PhotoCache::new(),
+            requested_photos: HashSet::new(),
         }
     }
 
@@ -93,6 +101,21 @@ impl App {
         if self.state.take_scroll_bottom() {
             let (lw, lh) = self.logical_size();
             self.state.scroll_messages_to_bottom(&self.text, lw, lh);
+        }
+
+        // Request thumbnails for messages that have a photo but no file yet.
+        if let Screen::Chat { id, .. } = self.state.screen {
+            for row in &self.state.messages.rows {
+                if row.photo.is_some() && row.photo_path.is_none()
+                    && !self.requested_photos.contains(&(id, row.id))
+                {
+                    self.requested_photos.insert((id, row.id));
+                    let _ = self.tx.send(Request::DownloadPhoto {
+                        chat_id: id,
+                        msg_id: row.id,
+                    });
+                }
+            }
         }
 
         // Test mode: open the target chat as soon as the list is loaded.
@@ -133,6 +156,7 @@ impl App {
             &self.state.messages,
             &self.state.status,
             &self.state.input,
+            &self.photos,
             scale,
         ) {
             eprintln!("render failed: {err}");
