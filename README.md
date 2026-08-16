@@ -1,14 +1,39 @@
-# tg — a minimalist Telegram client in Rust
+# tg — a feather-light Telegram client
 
-A lightweight, fast and minimalist **Telegram desktop client** written in Rust,
-with a **100% software renderer** (no GPU required). Built for people who care
-about resource usage: little RAM, little CPU, a clean and responsive UI — without
-the hundreds of megabytes of mainstream clients.
+A fast, minimalist **Telegram desktop client** written in Rust, rendered
+**100% on the CPU** — no GPU required. It does everything a chat client
+should while using a fraction of the RAM of mainstream clients.
+
+- ⚡ **Real-time by push** — messages arrive in < 1 s, no polling spam
+- 💾 **~10× less RAM** — ≈61 MB RSS vs 300-500 MB for Telegram Desktop
+- 🧠 **100% CPU rendering** — runs on any hardware, low power draw
+- 📦 **Tiny footprint** — ~4 MB binary, ~12 KB session file, no database
+- 🔒 **Sign in inside the app** — phone → code → 2FA, nothing else to install
+
+## Measured performance
+
+Measured on a real session (HiDPI ~2x, Arch Linux, `--release`):
+
+| Metric | tg | Telegram Desktop |
+|---|---|---|
+| **Resident memory (RSS)** | **~61 MB** | 300-500 MB |
+| **PSS** (proportional size) | **~50 MB** | — |
+| **Idle CPU** | **~0.7%** | — |
+| **Threads** | **2** | dozens |
+| **Binary size** | **~4.0 MB** | ~100+ MB |
+| **Persisted session** | **~12 KB** | SQLite DBs |
+| **Message latency** | < 1 s (push) | < 1 s |
+
+> Methodology: `VmRSS` from `/proc/<pid>/status` and the sum of `Pss:` entries
+> in `/proc/<pid>/smaps`, 15 s after launch with a chat open. VmSize (virtual
+> address space) can exceed 1 GB with mimalloc — that's reserved address
+> space, **not** physical memory (RSS/PSS are what matter).
 
 ## Quick start
 
 Every [release](https://github.com/MrChausson/telegram-rs/releases) ships
 ready-to-run binaries built by CI for Linux, macOS **and** Windows.
+Download → run → sign in.
 
 ### 1. Install
 
@@ -63,39 +88,6 @@ cargo build --release
 > time you launch — re-embed them at build time or keep the `.env` around.
 > The chat list will not open until the session is valid.
 
-## Why it's light
-
-| Choice | Detail |
-|---|---|
-| **Pure CPU rendering** | `tiny-skia` (software rasterizer) + `softbuffer`: no GPU, no platform-graphics dependency at runtime. |
-| **HiDPI-aware** | Rendered at physical resolution with scaled metrics — crisp text, no upscaling. |
-| **No database** | Session persisted in a **small binary file** (~12 KB), no SQLite. |
-| **Single network thread** | `current_thread` tokio runtime; 2 threads total (UI + network). |
-| **No continuous redraw** | On-demand rendering + glyph cache; ~0.7% CPU at idle. |
-| **Tiny binary** | `opt-level="z"`, `lto="fat"`, `panic="abort"`, stripped symbols. |
-
-## Measured performance
-
-Measured on a real session (HiDPI ~2x, Arch Linux, `--release`):
-
-| Metric | Measured value |
-|---|---|
-| **RSS** (resident memory) | **~61 MB** |
-| **PSS** (proportional set size) | **~50 MB** |
-| **Idle CPU** | **~0.7%** |
-| **Threads** | **2** |
-| **Binary size** | **~4.0 MB** |
-| **Persisted session** | **~12 KB** |
-| **Real-time message latency** | < 1 s (push stream, like official apps) |
-
-For reference, **Telegram Desktop (tdesktop, C++) easily exceeds 300-500 MB of
-RSS on an active account**. This client uses **~10x less**, with no GPU.
-
-> Methodology: `VmRSS` from `/proc/<pid>/status` and the sum of `Pss:` entries in
-> `/proc/<pid>/smaps`, 15 s after launch with a chat open. VmSize (virtual
-> address space) can exceed 1 GB with mimalloc: that's reserved address space,
-> **not** physical memory (RSS/PSS are what matters).
-
 ## Features & Roadmap to V1
 
 **V1 = feature parity with the official Telegram Desktop.** That is the
@@ -119,6 +111,17 @@ Features are shipped in batches, so releases stay few and meaningful.
 | — | Voice and video calls |
 
 Milestones will be tracked here as the project moves toward V1.
+
+## Why it's light
+
+| Choice | Detail |
+|---|---|
+| **Pure CPU rendering** | `tiny-skia` (software rasterizer) + `softbuffer`: no GPU, no platform-graphics dependency at runtime. |
+| **HiDPI-aware** | Rendered at physical resolution with scaled metrics — crisp text, no upscaling. |
+| **No database** | Session persisted in a **small binary file** (~12 KB), no SQLite. |
+| **Single network thread** | `current_thread` tokio runtime; 2 threads total (UI + network). |
+| **No continuous redraw** | On-demand rendering + glyph cache; ~0.7% CPU at idle. |
+| **Tiny binary** | `opt-level="z"`, `lto="fat"`, `panic="abort"`, stripped symbols. |
 
 ## Project layout
 
