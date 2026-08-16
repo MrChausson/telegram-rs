@@ -176,7 +176,12 @@ async fn serve(
 
     loop {
         // Drain queued requests (without blocking update reception).
-        while let Ok(req) = req_rx.try_recv() {
+        let mut pending: Vec<Request> =
+            std::iter::from_fn(|| req_rx.try_recv().ok()).collect();
+        // Open the requested chat first: thumbnails/downloads behind it in
+        // the queue must not starve the history load.
+        pending.sort_by_key(|r| !matches!(r, Request::OpenChat { .. }));
+        for req in pending {
             if let Request::OpenChat { id } = req {
                 open_id = Some(id);
                 open_sig = None;
@@ -300,7 +305,8 @@ async fn handle_request(
     peers: &HashMap<i64, (String, PeerRef)>,
 ) {
     match req {
-        Request::OpenChat { id } => match peers.get(&id) {
+        Request::OpenChat { id } => {
+            match peers.get(&id) {
             Some((title, peer_ref)) => match tg.get_messages(peer_ref, MESSAGE_LIMIT).await {
                 Ok(messages) => {
                     let rows: Vec<MsgRow> = messages
@@ -331,6 +337,7 @@ async fn handle_request(
             None => {
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
             }
+        }
         },
         Request::DownloadPhoto { chat_id, msg_id } => match peers.get(&chat_id) {
             Some((_, peer_ref)) => {

@@ -203,7 +203,8 @@ impl UiState {
     /// right conversation pane, returning the request to send (or `None`).
     pub fn click(&mut self, x: f32, y: f32, _width: f32) -> Option<Request> {
         if x < theme::layout::LIST_W {
-            let id = self.list.row_at(y)?;
+            let row_y = (y - theme::layout::LIST_HEADER_H).max(0.0);
+            let id = self.list.row_at(row_y)?;
             return self.enter_chat(id);
         }
         // Right pane: the back arrow (top-left of the chat header) clears
@@ -365,8 +366,8 @@ mod tests {
         let mut state = UiState::new();
         state.on_message(UiMessage::Dialogs(rows()));
 
-        // Row 1 (index 1): y between 64 and 128.
-        let req = state.click(50.0, 70.0, 400.0);
+        // Row 1 (index 1): y between 108 (header) and 172.
+        let req = state.click(50.0, 150.0, 400.0);
 
         assert!(matches!(
             req,
@@ -383,7 +384,7 @@ mod tests {
     fn clicking_the_back_bar_returns_to_the_list() {
         let mut state = UiState::new();
         state.on_message(UiMessage::Dialogs(rows()));
-        state.click(50.0, 70.0, 400.0);
+        state.click(50.0, 150.0, 400.0);
 
         state.click(310.0, 10.0, 400.0);
         assert_eq!(state.screen, Screen::Idle);
@@ -403,7 +404,7 @@ mod tests {
     fn received_messages_fill_the_open_chat() {
         let mut state = UiState::new();
         state.on_message(UiMessage::Dialogs(rows()));
-        state.click(50.0, 70.0, 400.0);
+        state.click(50.0, 150.0, 400.0);
 
         state.on_message(UiMessage::Messages {
             id: 2,
@@ -429,7 +430,7 @@ mod tests {
     fn messages_from_another_chat_are_ignored() {
         let mut state = UiState::new();
         state.on_message(UiMessage::Dialogs(rows()));
-        state.click(50.0, 70.0, 400.0); // opens id 2
+        state.click(50.0, 150.0, 400.0); // opens id 2
 
         state.on_message(UiMessage::Messages {
             id: 3,
@@ -528,7 +529,7 @@ mod tests {
 
     fn open_chat(state: &mut UiState) {
         state.on_message(UiMessage::Dialogs(rows()));
-        state.click(50.0, 70.0, 400.0); // opens id 2
+        state.click(50.0, 150.0, 400.0); // opens id 2
         state.on_message(UiMessage::Messages {
             id: 2,
             title: "Beta".into(),

@@ -106,9 +106,18 @@ impl App {
             self.state.scroll_messages_to_bottom(&self.text, lw, lh);
         }
 
-        // Request profile photos for chats that do not have one yet.
+        // Request profile photos for chats currently visible in the list
+        // (requesting every row at once would flood the network queue and
+        // delay the open chat request behind it).
         let mut avatar_requests = Vec::new();
-        for row in &self.state.list.rows {
+        let scroll = self.state.list.scroll;
+        let row_h = self.state.list.row_height;
+        let first = (scroll / row_h).floor().max(0.0) as usize;
+        let visible = (self.logical_size().1 / row_h).ceil() as usize + 8;
+        for i in first..first + visible {
+            let Some(row) = self.state.list.rows.get(i) else {
+                break;
+            };
             if row.avatar_path.is_none() && !self.requested_avatars.contains(&row.id) {
                 self.requested_avatars.insert(row.id);
                 avatar_requests.push(row.id);

@@ -150,23 +150,24 @@ impl ChatList {
         // Avatar: profile photo (if downloaded) or colored circle + initial.
         let av_size = layout::AVATAR_LIST * s;
         let (cx, cy) = (x + pad + av_size / 2.0, top + row_h / 2.0);
-        if let Some(path) = &row.avatar_path {
-            if let Some(img) = photos.get(path) {
-                draw_avatar_image(pixmap, cx, cy, av_size / 2.0, img);
-                return;
+        if row.avatar_path.as_ref().and_then(|p| photos.get(p)).is_some() {
+            if let Some(path) = &row.avatar_path {
+                if let Some(img) = photos.get(path) {
+                    draw_avatar_image(pixmap, cx, cy, av_size / 2.0, img);
+                }
             }
-        }
-        let idx = (hash(&row.title) as usize) % AVATAR_PALETTE.len();
-        let (ar, ag, ab) = AVATAR_PALETTE[idx];
-        let mut ap = Paint::default();
-        ap.set_color(Color::from_rgba8(ar, ag, ab, 255));
-        let circle = tiny_skia::PathBuilder::from_circle(cx, cy, av_size / 2.0).unwrap();
-        pixmap.fill_path(&circle, &ap, tiny_skia::FillRule::Winding, Transform::identity(), None);
-
-        if let Some(initial) = row.title.chars().next() {
-            let px = font::NAME * s;
-            let (tw, _) = text.measure(&initial.to_string(), px);
-            text.draw(pixmap, &initial.to_string(), cx - tw / 2.0, cy + 6.0 * s, px, theme::TEXT_PRIMARY);
+        } else {
+            let idx = hash(&row.title) as usize % AVATAR_PALETTE.len();
+            let (ar, ag, ab) = AVATAR_PALETTE[idx];
+            let mut ap = Paint::default();
+            ap.set_color(Color::from_rgba8(ar, ag, ab, 255));
+            let circle = tiny_skia::PathBuilder::from_circle(cx, cy, av_size / 2.0).unwrap();
+            pixmap.fill_path(&circle, &ap, tiny_skia::FillRule::Winding, Transform::identity(), None);
+            if let Some(initial) = row.title.chars().next() {
+                let px = font::NAME * s;
+                let (tw, _) = text.measure(&initial.to_string(), px);
+                text.draw(pixmap, &initial.to_string(), cx - tw / 2.0, cy + 6.0 * s, px, theme::TEXT_PRIMARY);
+            }
         }
 
         let text_x = x + pad * 2.0 + av_size;
@@ -237,6 +238,10 @@ fn truncate(text: &TextRenderer, s: &str, max_width: f32, px_size: f32) -> Strin
 }
 
 /// Draws a decoded avatar image clipped to a circle.
+///
+/// We fill the circle path directly with the image as a `Pattern` shader:
+/// passing a `Mask` to `draw_pixmap` renders nothing in this tiny-skia
+/// version, so the circle path keeps the mask implicitly.
 fn draw_avatar_image(pixmap: &mut Pixmap, cx: f32, cy: f32, r: f32, img: std::rc::Rc<tiny_skia::Pixmap>) {
     let iw = img.width() as f32;
     let ih = img.height() as f32;
@@ -245,18 +250,19 @@ fn draw_avatar_image(pixmap: &mut Pixmap, cx: f32, cy: f32, r: f32, img: std::rc
     let dh = ih * scale;
     let x = cx - dw / 2.0;
     let y = cy - dh / 2.0;
-    let mut mask = tiny_skia::Mask::new(pixmap.width(), pixmap.height()).unwrap();
-    if let Some(circle) = tiny_skia::PathBuilder::from_circle(cx, cy, r) {
-        mask.fill_path(&circle, tiny_skia::FillRule::Winding, true, Transform::identity());
-    }
-    pixmap.draw_pixmap(
-        x.round() as i32,
-        y.round() as i32,
+    let pattern: tiny_skia::Shader = tiny_skia::Pattern::new(
         (*img).as_ref(),
-        &tiny_skia::PixmapPaint::default(),
-        Transform::from_scale(scale, scale),
-        Some(&mask),
-    );
+        tiny_skia::SpreadMode::Pad,
+        tiny_skia::FilterQuality::Bilinear,
+        1.0,
+        Transform::from_scale(scale, scale).post_translate(x, y),
+    )
+    .into();
+    let mut paint = Paint::default();
+    paint.shader = pattern;
+    if let Some(circle) = tiny_skia::PathBuilder::from_circle(cx, cy, r) {
+        pixmap.fill_path(&circle, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
+    }
 }
 
 #[cfg(test)]
@@ -295,6 +301,7 @@ mod tests {
         assert_eq!(list.scroll, 0.0);
     }
 
+    
     #[test]
     fn draw_paints_rows_and_selection() {
         let mut list = ChatList::new();

@@ -208,13 +208,16 @@ impl Telegram {
         peer_ref: &grammers_session::types::PeerRef,
         dir: &std::path::Path,
     ) -> Result<Option<std::path::PathBuf>> {
-        if peer_ref.id.kind() != grammers_session::types::PeerKind::User {
-            return Ok(None); // groups/channels not supported yet
-        }
         std::fs::create_dir_all(dir)?;
         let cached = dir.join(format!("{}.jpg", peer_ref.id.bot_api_dialog_id()));
         if cached.exists() {
             return Ok(Some(cached));
+        }
+        if peer_ref.id.kind() != grammers_session::types::PeerKind::User {
+            return self
+                .download_chat_avatar(peer_ref, &cached)
+                .await
+                .map(|ok| ok.then_some(cached));
         }
 
         let input_user = tl::enums::InputUser::User(tl::types::InputUser {
@@ -274,6 +277,95 @@ impl Telegram {
         std::fs::write(&tmp, &bytes)?;
         std::fs::rename(&tmp, &cached)?;
         Ok(Some(cached))
+    }
+
+    /// Downloads a group/channel profile photo (small size) into `cached`.
+    ///
+    /// Groups and channels do not expose their photo through `getUserPhotos`;
+    /// we resolve the current `ChatPhoto` (photo_id) through `messages.getChats`
+    /// and download it via `inputPeerPhotoFileLocation`.
+    async fn download_chat_avatar(
+        &self,
+        peer_ref: &grammers_session::types::PeerRef,
+        cached: &std::path::Path,
+    ) -> Result<bool> {
+        let kind = peer_ref.id.kind();
+
+        let res = match kind {
+            grammers_session::types::PeerKind::Chat => {
+                self.client
+                    .invoke(&tl::functions::messages::GetChats {
+                        id: vec![peer_ref.id.bare_id()],
+                    })
+                    .await
+                    .context("fetching chat")?
+            }
+            grammers_session::types::PeerKind::Channel => {
+                let input_channel = tl::enums::InputChannel::Channel(
+                    tl::types::InputChannel {
+                        channel_id: peer_ref.id.bare_id(),
+                        access_hash: peer_ref.auth.hash(),
+                    },
+                );
+                self.client
+                    .invoke(&tl::functions::channels::GetChannels {
+                        id: vec![input_channel],
+                    })
+                    .await
+                    .context("fetching channel")?
+            }
+            _ => return Ok(false),
+        };
+
+        let input_peer = match kind {
+            grammers_session::types::PeerKind::Chat => {
+                tl::enums::InputPeer::Chat(tl::types::InputPeerChat {
+                    chat_id: peer_ref.id.bare_id(),
+                })
+            }
+            grammers_session::types::PeerKind::Channel => {
+                tl::enums::InputPeer::Channel(tl::types::InputPeerChannel {
+                    channel_id: peer_ref.id.bare_id(),
+                    access_hash: peer_ref.auth.hash(),
+                })
+            }
+            _ => return Ok(false),
+        };
+        let photo_id = res
+            .chats()
+            .into_iter()
+            .find_map(|chat| match chat {
+                tl::enums::Chat::Chat(c) => Some(c.photo),
+                tl::enums::Chat::Channel(c) => Some(c.photo),
+                _ => None,
+            })
+            .and_then(|photo| match photo {
+                tl::enums::ChatPhoto::Photo(p) => Some(p.photo_id),
+                tl::enums::ChatPhoto::Empty => None,
+            });
+        let Some(photo_id) = photo_id else {
+            return Ok(false);
+        };
+
+        let location = tl::enums::InputFileLocation::InputPeerPhotoFileLocation(
+            tl::types::InputPeerPhotoFileLocation {
+                big: false,
+                peer: input_peer,
+                photo_id,
+            },
+        );
+        let mut it = self.client.iter_download(&RawPhoto(location));
+        let mut bytes = Vec::new();
+        while let Some(chunk) = it.next().await? {
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.is_empty() {
+            return Ok(false);
+        }
+        let tmp = cached.with_extension("tmp");
+        std::fs::write(&tmp, &bytes)?;
+        std::fs::rename(&tmp, cached)?;
+        Ok(true)
     }
 }
 
