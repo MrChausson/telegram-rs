@@ -2,7 +2,7 @@
 
 use crate::bridge::{Request, UiMessage};
 use crate::chatlist::ChatList;
-use crate::messages::{MessageList, MsgRow};
+use crate::messages::{Anchor, MessageList, MsgRow, Selection};
 use std::collections::HashMap;
 
 use crate::theme::{self, layout};
@@ -59,6 +59,8 @@ pub struct UiState {
     pub viewer: Option<String>,
     /// True if a received message requires scrolling back to the bottom.
     needs_scroll_bottom: bool,
+    /// Text selection in the messages pane, if any.
+    selection: Option<Selection>,
 }
 
 impl Default for UiState {
@@ -81,6 +83,7 @@ impl UiState {
             input: String::new(),
             viewer: None,
             needs_scroll_bottom: false,
+            selection: None,
         }
     }
 
@@ -355,17 +358,19 @@ impl UiState {
     }
 
     /// Path of the photo under a click in the conversation pane (logical
-    /// coordinates), if any.
-    pub fn photo_at(&self, _x: f32, y: f32) -> Option<String> {
-        if !matches!(self.screen, Screen::Chat { .. }) {
+    /// window coordinates), if any.
+    pub fn photo_at(&self, x: f32, y: f32, width: f32) -> Option<String> {
+        if !matches!(self.screen, Screen::Chat { .. }) || x < theme::layout::LIST_W {
             return None;
         }
         let tr = crate::text::TextRenderer::new();
         let rows = &self.messages.rows;
+        let pane_w = (width - theme::layout::LIST_W).max(0.0);
+        let py = y - theme::layout::CHAT_HEADER_H;
         let mut top = -self.messages.scroll;
         for row in rows {
-            let row_h = self.messages.row_height(&tr, row, 700.0);
-            if y >= top && y < top + row_h {
+            let row_h = self.messages.row_height(&tr, row, pane_w);
+            if py >= top && py < top + row_h {
                 if row.photo.is_some() {
                     return row.photo_path.clone();
                 }
@@ -395,7 +400,8 @@ impl UiState {
         }
         if let Screen::Chat { .. } = &self.screen {
             let viewport = messages_viewport(h);
-            let content = self.messages.content_height(text, w);
+            let pane_w = (w - theme::layout::LIST_W).max(0.0);
+            let content = self.messages.content_height(text, pane_w);
             self.messages.scroll_by(dy, viewport, content);
         }
     }
@@ -453,9 +459,88 @@ impl UiState {
     pub fn scroll_messages_to_bottom(&mut self, text: &TextRenderer, w: f32, h: f32) {
         if matches!(self.screen, Screen::Chat { .. }) {
             let viewport = messages_viewport(h);
-            let content = self.messages.content_height(text, w);
+            let pane_w = (w - theme::layout::LIST_W).max(0.0);
+            let content = self.messages.content_height(text, pane_w);
             self.messages.set_scroll_bottom(content, viewport);
         }
+    }
+
+    /// Starts a text selection at a logical window point. Returns `true` when
+    /// the selection actually started (the point landed on a message).
+    pub fn begin_selection(&mut self, text: &TextRenderer, x: f32, y: f32, width: f32) -> bool {
+        let Some(a) = self.selection_anchor(text, x, y, width) else {
+            return false;
+        };
+        self.selection = Some(Selection { start: a, end: a });
+        true
+    }
+
+    /// Extends the ongoing selection to a logical window point.
+    pub fn update_selection(&mut self, text: &TextRenderer, x: f32, y: f32, width: f32) {
+        if self.selection.is_none() {
+            return;
+        }
+        if let Some(a) = self.selection_anchor(text, x, y, width) {
+            if let Some(sel) = &mut self.selection {
+                sel.end = a;
+            }
+        }
+    }
+
+    /// The active text selection, if any.
+    pub fn selection(&self) -> Option<&Selection> {
+        self.selection.as_ref()
+    }
+
+    /// Clears the current text selection, if any.
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    /// The selected text, if a non-empty selection exists.
+    pub fn selection_text(&self) -> Option<String> {
+        let sel = self.selection?;
+        let out = self.messages.selected_text(sel);
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
+    /// Text to copy on Ctrl+C: the selection, else the message under the
+    /// cursor, else the active input field.
+    pub fn copy_source(&self, text: &TextRenderer, x: f32, y: f32, width: f32) -> Option<String> {
+        if let Some(sel) = self.selection_text() {
+            return Some(sel);
+        }
+        if let Some(a) = self.selection_anchor(text, x, y, width) {
+            let row = self.messages.rows.get(a.row)?;
+            if !row.text.is_empty() {
+                return Some(row.text.clone());
+            }
+        }
+        if !self.authenticated {
+            if !self.login_input.is_empty() {
+                return Some(self.login_input.clone());
+            }
+        } else if !self.input.is_empty() {
+            return Some(self.input.clone());
+        }
+        None
+    }
+
+    /// Resolves a logical window point to a character anchor in the messages
+    /// pane (converting to pane-local coordinates), or `None` outside it.
+    fn selection_anchor(&self, text: &TextRenderer, x: f32, y: f32, width: f32) -> Option<Anchor> {
+        if !matches!(self.screen, Screen::Chat { .. }) {
+            return None;
+        }
+        let pane_w = (width - theme::layout::LIST_W).max(0.0);
+        if x < theme::layout::LIST_W || y < theme::layout::CHAT_HEADER_H {
+            return None;
+        }
+        self.messages.anchor_at(text, x - theme::layout::LIST_W, y - theme::layout::CHAT_HEADER_H, pane_w)
     }
 }
 
@@ -892,5 +977,104 @@ mod tests {
         });
         let gamma = state.list.rows.iter().find(|r| r.id == 3).unwrap();
         assert_eq!(gamma.unread, 1);
+    }
+
+    fn text() -> crate::text::TextRenderer {
+        crate::text::TextRenderer::new()
+    }
+
+    fn open_chat_long(state: &mut UiState) {
+        state.on_message(UiMessage::Dialogs(rows()));
+        state.click(50.0, 150.0, 400.0, 720.0); // opens id 2
+        let long = "word ".repeat(60);
+        let mut msgs = Vec::new();
+        for i in 0..30 {
+            msgs.push(MsgRow {
+                id: 1000 + i,
+                text: long.clone(),
+                date: 0,
+                out: false,
+                photo: None,
+                photo_path: None,
+            });
+        }
+        state.on_message(UiMessage::Messages {
+            id: 2,
+            title: "Beta".into(),
+            rows: msgs,
+        });
+    }
+
+    #[test]
+    fn sending_in_a_long_chat_reveals_the_new_message() {
+        let mut state = ready_state();
+        open_chat_long(&mut state);
+        state.take_scroll_bottom(); // consume the open flag
+        state.messages.scroll = 0.0; // scroll back up first
+
+        state.push_text("salut");
+        state.enter();
+
+        let w = 600.0;
+        let h = 720.0;
+        state.scroll_messages_to_bottom(&text(), w, h);
+
+        let tr = text();
+        let pane_w = w - theme::layout::LIST_W;
+        let content = state.messages.content_height(&tr, pane_w);
+        let last_h = state.messages.row_height(&tr, state.messages.rows.last().unwrap(), pane_w);
+        let viewport = messages_viewport(h);
+        let view_top = content - last_h - state.messages.scroll;
+        assert!(
+            view_top >= -0.5 && view_top + last_h <= viewport + 0.5,
+            "sent message not fully visible: top={view_top} last_h={last_h} viewport={viewport}"
+        );
+    }
+
+    #[test]
+    fn selection_begin_update_clear_lifecycle() {
+        let mut state = ready_state();
+        open_chat(&mut state); // one row "already here"
+        state.take_scroll_bottom();
+        let tr = text();
+
+        // Left pane / above header -> no selection.
+        assert!(!state.begin_selection(&tr, 100.0, 80.0, 600.0));
+        state.update_selection(&tr, 370.0, 80.0, 600.0);
+        assert!(state.selection_text().is_none());
+
+        // Begin + drag over the message text selects a range.
+        assert!(state.begin_selection(&tr, 330.0, 80.0, 600.0));
+        state.update_selection(&tr, 370.0, 80.0, 600.0);
+        let a = state.selection_text().unwrap();
+        assert!(a.starts_with("ady"));
+
+        state.clear_selection();
+        assert!(state.selection_text().is_none());
+    }
+
+    #[test]
+    fn copy_source_uses_selection_then_message_then_input() {
+        let mut state = ready_state();
+        open_chat(&mut state); // one row "already here"
+        state.take_scroll_bottom();
+        let tr = text();
+
+        state.begin_selection(&tr, 330.0, 80.0, 600.0);
+        state.update_selection(&tr, 370.0, 80.0, 600.0);
+        let sel = state.copy_source(&tr, 10.0, 10.0, 600.0).unwrap();
+        assert!(!sel.is_empty());
+
+        state.clear_selection();
+        // Hovering over the message row copies its text.
+        let from_msg = state.copy_source(&tr, 300.0, 80.0, 600.0).unwrap();
+        assert_eq!(from_msg, "already here");
+
+        // Empty input + no message under the cursor -> nothing to copy.
+        assert!(state.copy_source(&tr, 100.0, 10.0, 600.0).is_none());
+
+        // Composer text is the last fallback.
+        state.push_text("typed");
+        assert_eq!(state.copy_source(&tr, 100.0, 10.0, 600.0).unwrap(), "typed");
     }
 }

@@ -9,7 +9,7 @@ use tiny_skia::{Color, FillRule, Paint, Pixmap, Transform};
 use crate::chatlist::ChatList;
 use crate::icons;
 use crate::image::PhotoCache;
-use crate::messages::MessageList;
+use crate::messages::{MessageList, Selection};
 use crate::state::{LoginStep, Screen};
 use crate::text::TextRenderer;
 use crate::theme::{self, font, layout};
@@ -37,6 +37,7 @@ pub fn render(
     viewer: Option<&str>,
     photos: &PhotoCache,
     login: Option<LoginView<'_>>,
+    selection: Option<&Selection>,
     scale: f32,
 ) -> Result<(), &'static str> {
     if pixmap.width() == 0 || pixmap.height() == 0 {
@@ -119,7 +120,7 @@ pub fn render(
                     );
                 }
             } else {
-                messages.draw(pixmap, text, rx, area_y, rw, bottom - area_y, s, photos);
+                messages.draw(pixmap, text, rx, area_y, rw, bottom - area_y, s, photos, selection);
             }
 
             draw_composer(pixmap, text, input, rx, height - layout::INPUT_H * s, rw, s);
@@ -350,28 +351,11 @@ pub fn draw_viewer_overlay(
         None,
     );
 
-    if let Some(img) = photos.get(path) {
+if let Some(img) = photos.fitted(path, (w as f32) * 0.72, (h as f32) * 0.72) {
         let (iw, ih) = (img.width() as f32, img.height() as f32);
-        let max_w = (w as f32) * 0.72;
-        let max_h = (h as f32) * 0.72;
-        let aspect = ih / iw;
-        let mut dw = max_w;
-        let mut dh = dw * aspect;
-        if dh > max_h {
-            dh = max_h;
-            dw = dh / aspect;
-        }
-        let x0 = (w as f32 - dw) / 2.0;
-        let y0 = (h as f32 - dh) / 2.0;
-        let scale = dw / iw;
-        pixmap.draw_pixmap(
-            x0.round() as i32,
-            y0.round() as i32,
-            (*img).as_ref(),
-            &tiny_skia::PixmapPaint::default(),
-            Transform::from_scale(scale, scale),
-            None,
-        );
+        let x0 = (w as f32 - iw) / 2.0;
+        let y0 = (h as f32 - ih) / 2.0;
+        crate::image::blit_opaque(pixmap, x0.round() as i32, y0.round() as i32, &img);
     } else {
         let cue = "Loading…";
         let px = font::MESSAGE * 1.0;
@@ -430,24 +414,8 @@ fn draw_chat_header(
     let avx = x + pad * 2.0 + 16.0 * s;
     let mut drew_photo = false;
     if let Some(p) = avatar_path {
-        if let Some(img) = photos.get(p) {
-            let iw = img.width() as f32;
-            let ih = img.height() as f32;
-            let scale = ((av) / iw.max(ih)).min(1.0);
-            let dw = iw * scale;
-            let dh = ih * scale;
-            let mut mask = tiny_skia::Mask::new(pixmap.width(), pixmap.height()).unwrap();
-            if let Some(circle) = tiny_skia::PathBuilder::from_circle(avx, cy, av / 2.0) {
-                mask.fill_path(&circle, tiny_skia::FillRule::Winding, true, Transform::identity());
-            }
-            pixmap.draw_pixmap(
-                (avx - dw / 2.0).round() as i32,
-                (cy - dh / 2.0).round() as i32,
-                (*img).as_ref(),
-                &tiny_skia::PixmapPaint::default(),
-                Transform::from_scale(scale, scale),
-                Some(&mask),
-            );
+        if let Some(img) = photos.fitted(p, av, av) {
+            crate::image::draw_circle_image(pixmap, avx, cy, av / 2.0, &img);
             drew_photo = true;
         }
     }
@@ -544,4 +512,78 @@ fn draw_composer(pixmap: &mut Pixmap, text: &TextRenderer, input: &str, x: f32, 
     let sc = tiny_skia::PathBuilder::from_circle(sendx, sendy, send / 2.0).unwrap();
     pixmap.fill_path(&sc, &sp, tiny_skia::FillRule::Winding, Transform::identity(), None);
     icons::send(pixmap, sendx, sendy, 20.0 * s, theme::TEXT_PRIMARY);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chatlist::ChatRow;
+    use crate::messages::MsgRow;
+
+    fn full_scene_pixmap() -> (Pixmap, TextRenderer, ChatList, MessageList) {
+        let mut list = ChatList::new();
+        for i in 0..6 {
+            list.rows.push(ChatRow {
+                id: i,
+                title: format!("Chat {i}"),
+                subtitle: "a preview line".into(),
+                date: 1_700_000_000 + i as i32,
+                unread: (i * 3) as i32,
+                avatar_path: None,
+            });
+        }
+        let mut messages = MessageList::new();
+        for i in 0..4 {
+            messages.rows.push(crate::messages::MsgRow {
+                id: i,
+                text: if i % 2 == 0 { "hello there".into() } else { "reply".into() },
+                date: 1_700_000_000 + i * 60,
+                out: i % 3 == 0,
+                photo: None,
+                photo_path: None,
+            });
+        }
+        (Pixmap::new(800, 600).unwrap(), TextRenderer::new(), list, messages)
+    }
+
+    #[test]
+    fn full_scene_has_no_black_or_transparent_pixels() {
+        // Regression: the sprite caches blit rows/bubbles with `blit_opaque`;
+        // any untouched transparent-black sprite region would turn the dark
+        // (but never pure black) theme background into black boxes.
+        let (mut pixmap, text, list, messages) = full_scene_pixmap();
+        let screen = Screen::Chat { id: 2, loading: false };
+        let photos = PhotoCache::new();
+        render(
+            &mut pixmap,
+            &text,
+            &list,
+            &screen,
+            &messages,
+            "",
+            "",
+            None,
+            &photos,
+            None,
+            None,
+            1.6,
+        )
+        .unwrap();
+
+        let mut black = 0;
+        let mut transparent = 0;
+        for y in 0..pixmap.height() {
+            for x in 0..pixmap.width() {
+                let p = pixmap.pixel(x, y).unwrap();
+                if (p.red(), p.green(), p.blue()) == (0, 0, 0) {
+                    black += 1;
+                }
+                if p.alpha() != 255 {
+                    transparent += 1;
+                }
+            }
+        }
+        assert_eq!(black, 0, "{black} black pixels in the full frame");
+        assert_eq!(transparent, 0, "{transparent} transparent pixels in the full frame");
+    }
 }

@@ -1,5 +1,9 @@
 //! Scrollable chat list: pure rendering into a `Pixmap`, testable off-screen.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use tiny_skia::{Color, Paint, Pixmap, Transform};
 
 use crate::image::PhotoCache;
@@ -25,6 +29,11 @@ pub struct ChatList {
     pub scroll: f32,
     pub row_height: f32,
     pub padding: f32,
+    /// Per-row rendered sprites (one pixmap per visible row), so scrolling a
+    /// large window re-blits rows instead of compositing their text again.
+    /// Keyed by (content signature, id, scale, width); a changed row (new
+    /// thumbnail, edit) produces a new key so stale sprites are never reused.
+    sprites: RefCell<HashMap<u64, (u32, u32, Rc<Pixmap>)>>,
 }
 
 pub const AVATAR_PALETTE: [(u8, u8, u8); 6] = [
@@ -49,6 +58,7 @@ impl ChatList {
             scroll: 0.0,
             row_height: 64.0,
             padding: 14.0,
+            sprites: RefCell::new(HashMap::new()),
         }
     }
 
@@ -128,32 +138,105 @@ impl ChatList {
         selected: Option<i64>,
         photos: &PhotoCache,
     ) {
-        // Selected highlight.
-        if selected == Some(row.id) {
-            let mut sel = Paint::default();
-            sel.set_color(Color::from_rgba8(
-                theme::ROW_SELECTED.0,
-                theme::ROW_SELECTED.1,
-                theme::ROW_SELECTED.2,
-                255,
-            ));
-            pixmap.fill_rect(
-                tiny_skia::Rect::from_xywh(x, top, w, row_h).unwrap(),
-                &sel,
-                Transform::identity(),
-                None,
-            );
+        let key = self.row_key(row, selected, s, w, row_h);
+        let (bw, bh) = (w.round() as u32, row_h.round() as u32);
+        if let Some((cw, ch, sprite)) = self.sprites.borrow().get(&key) {
+            if *cw == bw && *ch == bh {
+                crate::image::blit_opaque(
+                    pixmap,
+                    x.round() as i32,
+                    top.round() as i32,
+                    sprite,
+                );
+                return;
+            }
         }
+
+        if let Some(mut sprite) = Pixmap::new(bw, bh) {
+            self.paint_row(&mut sprite, text, 0.0, 0.0, w, row_h, row, s, selected, photos);
+            crate::image::blit_opaque(pixmap, x.round() as i32, top.round() as i32, &sprite);
+            let mut sprites = self.sprites.borrow_mut();
+            if sprites.len() > 256 {
+                sprites.clear();
+            }
+            sprites.insert(key, (bw, bh, Rc::new(sprite)));
+        } else {
+            // Allocation failed: fall back to a direct draw.
+            self.paint_row(pixmap, text, x, top, w, row_h, row, s, selected, photos);
+        }
+    }
+
+    /// Stable hash key for a row sprite: id, all displayed fields, selection
+    /// state, scale and width. Any content change yields a new key, so stale
+    /// sprites are never reused.
+    fn row_key(&self, row: &ChatRow, selected: Option<i64>, s: f32, w: f32, row_h: f32) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ (row.id as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        for b in row.title.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100_0000_01b3);
+        }
+        for b in row.subtitle.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100_0000_01b3);
+        }
+        h ^= row.date as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+        h ^= row.unread as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+        if let Some(p) = &row.avatar_path {
+            for b in p.bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        h ^= (selected == Some(row.id)) as u64;
+        h ^= (s.to_bits() as u64) << 24;
+        h ^= (w.to_bits() as u64) << 8;
+        h ^= row_h.to_bits() as u64;
+        h
+    }
+
+    /// Paints one chat row into `pixmap` (destination coordinates absolute,
+    /// e.g. within a sprite the row starts at (0,0)).
+    fn paint_row(
+        &self,
+        pixmap: &mut Pixmap,
+        text: &TextRenderer,
+        x: f32,
+        top: f32,
+        w: f32,
+        row_h: f32,
+        row: &ChatRow,
+        s: f32,
+        selected: Option<i64>,
+        photos: &PhotoCache,
+    ) {
+        // Row background: LIST_BG, or ROW_SELECTED when highlighted. Filling
+        // here keeps every row opaque, so blitting a row sprite never leaves
+        // transparent (black) pixels over the list background.
+        let (br, bg, bb) = if selected == Some(row.id) {
+            theme::ROW_SELECTED
+        } else {
+            theme::LIST_BG
+        };
+        let mut bgp = Paint::default();
+        bgp.set_color(Color::from_rgba8(br, bg, bb, 255));
+        pixmap.fill_rect(
+            tiny_skia::Rect::from_xywh(x, top, w, row_h).unwrap(),
+            &bgp,
+            Transform::identity(),
+            None,
+        );
 
         let pad = self.padding * s;
 
         // Avatar: profile photo (if downloaded) or colored circle + initial.
         let av_size = layout::AVATAR_LIST * s;
         let (cx, cy) = (x + pad + av_size / 2.0, top + row_h / 2.0);
-        if row.avatar_path.as_ref().and_then(|p| photos.get(p)).is_some() {
+        if row.avatar_path.as_ref().and_then(|p| photos.fitted(p, av_size, av_size)).is_some() {
             if let Some(path) = &row.avatar_path {
-                if let Some(img) = photos.get(path) {
-                    draw_avatar_image(pixmap, cx, cy, av_size / 2.0, img);
+                if let Some(img) = photos.fitted(path, av_size, av_size) {
+                    crate::image::draw_circle_image(pixmap, cx, cy, av_size / 2.0, &img);
                 }
             }
         } else {
@@ -237,34 +320,6 @@ fn truncate(text: &TextRenderer, s: &str, max_width: f32, px_size: f32) -> Strin
     format!("{out}{ellipsis}")
 }
 
-/// Draws a decoded avatar image clipped to a circle.
-///
-/// We fill the circle path directly with the image as a `Pattern` shader:
-/// passing a `Mask` to `draw_pixmap` renders nothing in this tiny-skia
-/// version, so the circle path keeps the mask implicitly.
-fn draw_avatar_image(pixmap: &mut Pixmap, cx: f32, cy: f32, r: f32, img: std::rc::Rc<tiny_skia::Pixmap>) {
-    let iw = img.width() as f32;
-    let ih = img.height() as f32;
-    let scale = ((r * 2.0) / iw.max(ih)).min(1.0);
-    let dw = iw * scale;
-    let dh = ih * scale;
-    let x = cx - dw / 2.0;
-    let y = cy - dh / 2.0;
-    let pattern: tiny_skia::Shader = tiny_skia::Pattern::new(
-        (*img).as_ref(),
-        tiny_skia::SpreadMode::Pad,
-        tiny_skia::FilterQuality::Bilinear,
-        1.0,
-        Transform::from_scale(scale, scale).post_translate(x, y),
-    )
-    .into();
-    let mut paint = Paint::default();
-    paint.shader = pattern;
-    if let Some(circle) = tiny_skia::PathBuilder::from_circle(cx, cy, r) {
-        pixmap.fill_path(&circle, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +374,36 @@ mod tests {
             }
         }
         assert!(changed > 500);
+    }
+
+    #[test]
+    fn sprites_never_leave_black_pixels_in_the_list_background() {
+        // Regression: rows are drawn into a pre-rendered sprite and blitted
+        // with `blit_opaque`. If the sprite's untouched pixels stay transparent
+        // (0,0,0,0), the raw copy would paint black over the (dark but not
+        // black) list background. Every visible row must be opaque.
+        let mut list = ChatList::new();
+        list.rows = (0..8).map(|i| row(&format!("Chat {i}"))).collect();
+        let mut pixmap = Pixmap::new(300, 260).unwrap();
+        list.draw(&mut pixmap, &text(), 0.0, 0.0, 300.0, 260.0, 1.0, None, &PhotoCache::new());
+
+        let mut black = 0;
+        let mut bg_missing = 0;
+        for y in 0..260 {
+            for x in 0..300 {
+                let p = pixmap.pixel(x, y).unwrap();
+                // Pure black is never part of the theme.
+                if (p.red(), p.green(), p.blue()) == (0, 0, 0) {
+                    black += 1;
+                }
+                // Rows must be opaque (not transparent pixels leaking through).
+                if p.alpha() != 255 {
+                    bg_missing += 1;
+                }
+            }
+        }
+        assert_eq!(black, 0, "{black} black pixels leaked into the chat list");
+        assert_eq!(bg_missing, 0, "{bg_missing} transparent pixels leaked into the chat list");
     }
 
     #[test]

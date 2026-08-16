@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use fontdue::{Font, FontSettings};
 use tiny_skia::{Pixmap, PremultipliedColorU8};
@@ -24,7 +25,7 @@ fn normalize(ch: char) -> char {
 /// the font every frame.
 pub struct TextRenderer {
     fonts: Vec<Font>,
-    cache: RefCell<HashMap<(char, u32), CachedGlyph>>,
+    cache: RefCell<HashMap<(char, u32), Rc<CachedGlyph>>>,
 }
 
 struct CachedGlyph {
@@ -66,20 +67,21 @@ impl TextRenderer {
             .unwrap_or(&self.fonts[0])
     }
 
-    /// Glyph rasterization (cached per (character, size)).
-    fn cached_glyph(&self, ch: char, px: f32) -> (fontdue::Metrics, Vec<u8>) {
+    /// Glyph metrics + coverage (cached per (character, size)).
+    fn cached_glyph(&self, ch: char, px: f32) -> Rc<CachedGlyph> {
         let key = (ch, (px * 4.0).round() as u32);
         if let Some(g) = self.cache.borrow().get(&key) {
-            return (g.metrics, g.coverage.clone());
+            return Rc::clone(g);
         }
         let font = self.glyph_font(ch);
         let (metrics, coverage) = font.rasterize(ch, px);
+        let g = Rc::new(CachedGlyph { metrics, coverage });
         let mut cache = self.cache.borrow_mut();
         if cache.len() >= CACHE_MAX {
             cache.clear();
         }
-        cache.insert(key, CachedGlyph { metrics, coverage: coverage.clone() });
-        (metrics, coverage)
+        cache.insert(key, Rc::clone(&g));
+        g
     }
 
     /// Width (in px) of a string and line height at size `px`.
@@ -87,7 +89,7 @@ impl TextRenderer {
         let width: f32 = s
             .chars()
             .map(normalize)
-            .map(|c| self.cached_glyph(c, px).0.advance_width)
+            .map(|c| self.cached_glyph(c, px).metrics.advance_width)
             .sum();
         let height = self
             .fonts[0]
@@ -97,11 +99,18 @@ impl TextRenderer {
         (width, height)
     }
 
+    /// Width (in px) of a single character at size `px`.
+    #[inline]
+    pub fn char_width(&self, ch: char, px: f32) -> f32 {
+        self.cached_glyph(normalize(ch), px).metrics.advance_width
+    }
+
     /// Draws `s` into `pixmap`, the baseline starting at `(x, y)`.
     pub fn draw(&self, pixmap: &mut Pixmap, s: &str, x: f32, y: f32, px: f32, color: (u8, u8, u8)) {
         let mut pen_x = x;
         for ch in s.chars().map(normalize) {
-            let (metrics, coverage) = self.cached_glyph(ch, px);
+            let g = self.cached_glyph(ch, px);
+            let metrics = g.metrics;
             // `ymin` is the offset of the glyph's bottom edge from the baseline
             // (negative = descent below the baseline). In screen coordinates
             // (y grows downward): bottom = baseline − ymin. Round-bottomed
@@ -115,7 +124,7 @@ impl TextRenderer {
                 y.round() as i32 - ymin - metrics.height as i32,
                 metrics.width,
                 metrics.height,
-                &coverage,
+                &g.coverage,
                 color,
             );
             pen_x += metrics.advance_width;

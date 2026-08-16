@@ -407,8 +407,9 @@ fn media_downloadable(media: Option<&Media>) -> Option<PhotoSize> {
     Some(size)
 }
 
-/// Chooses a `PhotoSize`: the smallest downloadable one of at least 256 px
-/// wide, otherwise the largest available. Returns `(width, height, size)`.
+/// Chooses a `PhotoSize`: the smallest downloadable one of at least 512 px
+/// wide (crisp enough for a preview), otherwise the largest available.
+/// Returns `(width, height, size)`.
 fn pick_photo_size(photo: &Photo) -> Option<(u32, u32, PhotoSize)> {
     let thumbs = photo.thumbs();
     let mut downloadables: Vec<(u32, u32, PhotoSize)> = Vec::new();
@@ -424,7 +425,7 @@ fn pick_photo_size(photo: &Photo) -> Option<(u32, u32, PhotoSize)> {
     downloadables.sort_by_key(|(w, _, _)| *w);
     let chosen = downloadables
         .iter()
-        .find(|(w, _, _)| *w >= 256)
+        .find(|(w, _, _)| *w >= 512)
         .or_else(|| downloadables.last())
         .cloned()?;
     Some(chosen)
