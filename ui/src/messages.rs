@@ -136,7 +136,12 @@ impl MessageList {
         s: f32,
     ) {
         let pad = 10.0 * s;
-        let bubble_h = (height_log - self.row_padding) * s;
+        let v_pad = 8.0 * s;
+
+        // Bubble centered in the row height, leaving vertical padding above
+        // and below so the text (with its ascenders) stays inside.
+        let bubble_h = (height_log * s - 2.0 * v_pad).max(8.0);
+        let bubble_top = top + v_pad;
 
         // Bubble aligned left (received) or right (sent), with rounded corners.
         let bw = Self::bubble_width(msg.out, w);
@@ -149,15 +154,17 @@ impl MessageList {
         };
         let mut bp = Paint::default();
         bp.set_color(Color::from_rgba8(br, bg_, bb, 255));
-        let bubble = theme::rounded_rect(bx, top, bw, bubble_h, radius);
+        let bubble = theme::rounded_rect(bx, bubble_top, bw, bubble_h, radius);
         pixmap.fill_path(&bubble, &bp, tiny_skia::FillRule::Winding, Transform::identity(), None);
 
-        // Text with word wrap, breaking at word boundaries.
+        // Text with word wrap, breaking at word boundaries. The first baseline
+        // sits below the top of the bubble so glyph ascenders never overflow.
         let px = font::MESSAGE * s;
+        let line_h = self.line_height * s;
         let interior = bw - 28.0 * s;
-        let mut text_y = top + 8.0 * s;
+        let mut text_y = bubble_top + line_h - 4.0 * s;
         let mut remaining = msg.text.as_str();
-        while !remaining.is_empty() && text_y < top + bubble_h - 4.0 {
+        while !remaining.is_empty() && text_y <= bubble_top + bubble_h - 6.0 {
             let max_chars = estimate_chars(text, remaining, interior, px);
             let mut idx = max_chars.min(remaining.chars().count());
             let mut prefix = remaining.chars().take(idx).collect::<String>();
@@ -176,7 +183,7 @@ impl MessageList {
             }
             let rest = &remaining[prefix.len()..];
             remaining = rest.trim_start();
-            text_y += self.line_height * s;
+            text_y += line_h;
         }
 
         // Timestamp, outside the bubble (opposite side).
@@ -184,7 +191,7 @@ impl MessageList {
             let ts = theme::fmt_time(msg.date);
             let ts_px = font::TIMESTAMP * s;
             let (tw, _) = text.measure(&ts, ts_px);
-            let baseline = top + bubble_h - 6.0 * s;
+            let baseline = bubble_top + bubble_h - 6.0 * s;
             if msg.out {
                 text.draw(pixmap, &ts, bx - tw - 8.0 * s, baseline, ts_px, theme::TEXT_SECONDARY);
             } else {
@@ -299,5 +306,33 @@ mod tests {
         list.draw(&mut pixmap, &text(), 0.0, 0.0, 300.0, 200.0, 1.0);
         // No panic; timestamps rendered somewhere off the bubbles.
         assert!(list.rows.len() == 2);
+    }
+
+    #[test]
+    fn bubble_text_never_escapes_the_top_of_the_bubble() {
+        // Regression: glyph ascenders must stay inside the bubble. The top
+        // padding zone of the first row must contain no primary-text pixels.
+        let mut list = MessageList::new();
+        list.rows = vec![MsgRow {
+            id: 1,
+            text: "Hello world, this is a message.".into(),
+            date: 0,
+            out: false,
+        }];
+        let s = 4.0;
+        let mut pixmap = Pixmap::new(300, 200).unwrap();
+        list.draw(&mut pixmap, &text(), 0.0, 0.0, 300.0, 200.0, s);
+
+        // The strip strictly above the bubble top (8 px of v_pad, minus margin).
+        let strip = (8.0 * s - 2.0).max(0.0) as u32;
+        for y in 0..strip {
+            for x in 0..300 {
+                let p = pixmap.pixel(x, y).unwrap();
+                assert!(
+                    (p.red(), p.green(), p.blue()) != theme::TEXT_PRIMARY,
+                    "text pixel leaked above the bubble at ({x},{y})"
+                );
+            }
+        }
     }
 }
