@@ -168,6 +168,7 @@ impl App {
                     };
                     if let Some(id) = id {
                         if let Some(req) = self.state.enter_chat(id) {
+                            self.requested_photos.clear();
                             let _ = self.tx.send(req);
                         }
                     }
@@ -363,6 +364,11 @@ impl ApplicationHandler for App {
                     let ly = self.cursor.y as f32 / scale;
                     let req = self.state.click(lx, ly, w, h);
                     if let Some(req) = req {
+                        if matches!(req, Request::OpenChat { .. }) {
+                            // Re-entering a chat must re-request thumbnails
+                            // whose row was reset with `photo_path: None`.
+                            self.requested_photos.clear();
+                        }
                         let _ = self.tx.send(req);
                     }
                     if self.state.viewer.is_some() {

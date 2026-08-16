@@ -1,6 +1,8 @@
 //! Renders a chat's messages: rounded bubbles (right-aligned when sent by us)
 //! with word wrap, timestamps and vertical scrolling.
 
+use std::cell::RefCell;
+
 use tiny_skia::{Color, Paint, Pixmap, Transform};
 
 use crate::image::PhotoCache;
@@ -62,6 +64,9 @@ pub struct MessageList {
     pub scroll: f32,
     pub line_height: f32,
     pub row_padding: f32,
+    /// Cache of per-row heights: `(text sig, pane width, heights)`.
+    /// Rebuilt lazily only when the rows' text or the pane width changed.
+    heights: RefCell<Option<(u64, f32, Vec<f32>)>>,
 }
 
 impl Default for MessageList {
@@ -77,6 +82,7 @@ impl MessageList {
             scroll: 0.0,
             line_height: 16.0,
             row_padding: 10.0,
+            heights: RefCell::new(None),
         }
     }
 
@@ -110,12 +116,52 @@ impl MessageList {
         lines.len() as f32 * self.line_height + self.row_padding * 2.0
     }
 
-    /// Total content height.
-    pub fn content_height(&self, text: &TextRenderer, width: f32) -> f32 {
-        self.rows
+    /// Cheap signature of the rows' layout inputs (text, geometry): any change
+    /// that affects wrapping invalidates the height cache.
+    fn rows_signature(&self) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for r in &self.rows {
+            h ^= r.id as u64;
+            h = h.wrapping_mul(0x100_0000_01b3);
+            for &b in r.text.as_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100_0000_01b3);
+            }
+            h ^= r.out as u64;
+            h = h.wrapping_mul(0x100_0000_01b3);
+            if let Some((pw, ph)) = r.photo {
+                h ^= pw as u64 ^ (ph as u64) << 32;
+            }
+        }
+        h
+    }
+
+    /// Per-row wrapped heights, cached across frames (only recomputed when the
+    /// rows' content or the pane width changed). Measuring text is expensive
+    /// (~per glyph); without this cache a long chat would re-wrap every row on
+    /// every frame.
+    pub fn heights(&self, text: &TextRenderer, width: f32) -> Vec<f32> {
+        let sig = self.rows_signature();
+        {
+            let c = self.heights.borrow();
+            if let Some((s, w, heights)) = &*c {
+                if *s == sig && *w == width {
+                    return heights.clone();
+                }
+            }
+        }
+        let heights: Vec<f32> = self
+            .rows
             .iter()
             .map(|m| self.row_height(text, m, width))
-            .sum()
+            .collect();
+        *self.heights.borrow_mut() = Some((sig, width, heights.clone()));
+        heights
+    }
+
+    /// Total content height.
+    pub fn content_height(&self, text: &TextRenderer, width: f32) -> f32 {
+        self.heights(text, width).iter().sum()
     }
 
     pub fn scroll_by(&mut self, dy: f32, viewport_height: f32, content: f32) {
@@ -135,9 +181,10 @@ impl MessageList {
         if x < 0.0 || y < 0.0 {
             return None;
         }
+        let heights = self.heights(text, width);
         let mut cursor = -self.scroll;
         for (row_idx, msg) in self.rows.iter().enumerate() {
-            let rh = self.row_height(text, msg, width);
+            let rh = heights[row_idx];
             if y >= cursor && y < cursor + rh {
                 if msg.photo.is_some() || msg.text.is_empty() {
                     return None;
@@ -214,9 +261,10 @@ impl MessageList {
         let s = scale.max(0.1);
         let lw = w / s;
         // Scroll is stored in logical coordinates; `s` projects it to physical.
+        let heights = self.heights(text, lw);
         let mut cursor = -self.scroll;
         for (row_idx, msg) in self.rows.iter().enumerate() {
-            let rh = self.row_height(text, msg, lw);
+            let rh = heights[row_idx];
             let phys_top = y + cursor * s;
             if phys_top + rh * s > y {
                 if phys_top < y + h {
@@ -643,6 +691,24 @@ mod tests {
         let interior = (bw - 28.0).max(10.0);
         let lines = wrap_lines(&tr, &long, interior);
         assert_eq!(h, lines.len() as f32 * list.line_height + list.row_padding * 2.0);
+    }
+
+    #[test]
+    fn heights_cache_is_invalidated_when_rows_change() {
+        // The per-frame height cache must reflect edits: recomputing after
+        // changing a message's text yields different heights, and the same
+        // rows at the same width hit the cache (identical result).
+        let tr = text();
+        let mut list = MessageList::new();
+        list.rows = vec![msg("short"), msg(&"word ".repeat(30))];
+        let a = list.heights(&tr, 300.0);
+        // Same content -> cached, unchanged.
+        assert_eq!(a, list.heights(&tr, 300.0));
+        // Editing the long message's text changes the heights.
+        list.rows[1].text = "much shorter!".to_string();
+        let b = list.heights(&tr, 300.0);
+        assert!(b[1] < a[1], "heights not invalidated on text change");
+        assert_eq!(b[0], a[0]);
     }
 
     #[test]
