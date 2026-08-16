@@ -32,7 +32,7 @@ Categories=Network;Chat;
 StartupNotify=true
 EOF
 
-# Icone : un simple rond (générée avec XML Inkscape-like) — évite un .desktop sans image.
+# Icon: a small hand-written SVG so the .desktop entry never shows a blank image.
 ICON="$ICONDIR/tg.svg"
 cat > "$ICON" <<'EOF'
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128">
