@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use grammers_client::client::{LoginToken, PasswordToken, SignInError};
-use grammers_client::media::{Media, Photo, PhotoSize};
+use grammers_client::media::{Downloadable, Media, Photo, PhotoSize};
 use grammers_client::Client;
+use grammers_client::tl;
 use grammers_mtsender::SenderPool;
 use grammers_session::updates::UpdatesLike;
 
@@ -198,6 +199,90 @@ impl Telegram {
     pub async fn shutdown(self) {
         drop(self.client);
         let _ = self.runner.await;
+    }
+
+    /// Downloads a user's profile photo (small "a" size, ~160 px) into `dir`,
+    /// returning the saved path (or `None` for non-user peers / no photo).
+    pub async fn download_avatar(
+        &self,
+        peer_ref: &grammers_session::types::PeerRef,
+        dir: &std::path::Path,
+    ) -> Result<Option<std::path::PathBuf>> {
+        if peer_ref.id.kind() != grammers_session::types::PeerKind::User {
+            return Ok(None); // groups/channels not supported yet
+        }
+        std::fs::create_dir_all(dir)?;
+        let cached = dir.join(format!("{}.jpg", peer_ref.id.bot_api_dialog_id()));
+        if cached.exists() {
+            return Ok(Some(cached));
+        }
+
+        let input_user = tl::enums::InputUser::User(tl::types::InputUser {
+            user_id: peer_ref.id.bare_id(),
+            access_hash: peer_ref.auth.hash(),
+        });
+        let res = self
+            .client
+            .invoke(&tl::functions::photos::GetUserPhotos {
+                user_id: input_user,
+                offset: 0,
+                max_id: 0,
+                limit: 1,
+            })
+            .await
+            .context("fetching avatar")?;
+        let photos = match res {
+            tl::enums::photos::Photos::Photos(p) => p.photos,
+            tl::enums::photos::Photos::Slice(p) => p.photos,
+        };
+        let Some(base) = photos.into_iter().find_map(|p| match p {
+            tl::enums::Photo::Photo(photo) => Some(photo),
+            _ => None,
+        }) else {
+            return Ok(None);
+        };
+        // Smallest thumbnail size (or the "a" 160 px one when present).
+        let size = base
+            .sizes
+            .iter()
+            .filter_map(|s| match s {
+                tl::enums::PhotoSize::Size(s) => Some(s),
+                _ => None,
+            })
+            .min_by_key(|s| s.size);
+        let Some(size) = size else {
+            return Ok(None);
+        };
+
+        let location = tl::enums::InputFileLocation::InputPhotoFileLocation(
+            tl::types::InputPhotoFileLocation {
+                id: base.id,
+                access_hash: base.access_hash,
+                file_reference: base.file_reference.clone(),
+                thumb_size: size.r#type.clone(),
+            },
+        );
+        let mut it = self.client.iter_download(&RawPhoto(location));
+        let mut bytes = Vec::new();
+        while let Some(chunk) = it.next().await? {
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let tmp = cached.with_extension("tmp");
+        std::fs::write(&tmp, &bytes)?;
+        std::fs::rename(&tmp, &cached)?;
+        Ok(Some(cached))
+    }
+}
+
+/// Downloadable wrapper over a raw Telegram photo location.
+struct RawPhoto(tl::enums::InputFileLocation);
+
+impl Downloadable for RawPhoto {
+    fn to_raw_input_location(&self) -> Option<tl::enums::InputFileLocation> {
+        Some(self.0.clone())
     }
 }
 

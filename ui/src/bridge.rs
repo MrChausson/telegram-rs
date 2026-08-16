@@ -13,6 +13,8 @@ pub enum Request {
     SendMessage { id: i64, text: String },
     /// Downloads a message's photo thumbnail into the local cache.
     DownloadPhoto { chat_id: i64, msg_id: i32 },
+    /// Downloads a chat's profile photo thumbnail.
+    DownloadAvatar { chat_id: i64 },
 }
 
 /// Message sent by the network to the UI.
@@ -33,6 +35,8 @@ pub enum UiMessage {
     MessageEdited { chat_id: i64, id: i32, text: String, date: i32 },
     /// A photo thumbnail was downloaded (path = on-disk location).
     PhotoReady { chat_id: i64, msg_id: i32, path: Option<String> },
+    /// A profile photo thumbnail was downloaded (path = option).
+    AvatarReady { chat_id: i64, path: Option<String> },
     /// Some messages were deleted live (in the open chat).
     MessageDeleted { ids: Vec<i32> },
     /// Error to display (status).

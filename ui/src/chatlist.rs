@@ -2,6 +2,7 @@
 
 use tiny_skia::{Color, Paint, Pixmap, Transform};
 
+use crate::image::PhotoCache;
 use crate::text::TextRenderer;
 use crate::theme::{self, font, layout};
 
@@ -14,6 +15,8 @@ pub struct ChatRow {
     /// Unix timestamp of the last message (0 if none).
     pub date: i32,
     pub unread: i32,
+    /// On-disk path of the profile photo thumbnail, once ready.
+    pub avatar_path: Option<String>,
 }
 
 /// A vertical scrollable list, split into fixed-height rows.
@@ -76,6 +79,7 @@ impl ChatList {
         h: f32,
         scale: f32,
         selected: Option<i64>,
+        photos: &PhotoCache,
     ) {
         if w <= 0.0 || h <= 0.0 {
             return;
@@ -94,7 +98,7 @@ impl ChatList {
             if row_top + row_h < y {
                 continue;
             }
-            self.draw_row(pixmap, text, x, row_top, w, row_h, &self.rows[i], s, selected);
+            self.draw_row(pixmap, text, x, row_top, w, row_h, &self.rows[i], s, selected, photos);
         }
     }
 
@@ -122,6 +126,7 @@ impl ChatList {
         row: &ChatRow,
         s: f32,
         selected: Option<i64>,
+        photos: &PhotoCache,
     ) {
         // Selected highlight.
         if selected == Some(row.id) {
@@ -142,9 +147,15 @@ impl ChatList {
 
         let pad = self.padding * s;
 
-        // Avatar: colored circle + initial (photo avatars are out of MVP).
+        // Avatar: profile photo (if downloaded) or colored circle + initial.
         let av_size = layout::AVATAR_LIST * s;
         let (cx, cy) = (x + pad + av_size / 2.0, top + row_h / 2.0);
+        if let Some(path) = &row.avatar_path {
+            if let Some(img) = photos.get(path) {
+                draw_avatar_image(pixmap, cx, cy, av_size / 2.0, img);
+                return;
+            }
+        }
         let idx = (hash(&row.title) as usize) % AVATAR_PALETTE.len();
         let (ar, ag, ab) = AVATAR_PALETTE[idx];
         let mut ap = Paint::default();
@@ -225,6 +236,29 @@ fn truncate(text: &TextRenderer, s: &str, max_width: f32, px_size: f32) -> Strin
     format!("{out}{ellipsis}")
 }
 
+/// Draws a decoded avatar image clipped to a circle.
+fn draw_avatar_image(pixmap: &mut Pixmap, cx: f32, cy: f32, r: f32, img: std::rc::Rc<tiny_skia::Pixmap>) {
+    let iw = img.width() as f32;
+    let ih = img.height() as f32;
+    let scale = ((r * 2.0) / iw.max(ih)).min(1.0);
+    let dw = iw * scale;
+    let dh = ih * scale;
+    let x = cx - dw / 2.0;
+    let y = cy - dh / 2.0;
+    let mut mask = tiny_skia::Mask::new(pixmap.width(), pixmap.height()).unwrap();
+    if let Some(circle) = tiny_skia::PathBuilder::from_circle(cx, cy, r) {
+        mask.fill_path(&circle, tiny_skia::FillRule::Winding, true, Transform::identity());
+    }
+    pixmap.draw_pixmap(
+        x.round() as i32,
+        y.round() as i32,
+        (*img).as_ref(),
+        &tiny_skia::PixmapPaint::default(),
+        Transform::from_scale(scale, scale),
+        Some(&mask),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +274,7 @@ mod tests {
             subtitle: "Last message".to_string(),
             date: 1_700_000_000,
             unread: 3,
+            avatar_path: None,
         }
     }
 
@@ -265,7 +300,7 @@ mod tests {
         let mut list = ChatList::new();
         list.rows = (0..5).map(|i| row(&format!("Chat {i}"))).collect();
         let mut pixmap = Pixmap::new(300, 200).unwrap();
-        list.draw(&mut pixmap, &text(), 0.0, 0.0, 300.0, 200.0, 1.0, Some(6));
+        list.draw(&mut pixmap, &text(), 0.0, 0.0, 300.0, 200.0, 1.0, Some(6), &PhotoCache::new());
 
         let mut changed = 0;
         for y in 0..200 {

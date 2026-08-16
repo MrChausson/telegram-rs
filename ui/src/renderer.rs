@@ -56,7 +56,7 @@ pub fn render(
         Screen::Idle => None,
     };
     let list_h = (height - layout::LIST_HEADER_H * s).max(0.0);
-    list.draw(pixmap, text, 0.0, layout::LIST_HEADER_H * s, list_w, list_h, s, selected);
+    list.draw(pixmap, text, 0.0, layout::LIST_HEADER_H * s, list_w, list_h, s, selected, photos);
 
     // Divider between the panes.
     {
@@ -84,14 +84,11 @@ pub fn render(
             );
         }
         Screen::Chat { id, loading } => {
-            let title = list
-                .rows
-                .iter()
-                .find(|r| r.id == *id)
-                .map(|r| r.title.clone())
-                .unwrap_or_default();
+            let row = list.rows.iter().find(|r| r.id == *id);
+            let title = row.map(|r| r.title.clone()).unwrap_or_default();
+            let avatar = row.and_then(|r| r.avatar_path.clone());
             let _ = loading;
-            draw_chat_header(pixmap, text, &title, rx, rw, s);
+            draw_chat_header(pixmap, text, &title, rx, rw, s, photos, avatar.as_deref());
 
             let area_y = layout::CHAT_HEADER_H * s;
             let bottom = (height - (layout::INPUT_H + layout::MESSAGES_BOTTOM_GAP) * s).max(area_y + 1.0);
@@ -194,7 +191,16 @@ fn draw_list_header(pixmap: &mut Pixmap, text: &TextRenderer, x: f32, y: f32, w:
 }
 
 /// Right pane header: back, avatar, name + status, search/info icons.
-fn draw_chat_header(pixmap: &mut Pixmap, text: &TextRenderer, title: &str, x: f32, w: f32, s: f32) {
+fn draw_chat_header(
+    pixmap: &mut Pixmap,
+    text: &TextRenderer,
+    title: &str,
+    x: f32,
+    w: f32,
+    s: f32,
+    photos: &PhotoCache,
+    avatar_path: Option<&str>,
+) {
     let h = layout::CHAT_HEADER_H * s;
     let mut bg = Paint::default();
     bg.set_color(color(theme::LIST_BG));
@@ -206,17 +212,41 @@ fn draw_chat_header(pixmap: &mut Pixmap, text: &TextRenderer, title: &str, x: f3
     let cy = h / 2.0;
     icons::back(pixmap, back_cx, cy, 18.0 * s, theme::ICON);
 
-    // Avatar (placeholder initial) — square for now, tinted by title.
+    // Avatar: profile photo (cached) or accent initial.
     let av = layout::AVATAR_CHAT * s;
     let avx = x + pad * 2.0 + 16.0 * s;
-    let mut ap = Paint::default();
-    ap.set_color(color(theme::ACCENT));
-    let circle = tiny_skia::PathBuilder::from_circle(avx, cy, av / 2.0).unwrap();
-    pixmap.fill_path(&circle, &ap, tiny_skia::FillRule::Winding, Transform::identity(), None);
-    if let Some(initial) = title.chars().next() {
-        let px = font::NAME * s;
-        let (tw, _) = text.measure(&initial.to_string(), px);
-        text.draw(pixmap, &initial.to_string(), avx - tw / 2.0, cy + 6.0 * s, px, theme::TEXT_PRIMARY);
+    let mut drew_photo = false;
+    if let Some(p) = avatar_path {
+        if let Some(img) = photos.get(p) {
+            let iw = img.width() as f32;
+            let ih = img.height() as f32;
+            let scale = ((av) / iw.max(ih)).min(1.0);
+            let dw = iw * scale;
+            let dh = ih * scale;
+            let mut mask = tiny_skia::Mask::new(pixmap.width(), pixmap.height()).unwrap();
+            if let Some(circle) = tiny_skia::PathBuilder::from_circle(avx, cy, av / 2.0) {
+                mask.fill_path(&circle, tiny_skia::FillRule::Winding, true, Transform::identity());
+            }
+            pixmap.draw_pixmap(
+                (avx - dw / 2.0).round() as i32,
+                (cy - dh / 2.0).round() as i32,
+                (*img).as_ref(),
+                &tiny_skia::PixmapPaint::default(),
+                Transform::from_scale(scale, scale),
+                Some(&mask),
+            );
+            drew_photo = true;
+        }
+    }
+    if !drew_photo {
+        let mut ap = Paint::default();
+        ap.set_color(color(theme::ACCENT));
+        let circle = tiny_skia::PathBuilder::from_circle(avx, cy, av / 2.0).unwrap();
+        pixmap.fill_path(&circle, &ap, tiny_skia::FillRule::Winding, Transform::identity(), None);
+        if let Some(initial) = title.chars().next() {
+            let (tw, _) = text.measure(&initial.to_string(), font::NAME * s);
+            text.draw(pixmap, &initial.to_string(), avx - tw / 2.0, cy + 6.0 * s, font::NAME * s, theme::TEXT_PRIMARY);
+        }
     }
 
     // Name.

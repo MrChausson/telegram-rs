@@ -58,6 +58,8 @@ struct App {
     photos: PhotoCache,
     /// (chat, message) pairs already asked to be downloaded.
     requested_photos: HashSet<(i64, i32)>,
+    /// Chat ids already asked for a profile photo.
+    requested_avatars: HashSet<i64>,
 }
 
 impl App {
@@ -77,6 +79,7 @@ impl App {
             frame: tiny_skia::Pixmap::new(1, 1).expect("pixmap"),
             photos: PhotoCache::new(),
             requested_photos: HashSet::new(),
+            requested_avatars: HashSet::new(),
         }
     }
 
@@ -101,6 +104,18 @@ impl App {
         if self.state.take_scroll_bottom() {
             let (lw, lh) = self.logical_size();
             self.state.scroll_messages_to_bottom(&self.text, lw, lh);
+        }
+
+        // Request profile photos for chats that do not have one yet.
+        let mut avatar_requests = Vec::new();
+        for row in &self.state.list.rows {
+            if row.avatar_path.is_none() && !self.requested_avatars.contains(&row.id) {
+                self.requested_avatars.insert(row.id);
+                avatar_requests.push(row.id);
+            }
+        }
+        for id in avatar_requests {
+            let _ = self.tx.send(Request::DownloadAvatar { chat_id: id });
         }
 
         // Request thumbnails for messages that have a photo but no file yet.

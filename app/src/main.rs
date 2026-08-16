@@ -113,6 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 subtitle: d.last_message.clone().unwrap_or_default(),
                                 date: d.last_date.unwrap_or(0),
                                 unread: d.unread_count,
+                                avatar_path: None,
                             }
                         })
                         .collect();
@@ -343,6 +344,17 @@ async fn handle_request(
                     msg_id,
                     path,
                 });
+            }
+            None => {}
+        },
+        Request::DownloadAvatar { chat_id } => match peers.get(&chat_id) {
+            Some((_, peer_ref)) => {
+                let dir = cache_dir().join("avatars");
+                let path = match tg.download_avatar(peer_ref, &dir).await {
+                    Ok(p) => p.map(|p| p.to_string_lossy().into_owned()),
+                    Err(_) => None,
+                };
+                let _ = ui_tx.send(UiMessage::AvatarReady { chat_id, path });
             }
             None => {}
         },

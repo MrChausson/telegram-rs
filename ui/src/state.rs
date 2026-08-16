@@ -172,6 +172,11 @@ impl UiState {
                     row.subtitle = text;
                 }
             }
+            UiMessage::AvatarReady { chat_id, path } => {
+                if let Some(row) = self.list.rows.iter_mut().find(|r| r.id == chat_id) {
+                    row.avatar_path = path;
+                }
+            }
             UiMessage::PhotoReady { chat_id, msg_id, path } => {
                 if let Screen::Chat { id: open, .. } = &self.screen {
                     if *open == chat_id {
@@ -334,6 +339,7 @@ mod tests {
                 subtitle: "hi".into(),
                 date: 0,
                 unread: 0,
+                avatar_path: None,
             },
             ChatRow {
                 id: 2,
@@ -341,6 +347,7 @@ mod tests {
                 subtitle: "hey".into(),
                 date: 0,
                 unread: 2,
+                avatar_path: None,
             },
             ChatRow {
                 id: 3,
@@ -348,6 +355,7 @@ mod tests {
                 subtitle: "hello".into(),
                 date: 0,
                 unread: 0,
+                avatar_path: None,
             },
         ]
     }
