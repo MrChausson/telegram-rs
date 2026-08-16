@@ -88,29 +88,32 @@ cargo build --release
 > time you launch — re-embed them at build time or keep the `.env` around.
 > The chat list will not open until the session is valid.
 
-## Features & Roadmap to V1
+## Roadmap to V1
 
-**V1 = feature parity with the official Telegram Desktop.** That is the
-target; below is where the project stands today compared to what V1 will bring.
-Features are shipped in batches, so releases stay few and meaningful.
+**V1 = full parity with the official Telegram Desktop.** Features ship in
+batches — each release moves the needle, not dribbles.
 
-| Today (v0.2.1) | Planned for V1 (parity with Telegram Desktop) |
+### ✅ Already there (v0.2.1)
+
+- 💬 **Text messaging** — real-time push, < 1 s
+- 🖼️ **Avatars** — users, groups and channels
+- 📸 **Photos** — thumbnails + full-screen viewer
+- ✏️ **Live sync** — edits and deletions from any device
+- 🔑 **In-app sign-in** — phone → code → 2FA, session persisted
+
+### 🚧 Next up
+
+| Area | In V1 |
 |---|---|
-| Sign-in inside the app (phone → code → 2FA), persisted session | QR-code login, log out, multiple accounts, active-session management |
-| Chat list: avatars, previews, unread counts, scrolling | Search, chat folders/archive, pinning, mute |
-| Text messages, **real-time push** | Replies, forwards, editing/deleting your own messages, drafts, scheduled messages, polls |
-| Photo thumbnails + full-screen photo viewer | Sending photos/videos/files, full-resolution downloads, stickers, GIFs, custom emoji, voice messages |
-| Live message edits & deletions (from other devices) | Editing and deleting messages from this client |
-| Groups & channels (read + send) | Creating and managing groups/channels, members, admin tools, topics/threads |
-| Message timestamps | Date separators, sender names in groups, clickable links, text formatting |
-| Dark theme | Light theme, settings screen, keyboard shortcuts, clipboard & context menus, text selection |
-| Per-user data dir, HiDPI, 2 threads, ~61 MB RSS | Notifications + system tray, autostart, window-state persistence, audio |
-| — | Typing indicator, read receipts, online status, mark-as-read |
-| — | Global and in-chat message search |
-| — | Secret (end-to-end) chats |
-| — | Voice and video calls |
-
-Milestones will be tracked here as the project moves toward V1.
+| 📤 Media | Send photos, videos, files, voice messages · stickers, GIFs, custom emoji |
+| 💬 Messaging | Replies, forwards, edit & delete your own messages, drafts, scheduling, polls |
+| 🔍 Search | Global and in-chat search |
+| 👥 Groups | Create and manage groups/channels, members, admin tools, topics |
+| 🟢 Presence | Typing indicator, read receipts, online status, mark-as-read |
+| 🎨 Experience | Light theme, settings, keyboard shortcuts, notifications + tray |
+| 👤 Accounts | QR login, logout, multiple accounts |
+| 🔐 Privacy | Secret (end-to-end) chats |
+| 📞 Calls | Voice and video calls |
 
 ## Why it's light
 
