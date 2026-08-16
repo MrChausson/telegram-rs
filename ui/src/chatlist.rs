@@ -168,11 +168,11 @@ impl ChatList {
 
         let name_max = right_edge - text_x - 60.0 * s;
         let name = truncate(text, &row.title, name_max, name_px);
-        text.draw(pixmap, &name, text_x, top + 22.0 * s, name_px, theme::TEXT_PRIMARY);
+        text.draw(pixmap, &name, text_x, top + 24.0 * s, name_px, theme::TEXT_PRIMARY);
 
         let sub_max = right_edge - text_x - 8.0 * s;
         let subtitle = truncate(text, &row.subtitle, sub_max, msg_px);
-        text.draw(pixmap, &subtitle, text_x, top + 34.0 * s, msg_px, theme::TEXT_SECONDARY);
+        text.draw(pixmap, &subtitle, text_x, top + 42.0 * s, msg_px, theme::TEXT_SECONDARY);
 
         // Timestamp (top-right).
         if row.date > 0 {

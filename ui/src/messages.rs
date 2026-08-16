@@ -36,7 +36,7 @@ impl MessageList {
         Self {
             rows: Vec::new(),
             scroll: 0.0,
-            line_height: 17.0,
+            line_height: 16.0,
             row_padding: 10.0,
         }
     }
@@ -162,9 +162,10 @@ impl MessageList {
         let px = font::MESSAGE * s;
         let line_h = self.line_height * s;
         let interior = bw - 28.0 * s;
-        let mut text_y = bubble_top + line_h - 4.0 * s;
+        // First baseline lowered so the text block sits centered in the bubble.
+        let mut text_y = bubble_top + 15.0 * s;
         let mut remaining = msg.text.as_str();
-        while !remaining.is_empty() && text_y <= bubble_top + bubble_h - 6.0 {
+        while !remaining.is_empty() && text_y <= bubble_top + bubble_h - 5.0 {
             let max_chars = estimate_chars(text, remaining, interior, px);
             let mut idx = max_chars.min(remaining.chars().count());
             let mut prefix = remaining.chars().take(idx).collect::<String>();
