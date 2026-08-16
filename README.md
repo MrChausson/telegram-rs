@@ -163,36 +163,6 @@ cargo run --release -p app
 Open a chat, send a message from your phone: it appears almost instantly (push);
 a 15 s safety net catches any missed update.
 
-## Methods
-
-Pre-built binaries for all platforms are attached to each
-[release](https://github.com/MrChausson/telegram-rs/releases):
-
-| Platform | Artifact | Contents |
-|---|---|---|
-| Linux (x86_64) | `tg-x86_64.AppImage` | Double-click, nothing to install |
-| Linux (x86_64) | `tg-linux-x86_64.tar.gz` | `app` binary + `install.sh` |
-| macOS (universal) | `tg-macos-universal.tar.gz` | Intel + Apple Silicon binary `tg` |
-| Windows (x86_64) | `tg-windows-x86_64.zip` | `tg.exe` |
-
-```bash
-# Install the tarball build to ~/.local/bin (+ menu entry)
-./install.sh
-
-# Run the development build straight from the repo
-cargo run --release -p app
-```
-
-## Notable technical decisions
-
-- **No GPU**: the entire pipeline is on the CPU — low power usage, no shell
-  graphics dependencies.
-- **Network safety net**: the push stream is the primary source; a discreet
-  refresh (15 s on the open chat, ~4 requests/min) guarantees nothing is lost
-  without spamming requests.
-- **Light session**: custom binary storage (bincode), atomic writes, saved
-  periodically so restarts don't re-sync from scratch.
-
 ## Status
 
 - **Working MVP**: read, send and receive in real time, groups and channels,
@@ -200,19 +170,6 @@ cargo run --release -p app
 - 56 unit tests (`cargo test`)
 - Tested on Arch Linux (X11/Wayland); macOS and Windows are compiled by CI on
   every push/PR as well.
-
-## CI / CD
-
-`.github/workflows/build.yml` builds on every push/PR and runs the tests on
-Linux, macOS **and** Windows. It produces per-platform artifacts:
-- Linux: `tg-linux-x86_64.tar.gz` (binary + `install.sh`) and `tg-x86_64.AppImage`;
-- macOS: `tg-macos-universal.tar.gz` (Intel + Apple Silicon via `lipo`);
-- Windows: `tg-windows-x86_64.zip` (`tg.exe`).
-
-On `v*` tags it also creates a **GitHub Release** with all three platforms'
-artifacts. Releasing a new version is done from the **Actions** tab →
-**Release** workflow → pick `patch` / `minor` / `major`; it bumps the version,
-rotates the changelog, tags, and publishes the release.
 
 ## License
 
