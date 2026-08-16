@@ -52,6 +52,13 @@ jobs:
         run: |
           rm -rf AppDir && mkdir -p AppDir/usr/bin
           cp target/release/app AppDir/usr/bin/tg
+          # AppImage runtime entry point (required for the image to launch)
+          cat > AppDir/AppRun <<'EOF'
+          #!/bin/sh
+          SELF="$(dirname "$(readlink -f "$0")")"
+          exec "$SELF/usr/bin/tg" "$@"
+          EOF
+          chmod +x AppDir/AppRun
           # Icon (PNG) + menu entry
           convert -size 256x256 xc:'#1e1f22' -fill '#32a852' \
             -font DejaVu-Sans-Bold -pointsize 140 -gravity center \
