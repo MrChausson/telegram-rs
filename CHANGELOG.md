@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- In-app sign-in: the released binary can log in by itself (phone → code →
+  two-step verification), no console helper or Rust toolchain required.
+- Per-user data directory (`.env`, session and cache) so the installed binary
+  works from anywhere; `TG_DATA_DIR` overrides it.
+- API credentials are embedded at build time from the `TG_API_ID` /
+  `TG_API_HASH` Action secrets, overridable via `.env` — the first launch
+  shows a branded login screen instead of a dead end.
+
 ## [v0.1.0] - 2026-08-16
 
 First public release of **tg**, a minimal Telegram client written in Rust,

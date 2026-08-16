@@ -15,6 +15,12 @@ pub enum Request {
     DownloadPhoto { chat_id: i64, msg_id: i32 },
     /// Downloads a chat's profile photo thumbnail.
     DownloadAvatar { chat_id: i64 },
+    /// Login step 1: request the SMS/call verification code for a phone.
+    LoginPhone { phone: String },
+    /// Login step 2: submit the received code.
+    LoginCode { code: String },
+    /// Login step 3 (2FA): submit the account password.
+    LoginPassword { password: String },
 }
 
 /// Message sent by the network to the UI.
@@ -39,6 +45,12 @@ pub enum UiMessage {
     AvatarReady { chat_id: i64, path: Option<String> },
     /// Some messages were deleted live (in the open chat).
     MessageDeleted { ids: Vec<i32> },
+    /// The server acknowledged the phone number: ask the user for the code.
+    LoginCodeRequired,
+    /// The account has a 2FA password: ask for it (hint = if any).
+    LoginPasswordRequired { hint: String },
+    /// Sign-in completed: the account is ready to use.
+    LoginOk { name: String },
     /// Error to display (status).
     Error(String),
 }

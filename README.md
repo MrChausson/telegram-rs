@@ -40,30 +40,28 @@ Expand-Archive tg-windows-x86_64.zip -DestinationPath tg
 tg\tg.exe  # or right-click → Extract and double-click tg.exe (SmartScreen: "More info" → "Run anyway")
 ```
 
-### 2. Configure your account (one time, any OS)
+### 2. First launch: sign in inside the app (any OS)
 
-The client needs API credentials and a one-time interactive login:
+On first launch the window shows a **sign-in screen** — enter your phone
+number, then the code you receive by Telegram, and (if enabled) your
+two-step verification password. The session is stored per-user (`tg` data
+directory), and the app starts signed in next time.
+
+No configuration file is needed for the released binaries: API credentials
+are embedded at build time. Custom builds can override them with a `.env`
+(next to the repository) or environment variables `API_ID` / `API_HASH`:
 
 ```bash
 git clone https://github.com/MrChausson/telegram-rs
 cd telegram-rs
-
-echo "API_ID=123456"      >> .env   # from https://my.telegram.org (API tools)
-echo "API_HASH=abcdef…"   >> .env
-
-cargo run -p tg --example login      # phone → code → 2FA; creates .tg.session
+echo "API_ID=123456"     >> .env   # from https://my.telegram.org (API tools)
+echo "API_HASH=abcdef…"  >> .env
+cargo build --release
 ```
 
-The client reads `.env` and `.tg.session` **from the directory you launch it
-in**, so keep them in the same folder as the binary, then:
-
-```bash
-# in that folder:
-./app          # Linux tarball   |  ./tg   macOS  |  tg.exe  Windows
-```
-
-> Rust is only needed for the one-time login step; an in-app login flow
-> (no cargo, from the released binary) is planned.
+> Receiving messages across sessions requires the same API credentials every
+> time you launch — re-embed them at build time or keep the `.env` around.
+> The chat list will not open until the session is valid.
 
 ## Why it's light
 

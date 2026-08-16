@@ -1,10 +1,10 @@
 //! Main binary: bridge between the network runtime (tokio) and the window (winit).
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use grammers_client::client::UpdatesConfiguration;
+use grammers_client::client::{LoginToken, PasswordToken, SignInError, UpdatesConfiguration};
 use grammers_client::update::Update;
 use grammers_session::types::PeerRef;
 use tg::client::Telegram;
@@ -19,11 +19,66 @@ use ui::chatlist::ChatRow;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use ui::messages::MsgRow;
 
-const ENV_PATH: &str = ".env";
-const SESSION_PATH: &str = ".tg.session";
+const ENV_FILE: &str = ".env";
+const SESSION_FILE: &str = ".tg.session";
 const MESSAGE_LIMIT: usize = 200;
 
-fn load_env(path: &str) -> HashMap<String, String> {
+/// Compiled-in default API credentials, injected at build time from the
+/// `TG_API_ID` / `TG_API_HASH` secrets (GitHub Actions). The end user only
+/// sees the in-app login screen; `.env` / env vars still override these.
+const DEFAULT_API_ID: Option<&str> = option_env!("TG_API_ID");
+const DEFAULT_API_HASH: Option<&str> = option_env!("TG_API_HASH");
+
+/// Per-user data directory holding `.env`, `.tg.session` and the cache so the
+/// binary works whichever directory it is launched from. Falls back to the
+/// current directory when developing (a `.env` present there).
+fn data_dir() -> PathBuf {
+    if let Some(p) = std::env::var_os("TG_DATA_DIR") {
+        return PathBuf::from(p);
+    }
+    // A `.env` in the current directory means "dev mode": keep the old
+    // behavior for the repo checkout.
+    if std::fs::metadata(ENV_FILE).is_ok() {
+        return PathBuf::from(".");
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let base: Option<PathBuf> = {
+        #[cfg(target_os = "linux")]
+        {
+            std::env::var_os("XDG_DATA_HOME")
+                .map(PathBuf::from)
+                .or_else(|| home.clone().map(|h| h.join(".local/share")))
+        }
+        #[cfg(target_os = "macos")]
+        {
+            home.clone().map(|h| h.join("Library/Application Support"))
+        }
+        #[cfg(target_os = "windows")]
+        {
+            std::env::var_os("APPDATA").map(PathBuf::from)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        {
+            home
+        }
+    };
+    base.map(|b| b.join("tg"))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn env_path() -> PathBuf {
+    data_dir().join(ENV_FILE)
+}
+
+fn session_path() -> PathBuf {
+    data_dir().join(SESSION_FILE)
+}
+
+fn cache_dir() -> PathBuf {
+    data_dir().join("data")
+}
+
+fn load_env(path: &Path) -> HashMap<String, String> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
@@ -38,16 +93,30 @@ fn load_env(path: &str) -> HashMap<String, String> {
         .collect()
 }
 
-fn var(env: &HashMap<String, String>, name: &str) -> anyhow::Result<String> {
+fn env_var(env: &HashMap<String, String>, name: &str) -> Option<String> {
     env.get(name)
         .cloned()
         .or_else(|| std::env::var(name).ok())
-        .ok_or_else(|| anyhow::anyhow!("missing variable {name} (in {ENV_PATH})"))
+        .filter(|v| !v.is_empty())
+}
+
+fn api_id(env: &HashMap<String, String>) -> anyhow::Result<i32> {
+    let raw = env_var(env, "API_ID").or_else(|| DEFAULT_API_ID.map(String::from));
+    let Some(raw) = raw else {
+        anyhow::bail!("API_ID is missing — embed it at build time or add it to .env");
+    };
+    raw.parse()
+        .map_err(|_| anyhow::anyhow!("API_ID must be a number"))
+}
+
+fn api_hash(env: &HashMap<String, String>) -> Option<String> {
+    env_var(env, "API_HASH").or_else(|| DEFAULT_API_HASH.map(String::from))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let env = load_env(ENV_PATH);
-    let api_id: i32 = var(&env, "API_ID")?.parse()?;
+    let env = load_env(&env_path());
+    let api_id: i32 = api_id(&env)?;
+    let api_hash = api_hash(&env);
     // `--open "<title>"` opens that chat at startup (useful for tests);
     // `--open-first` is a shortcut for the first chat (equivalent to
     // `--open "*"`).
@@ -60,6 +129,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         }
     }
+
+    // A pristine home for the session and the cache, regardless of the
+    // directory the binary is launched from.
+    if let Some(dir) = data_dir().parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::create_dir_all(cache_dir());
+    let session_path = session_path();
 
     let (ui_tx, ui_rx) = mpsc::unbounded_channel::<UiMessage>();
     let (req_tx, mut req_rx) = mpsc::unbounded_channel::<Request>();
@@ -75,8 +152,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build()
             .expect("tokio runtime");
         rt.block_on(async move {
-            let session = Arc::new(load_or_new(Path::new(SESSION_PATH)));
-            let tg = match Telegram::connect(session, api_id).await {
+            let session = Arc::new(load_or_new(&session_path));
+            let tg = match Telegram::connect(session.clone(), api_id).await {
                 Ok(tg) => tg,
                 Err(e) => {
                     let _ = ui_tx.send(UiMessage::Error(format!("Could not connect: {e}")));
@@ -86,11 +163,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             if !tg.is_authorized().await.unwrap_or(false) {
-                let _ = ui_tx.send(UiMessage::Error(
-                    "Not signed in. Run first: cargo run -p tg --example login".to_string(),
-                ));
-                std::future::pending::<()>().await;
-                return;
+                serve_login(&tg, api_hash.as_deref(), &ui_tx, &mut req_rx).await;
+                let _ = tg::session::save(&session, &session_path);
             }
 
             // Cache the self user: otherwise `stream_updates` never triggers
@@ -133,6 +207,126 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     ui::window::run(ui_rx, req_tx, auto_open)?;
     Ok(())
+}
+
+/// Resolves the sign-in flow, fielding the login requests until the account
+/// is authorized (or the user closes the window).
+async fn serve_login(
+    tg: &Telegram,
+    api_hash: Option<&str>,
+    ui_tx: &mpsc::UnboundedSender<UiMessage>,
+    req_rx: &mut mpsc::UnboundedReceiver<Request>,
+) {
+    let mut token: Option<LoginToken> = None;
+    let mut password: Option<PasswordToken> = None;
+
+    loop {
+        let pending: Vec<Request> = std::iter::from_fn(|| req_rx.try_recv().ok()).collect();
+        for req in pending {
+            match req {
+                Request::LoginPhone { phone } => {
+                    let Some(hash) = api_hash else {
+                        let _ = ui_tx.send(UiMessage::Error(
+                            "API_HASH is missing — rebuild with TG_API_HASH or add it to .env"
+                                .to_string(),
+                        ));
+                        continue;
+                    };
+                    match tg.request_login_code(hash, &phone).await {
+                        Ok(t) => {
+                            token = Some(t);
+                            password = None;
+                            let _ = ui_tx.send(UiMessage::LoginCodeRequired);
+                        }
+                        Err(e) => {
+                            let _ = ui_tx.send(UiMessage::Error(format!(
+                                "Could not send the code: {e}"
+                            )));
+                        }
+                    }
+                }
+                Request::LoginCode { code } => {
+                    let Some(t) = token.as_ref() else {
+                        let _ = ui_tx.send(UiMessage::Error(
+                            "No code request in progress — enter your phone again".to_string(),
+                        ));
+                        continue;
+                    };
+                    match tg.sign_in(t, &code).await {
+                        Ok(Ok(())) => {
+                            let name = me_name(tg).await;
+                            let _ = ui_tx.send(UiMessage::LoginOk { name });
+                            return;
+                        }
+                        Ok(Err(SignInError::PasswordRequired(tok))) => {
+                            let hint = tok.hint().map(|s| s.to_string()).unwrap_or_default();
+                            password = Some(tok);
+                            let _ = ui_tx.send(UiMessage::LoginPasswordRequired { hint });
+                        }
+                        Ok(Err(SignInError::InvalidCode)) => {
+                            let _ = ui_tx.send(UiMessage::Error(
+                                "Invalid code, try again".to_string(),
+                            ));
+                        }
+                        Ok(Err(SignInError::SignUpRequired)) => {
+                            let _ = ui_tx.send(UiMessage::Error(
+                                "This number is not registered. Sign up in the official Telegram app first (free)"
+                                    .to_string(),
+                            ));
+                        }
+                        Ok(Err(e)) => {
+                            let _ = ui_tx.send(UiMessage::Error(format!("Sign in failed: {e}")));
+                        }
+                        Err(e) => {
+                            let _ = ui_tx.send(UiMessage::Error(format!("Sign in failed: {e}")));
+                        }
+                    }
+                }
+                Request::LoginPassword { password: password_input } => {
+                    let Some(tok) = password.take() else {
+                        let _ = ui_tx.send(UiMessage::Error(
+                            "No password request in progress".to_string(),
+                        ));
+                        continue;
+                    };
+                    match tg.check_password(tok, &password_input).await {
+                        Ok(Ok(())) => {
+                            let name = me_name(tg).await;
+                            let _ = ui_tx.send(UiMessage::LoginOk { name });
+                            return;
+                        }
+                        Ok(Err(new_token)) => {
+                            // Wrong password: Telegram gave us a fresh token
+                            // to try again.
+                            password = Some(new_token);
+                            let _ = ui_tx.send(UiMessage::Error(
+                                "Wrong password, try again".to_string(),
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = ui_tx.send(UiMessage::Error(format!(
+                                "2FA failed: {e}"
+                            )));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Back off briefly: the winit loop sends requests lazily.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// Best-effort display name of the signed-in account.
+async fn me_name(tg: &Telegram) -> String {
+    match tg.client().get_me().await {
+        Ok(me) => me
+            .first_name()
+            .map(|f| f.to_string())
+            .unwrap_or_else(|| "your account".to_string()),
+        Err(_) => "your account".to_string(),
+    }
 }
 
 /// Network loop: handles UI requests and real-time updates.
@@ -230,7 +424,7 @@ async fn serve(
         // Periodic session save (update state, peer cache).
         if last_save.elapsed() >= save_every {
             last_save = std::time::Instant::now();
-            if let Err(e) = tg::session::save(&session, Path::new(SESSION_PATH)) {
+            if let Err(e) = tg::session::save(&session, &session_path()) {
                 eprintln!("session save failed: {e}");
             }
         }
@@ -288,13 +482,6 @@ fn handle_update(ui_tx: &mpsc::UnboundedSender<UiMessage>, update: Update) {
         }
         _ => {}
     }
-}
-
-fn cache_dir() -> std::path::PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    home.join(".cache").join("tg")
 }
 
 /// Handles a UI request.
@@ -375,5 +562,7 @@ async fn handle_request(
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
             }
         },
+        // Sign-in requests are consumed by `serve_login`; nothing to do here.
+        Request::LoginPhone { .. } | Request::LoginCode { .. } | Request::LoginPassword { .. } => {}
     }
 }

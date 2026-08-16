@@ -23,6 +23,109 @@ pub const TEXT_PRIMARY: (u8, u8, u8) = (255, 255, 255);
 pub const TEXT_SECONDARY: (u8, u8, u8) = (109, 127, 142);
 /// Composer input border.
 pub const INPUT_BORDER: (u8, u8, u8) = (58, 74, 90);
+/// Error / destructive text (login failures, status errors).
+pub const ERROR: (u8, u8, u8) = (240, 114, 124);
+
+/// Geometry of the sign-in screen (logical units), shared by the renderer
+/// and the click handler so both agree on where the widgets are.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LoginLayout {
+    /// Y of the logo circle center.
+    pub logo_cy: f32,
+    /// Baseline of the screen title.
+    pub title_y: f32,
+    /// Baseline of the step subtitle.
+    pub subtitle_y: f32,
+    /// Round input field (x, y, w, h).
+    pub field: (f32, f32, f32, f32),
+    /// Primary action button (x, y, w, h).
+    pub button: (f32, f32, f32, f32),
+    /// Baseline of the status / error line.
+    pub status_y: f32,
+    /// "Back" hit area (top-left), empty if on the first step.
+    pub back: (f32, f32, f32, f32),
+    /// Total vertical span used (for centering).
+    pub total: f32,
+}
+
+impl LoginLayout {
+    pub fn contains(rect: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
+        let (rx, ry, rw, rh) = rect;
+        x >= rx && x <= rx + rw && y >= ry && y <= ry + rh && rw > 0.0 && rh > 0.0
+    }
+}
+
+/// Computes the login-card geometry for a logical window of `w`×`h`.
+pub fn login_layout(w: f32, h: f32) -> LoginLayout {
+    let title_h = 26.0;
+    let subtitle_h = 18.0;
+    let status_h = 16.0;
+    let total = login::LOGO
+        + login::GAP_TITLE
+        + title_h
+        + login::GAP_SUBTITLE
+        + subtitle_h
+        + login::GAP_FIELD
+        + login::FIELD_H
+        + login::GAP_BUTTON
+        + login::BUTTON_H
+        + login::GAP_STATUS
+        + status_h;
+    let y0 = ((h - total) / 2.0).max(16.0);
+
+    let mut y = y0;
+    let logo_cy = y + login::LOGO / 2.0;
+    y += login::LOGO + login::GAP_TITLE;
+    let title_y = y + title_h * 0.78;
+    y += title_h + login::GAP_SUBTITLE;
+    let subtitle_y = y + subtitle_h * 0.8;
+    y += subtitle_h + login::GAP_FIELD;
+    let field = (w / 2.0 - login::FIELD_W / 2.0, y, login::FIELD_W, login::FIELD_H);
+    y += login::FIELD_H + login::GAP_BUTTON;
+    let button = (w / 2.0 - login::BUTTON_W / 2.0, y, login::BUTTON_W, login::BUTTON_H);
+    y += login::BUTTON_H + login::GAP_STATUS;
+    let status_y = y + status_h * 0.8;
+
+    LoginLayout {
+        logo_cy,
+        title_y,
+        subtitle_y,
+        field,
+        button,
+        status_y,
+        back: (16.0, 16.0, 72.0, 44.0),
+        total,
+    }
+}
+
+/// Layout tokens for the login screen.
+pub mod login {
+    /// Input field / button width.
+    pub const FIELD_W: f32 = 400.0;
+    /// Input field height.
+    pub const FIELD_H: f32 = 48.0;
+    /// Input corner radius.
+    pub const FIELD_RADIUS: f32 = 14.0;
+    /// Primary action button width.
+    pub const BUTTON_W: f32 = 400.0;
+    /// Primary action button height.
+    pub const BUTTON_H: f32 = 46.0;
+    /// Corner radius of the primary action button.
+    pub const BUTTON_RADIUS: f32 = 14.0;
+
+    /// Accent logo circle diameter.
+    pub const LOGO: f32 = 76.0;
+    /// Gap between the logo and the title.
+    pub const GAP_TITLE: f32 = 26.0;
+    /// Gap between the title and the subtitle.
+    pub const GAP_SUBTITLE: f32 = 10.0;
+    /// Gap between the subtitle and the input field.
+    pub const GAP_FIELD: f32 = 28.0;
+    /// Gap between the input field and the button.
+    pub const GAP_BUTTON: f32 = 14.0;
+    /// Gap between the button and the status line.
+    pub const GAP_STATUS: f32 = 16.0;
+}
 
 /// Layout metrics (logical units, multiplied by the UI scale when drawn).
 pub mod layout {

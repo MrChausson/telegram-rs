@@ -64,9 +64,16 @@ async fn interactive_login(tg: &Telegram, api_hash: &str) -> anyhow::Result<()> 
             Err(SignInError::PasswordRequired(password_token)) => {
                 let hint = password_token.hint().unwrap_or("none");
                 let password = prompt(&format!("2FA required (hint: {hint}): "))?;
-                tg.check_password(password_token, &password).await?;
-                println!("Signed in (2FA)!");
-                return Ok(());
+                match tg.check_password(password_token, &password).await {
+                    Ok(Ok(())) => {
+                        println!("Signed in (2FA)!");
+                        return Ok(());
+                    }
+                    Ok(Err(_)) => {
+                        anyhow::bail!("Invalid password, try again.");
+                    }
+                    Err(e) => return Err(e.into()),
+                }
             }
             Err(SignInError::InvalidCode) => {
                 println!("Invalid code, try again.");

@@ -80,12 +80,20 @@ impl Telegram {
     }
 
     /// Step 2b: sign in with the 2FA password.
-    pub async fn check_password(&self, password_token: PasswordToken, password: &str) -> Result<()> {
-        self.client
-            .check_password(password_token, password)
-            .await
-            .context("2FA sign in")
-            .map(|_| ())
+    ///
+    /// `Ok(Ok(()))` means signed in; `Ok(Err(new_token))` means the password
+    /// was wrong and Telegram supplied a fresh token to retry with.
+    pub async fn check_password(
+        &self,
+        password_token: PasswordToken,
+        password: &str,
+    ) -> Result<Result<(), PasswordToken>, anyhow::Error> {
+        match self.client.check_password(password_token, password).await {
+            Ok(_) => Ok(Ok(())),
+            Err(SignInError::InvalidPassword(new_token)) => Ok(Err(new_token)),
+            Err(SignInError::PasswordRequired(new_token)) => Ok(Err(new_token)),
+            Err(e) => Err(anyhow::anyhow!("2FA sign in: {e}")),
+        }
     }
 
     /// Lists the user's chats (dialogs), ordered by activity.

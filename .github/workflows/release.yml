@@ -107,6 +107,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build (release)
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
         run: cargo build --release
 
       - name: Tests
@@ -168,9 +171,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build (release, Intel)
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
         run: cargo build --release --target x86_64-apple-darwin
 
       - name: Build (release, Apple Silicon)
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
         run: cargo build --release --target aarch64-apple-darwin
 
       - name: Bundle universal binary and tarball
@@ -203,6 +212,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build (release)
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
         run: cargo build --release
 
       - name: Zip the binary

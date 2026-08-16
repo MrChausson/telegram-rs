@@ -127,32 +127,34 @@ impl App {
             let _ = self.tx.send(Request::DownloadAvatar { chat_id: id });
         }
 
-        // Request thumbnails for messages that have a photo but no file yet.
-        if let Screen::Chat { id, .. } = self.state.screen {
-            for row in &self.state.messages.rows {
-                if row.photo.is_some() && row.photo_path.is_none()
-                    && !self.requested_photos.contains(&(id, row.id))
-                {
-                    self.requested_photos.insert((id, row.id));
-                    let _ = self.tx.send(Request::DownloadPhoto {
-                        chat_id: id,
-                        msg_id: row.id,
-                    });
+        if self.state.authenticated {
+            // Request thumbnails for messages that have a photo but no file yet.
+            if let Screen::Chat { id, .. } = self.state.screen {
+                for row in &self.state.messages.rows {
+                    if row.photo.is_some() && row.photo_path.is_none()
+                        && !self.requested_photos.contains(&(id, row.id))
+                    {
+                        self.requested_photos.insert((id, row.id));
+                        let _ = self.tx.send(Request::DownloadPhoto {
+                            chat_id: id,
+                            msg_id: row.id,
+                        });
+                    }
                 }
             }
-        }
 
-        // Test mode: open the target chat as soon as the list is loaded.
-        if let Some(target) = &self.auto_open {
-            if let Screen::Idle = self.state.screen {
-                let id = if target == "*" {
-                    self.state.list.rows.first().map(|r| r.id)
-                } else {
-                    self.state.list.rows.iter().find(|r| &r.title == target).map(|r| r.id)
-                };
-                if let Some(id) = id {
-                    if let Some(req) = self.state.enter_chat(id) {
-                        let _ = self.tx.send(req);
+            // Test mode: open the target chat as soon as the list is loaded.
+            if let Some(target) = &self.auto_open {
+                if let Screen::Idle = self.state.screen {
+                    let id = if target == "*" {
+                        self.state.list.rows.first().map(|r| r.id)
+                    } else {
+                        self.state.list.rows.iter().find(|r| &r.title == target).map(|r| r.id)
+                    };
+                    if let Some(id) = id {
+                        if let Some(req) = self.state.enter_chat(id) {
+                            let _ = self.tx.send(req);
+                        }
                     }
                 }
             }
@@ -172,6 +174,16 @@ impl App {
         if pixmap.width() != width || pixmap.height() != height {
             pixmap = tiny_skia::Pixmap::new(width, height).expect("pixmap");
         }
+        let login = if self.state.authenticated {
+            None
+        } else {
+            Some(crate::renderer::LoginView {
+                step: &self.state.login_step,
+                input: &self.state.login_input,
+                status: &self.state.status,
+                error: self.state.login_error,
+            })
+        };
         if let Err(err) = render(
             &mut pixmap,
             &self.text,
@@ -182,6 +194,7 @@ impl App {
             &self.state.input,
             self.state.viewer.as_deref(),
             &self.photos,
+            login,
             scale,
         ) {
             eprintln!("render failed: {err}");
@@ -285,10 +298,10 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 let scale = self.ui_scale.max(0.1);
-                let (w, _) = self.logical_size();
+                let (w, h) = self.logical_size();
                 let lx = self.cursor.x as f32 / scale;
                 let ly = self.cursor.y as f32 / scale;
-                let req = self.state.click(lx, ly, w);
+                let req = self.state.click(lx, ly, w, h);
                 if let Some(req) = req {
                     let _ = self.tx.send(req);
                 }

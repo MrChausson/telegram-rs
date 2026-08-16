@@ -4,15 +4,24 @@
 //! Split-pane layout: a fixed chat-list column on the left and the open
 //! conversation (or a placeholder) on the right, like Telegram Desktop.
 
-use tiny_skia::{Color, Paint, Pixmap, Transform};
+use tiny_skia::{Color, FillRule, Paint, Pixmap, Transform};
 
 use crate::chatlist::ChatList;
 use crate::icons;
 use crate::image::PhotoCache;
 use crate::messages::MessageList;
-use crate::state::Screen;
+use crate::state::{LoginStep, Screen};
 use crate::text::TextRenderer;
 use crate::theme::{self, font, layout};
+
+/// Snapshot of the sign-in screen, drawn instead of the panes while the
+/// account is not authenticated yet.
+pub struct LoginView<'a> {
+    pub step: &'a LoginStep,
+    pub input: &'a str,
+    pub status: &'a str,
+    pub error: bool,
+}
 
 /// Draws the scene into the given `Pixmap`.
 ///
@@ -27,6 +36,7 @@ pub fn render(
     input: &str,
     viewer: Option<&str>,
     photos: &PhotoCache,
+    login: Option<LoginView<'_>>,
     scale: f32,
 ) -> Result<(), &'static str> {
     if pixmap.width() == 0 || pixmap.height() == 0 {
@@ -35,6 +45,10 @@ pub fn render(
     pixmap.fill(color(theme::CHAT_BG));
     if let Some(path) = viewer {
         draw_viewer_overlay(pixmap, text, photos, path, pixmap.width(), pixmap.height());
+        return Ok(());
+    }
+    if let Some(l) = login {
+        draw_login(pixmap, text, &l, scale);
         return Ok(());
     }
 
@@ -113,6 +127,205 @@ pub fn render(
     }
 
     Ok(())
+}
+
+/// Full-window sign-in screen: centered card with the logo, the step
+/// instructions, the input field and the primary action button.
+fn draw_login(pixmap: &mut Pixmap, text: &TextRenderer, l: &LoginView, scale: f32) {
+    let s = scale.max(0.1);
+    let w = pixmap.width() as f32;
+    let h = pixmap.height() as f32;
+    let layout = theme::login_layout(w / s, h / s);
+    let cx = w / 2.0;
+
+    // Soft halo behind the logo for a gentle "brand" focus.
+    let r = theme::login::LOGO / 2.0 * s;
+    let cy = layout.logo_cy * s;
+    let mut halo = Paint::default();
+    halo.set_color(Color::from_rgba8(theme::ACCENT.0, theme::ACCENT.1, theme::ACCENT.2, 26));
+    if let Some(halo_path) = tiny_skia::PathBuilder::from_circle(cx, cy, r * 2.1) {
+        pixmap.fill_path(&halo_path, &halo, FillRule::Winding, Transform::identity(), None);
+    }
+    let mut ring = Paint::default();
+    ring.set_color(Color::from_rgba8(theme::ACCENT.0, theme::ACCENT.1, theme::ACCENT.2, 70));
+    if let Some(ring_path) = tiny_skia::PathBuilder::from_circle(cx, cy, r * 1.25) {
+        pixmap.fill_path(&ring_path, &ring, FillRule::Winding, Transform::identity(), None);
+    }
+    let mut accent = Paint::default();
+    accent.set_color(color(theme::ACCENT));
+    if let Some(circle) = tiny_skia::PathBuilder::from_circle(cx, cy, r) {
+        pixmap.fill_path(&circle, &accent, FillRule::Winding, Transform::identity(), None);
+    }
+    text.draw(pixmap, "tg", cx - 16.0 * s, cy + 11.0 * s, font::TITLE * s, theme::TEXT_PRIMARY);
+
+    // Back navigation (2FA -> code -> phone).
+    if *l.step != LoginStep::Phone {
+        let (bx, by, _, bh) = layout.back;
+        icons::back(pixmap, (bx + 22.0) * s, (by + bh / 2.0) * s, 20.0 * s, theme::ICON);
+        text.draw(
+            pixmap,
+            "Back",
+            (bx + 34.0) * s,
+            (by + bh / 2.0 + 7.0) * s,
+            font::TIMESTAMP * s,
+            theme::ICON,
+        );
+    }
+
+    // Title (per step).
+    let title = match l.step {
+        LoginStep::Phone => "Sign in to Telegram",
+        LoginStep::Code => "Check your phone",
+        LoginStep::Password { .. } => "Two-step verification",
+    };
+    let (tw, _) = text.measure(title, font::TITLE * s);
+    text.draw(pixmap, title, cx - tw / 2.0, layout.title_y * s, font::TITLE * s, theme::TEXT_PRIMARY);
+
+    // Subtitle (instructions).
+    let subtitle = match l.step {
+        LoginStep::Phone => "We will send a code to your phone number.",
+        LoginStep::Code => "Enter the code that was sent to your Telegram.",
+        LoginStep::Password { hint } => {
+            if hint.is_empty() {
+                "This account requires an additional password."
+            } else {
+                "This account requires an additional password."
+            }
+        }
+    };
+    let (sw, _) = text.measure(subtitle, font::TIMESTAMP * s);
+    text.draw(
+        pixmap,
+        subtitle,
+        cx - sw / 2.0,
+        layout.subtitle_y * s,
+        font::TIMESTAMP * s,
+        theme::TEXT_SECONDARY,
+    );
+    if let LoginStep::Password { hint } = l.step {
+        if !hint.is_empty() {
+            let hint_text = format!("Hint: {hint}");
+            let (hw, _) = text.measure(&hint_text, font::TIMESTAMP * s);
+            text.draw(
+                pixmap,
+                &hint_text,
+                cx - hw / 2.0,
+                (layout.subtitle_y + 16.0) * s,
+                font::TIMESTAMP * s,
+                theme::TEXT_SECONDARY,
+            );
+        }
+    }
+
+    // Input field.
+    let (fx, fy, fw, fh) = layout.field;
+    draw_login_field(pixmap, text, l, fx * s, fy * s, fw * s, fh * s, s);
+
+    // Primary action button.
+    let (btx, bty, btw, bth) = layout.button;
+    let label = match l.step {
+        LoginStep::Phone => "Continue",
+        LoginStep::Code => "Log in",
+        LoginStep::Password { .. } => "Sign in",
+    };
+    let mut bp = Paint::default();
+    bp.set_color(
+        if l.error && l.input.is_empty() {
+            color(theme::ERROR)
+        } else {
+            color(theme::ACCENT)
+        },
+    );
+    let btn = theme::rounded_rect(btx * s, bty * s, btw * s, bth * s, theme::login::BUTTON_RADIUS * s);
+    pixmap.fill_path(&btn, &bp, FillRule::Winding, Transform::identity(), None);
+    let (lblw, _) = text.measure(label, font::MESSAGE * s);
+    text.draw(
+        pixmap,
+        label,
+        (btx + btw / 2.0) * s - lblw / 2.0,
+        (bty + bth / 2.0 + 5.0) * s,
+        font::MESSAGE * s,
+        theme::TEXT_PRIMARY,
+    );
+
+    // Status / error line.
+    if !l.status.is_empty() {
+        let (stw, _) = text.measure(l.status, font::TIMESTAMP * s);
+        let sc = if l.error { theme::ERROR } else { theme::TEXT_SECONDARY };
+        text.draw(
+            pixmap,
+            l.status,
+            cx - stw / 2.0,
+            layout.status_y * s,
+            font::TIMESTAMP * s,
+            sc,
+        );
+    }
+}
+
+/// Rounded input field of the sign-in screen, with a masked display for
+/// password steps.
+fn draw_login_field(
+    pixmap: &mut Pixmap,
+    text: &TextRenderer,
+    l: &LoginView,
+    x: f32,
+    y: f32,
+    field_w: f32,
+    field_h: f32,
+    s: f32,
+) {
+    let bg = color((26, 38, 52));
+    let r = theme::login::FIELD_RADIUS * s;
+    let mut fp = Paint::default();
+    fp.set_color(bg);
+    let field_path = theme::rounded_rect(x, y, field_w, field_h, r);
+    pixmap.fill_path(&field_path, &fp, FillRule::Winding, Transform::identity(), None);
+
+    // Accent border.
+    let mut bd = Paint::default();
+    bd.set_color(Color::from_rgba8(theme::ACCENT.0, theme::ACCENT.1, theme::ACCENT.2, 150));
+    let border_path = theme::rounded_rect(x + 1.0, y + 1.0, field_w - 2.0, field_h - 2.0, r - 1.0);
+    let mut stroke = tiny_skia::Stroke::default();
+    stroke.width = 1.25;
+    pixmap.stroke_path(&border_path, &bd, &stroke, Transform::identity(), None);
+
+    let px = font::MESSAGE * s;
+    let placeholder = match l.step {
+        LoginStep::Phone => "+33 6 12 34 56 78",
+        LoginStep::Code => "Code",
+        LoginStep::Password { .. } => "Password",
+    };
+    let masked = matches!(l.step, LoginStep::Password { .. });
+    let content: String = if l.input.is_empty() {
+        placeholder.to_string()
+    } else if masked {
+        l.input.chars().map(|_| '•').collect()
+    } else {
+        l.input.to_string()
+    };
+    let fg = if l.input.is_empty() {
+        theme::TEXT_SECONDARY
+    } else {
+        theme::TEXT_PRIMARY
+    };
+
+    // Keep the field readable: swap to the tail of a too-long value.
+    let max = (field_w - 28.0 * s).max(10.0);
+    let shown = if text.measure(&content, px).0 <= max {
+        content
+    } else {
+        let mut out = String::new();
+        for ch in content.chars().rev() {
+            if text.measure(&format!("{ch}{out}"), px).0 <= max {
+                out.insert(0, ch);
+            } else {
+                break;
+            }
+        }
+        out
+    };
+    text.draw(pixmap, &shown, x + 18.0 * s, y + field_h / 2.0 + 5.0 * s, px, fg);
 }
 
 fn color(c: (u8, u8, u8)) -> Color {
