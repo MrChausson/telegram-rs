@@ -69,7 +69,6 @@ def main() -> int:
     if args.dry_run:
         print(f"{major}.{minor}.{patch} -> {next_v}")
         return 0
-
     if not CHANGELOG.is_file():
         print(f"missing {CHANGELOG}", file=sys.stderr)
         return 1
@@ -100,7 +99,8 @@ def main() -> int:
     # Extract the new section into release notes for the GitHub release body.
     body = extract_section(changelog, section_header)
     RELEASE_NOTES.write_text(body)
-    print(f"{major}.{minor}.{patch} -> {next_v}")
+    print(f"{major}.{minor}.{patch} -> {next_v}", file=sys.stderr)
+    print(next_v)
     return 0
 
 
