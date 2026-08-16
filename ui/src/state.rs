@@ -107,6 +107,9 @@ impl UiState {
         match msg {
             UiMessage::Dialogs(rows) => {
                 self.list.rows = rows;
+                // A valid session already existed (restart): the chat list is
+                // the sign that the account is authenticated.
+                self.authenticated = true;
                 self.status = if self.list.rows.is_empty() {
                     "No chats".to_string()
                 } else {
