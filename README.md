@@ -1,14 +1,39 @@
-# tg — a minimalist Telegram client in Rust
+# tg — a feather-light Telegram client
 
-A lightweight, fast and minimalist **Telegram desktop client** written in Rust,
-with a **100% software renderer** (no GPU required). Built for people who care
-about resource usage: little RAM, little CPU, a clean and responsive UI — without
-the hundreds of megabytes of mainstream clients.
+A fast, minimalist **Telegram desktop client** written in Rust, rendered
+**100% on the CPU** — no GPU required. It does everything a chat client
+should while using a fraction of the RAM of mainstream clients.
+
+- ⚡ **Real-time by push** — messages arrive in < 1 s, no polling spam
+- 💾 **~10× less RAM** — ≈61 MB RSS vs 300-500 MB for Telegram Desktop
+- 🧠 **100% CPU rendering** — runs on any hardware, low power draw
+- 📦 **Tiny footprint** — ~4 MB binary, ~12 KB session file, no database
+- 🔒 **Sign in inside the app** — phone → code → 2FA, nothing else to install
+
+## Measured performance
+
+Measured on a real session (HiDPI ~2x, Arch Linux, `--release`):
+
+| Metric | tg | Telegram Desktop |
+|---|---|---|
+| **Resident memory (RSS)** | **~61 MB** | 300-500 MB |
+| **PSS** (proportional size) | **~50 MB** | — |
+| **Idle CPU** | **~0.7%** | — |
+| **Threads** | **2** | dozens |
+| **Binary size** | **~4.0 MB** | ~100+ MB |
+| **Persisted session** | **~12 KB** | SQLite DBs |
+| **Message latency** | < 1 s (push) | < 1 s |
+
+> Methodology: `VmRSS` from `/proc/<pid>/status` and the sum of `Pss:` entries
+> in `/proc/<pid>/smaps`, 15 s after launch with a chat open. VmSize (virtual
+> address space) can exceed 1 GB with mimalloc — that's reserved address
+> space, **not** physical memory (RSS/PSS are what matter).
 
 ## Quick start
 
 Every [release](https://github.com/MrChausson/telegram-rs/releases) ships
 ready-to-run binaries built by CI for Linux, macOS **and** Windows.
+Download → run → sign in.
 
 ### 1. Install
 
@@ -63,6 +88,33 @@ cargo build --release
 > time you launch — re-embed them at build time or keep the `.env` around.
 > The chat list will not open until the session is valid.
 
+## Roadmap to V1
+
+**V1 = full parity with the official Telegram Desktop.** Features ship in
+batches — each release moves the needle, not dribbles.
+
+### ✅ Already there (v0.2.1)
+
+- 💬 **Text messaging** — real-time push, < 1 s
+- 🖼️ **Avatars** — users, groups and channels
+- 📸 **Photos** — thumbnails + full-screen viewer
+- ✏️ **Live sync** — edits and deletions from any device
+- 🔑 **In-app sign-in** — phone → code → 2FA, session persisted
+
+### 🚧 Next up
+
+| Area | In V1 |
+|---|---|
+| 📤 Media | Send photos, videos, files, voice messages · stickers, GIFs, custom emoji |
+| 💬 Messaging | Replies, forwards, edit & delete your own messages, drafts, scheduling, polls |
+| 🔍 Search | Global and in-chat search |
+| 👥 Groups | Create and manage groups/channels, members, admin tools, topics |
+| 🟢 Presence | Typing indicator, read receipts, online status, mark-as-read |
+| 🎨 Experience | Light theme, settings, keyboard shortcuts, notifications + tray |
+| 👤 Accounts | QR login, logout, multiple accounts |
+| 🔐 Privacy | Secret (end-to-end) chats |
+| 📞 Calls | Voice and video calls |
+
 ## Why it's light
 
 | Choice | Detail |
@@ -73,52 +125,6 @@ cargo build --release
 | **Single network thread** | `current_thread` tokio runtime; 2 threads total (UI + network). |
 | **No continuous redraw** | On-demand rendering + glyph cache; ~0.7% CPU at idle. |
 | **Tiny binary** | `opt-level="z"`, `lto="fat"`, `panic="abort"`, stripped symbols. |
-
-## Measured performance
-
-Measured on a real session (HiDPI ~2x, Arch Linux, `--release`):
-
-| Metric | Measured value |
-|---|---|
-| **RSS** (resident memory) | **~61 MB** |
-| **PSS** (proportional set size) | **~50 MB** |
-| **Idle CPU** | **~0.7%** |
-| **Threads** | **2** |
-| **Binary size** | **~4.0 MB** |
-| **Persisted session** | **~12 KB** |
-| **Real-time message latency** | < 1 s (push stream, like official apps) |
-
-For reference, **Telegram Desktop (tdesktop, C++) easily exceeds 300-500 MB of
-RSS on an active account**. This client uses **~10x less**, with no GPU.
-
-> Methodology: `VmRSS` from `/proc/<pid>/status` and the sum of `Pss:` entries in
-> `/proc/<pid>/smaps`, 15 s after launch with a chat open. VmSize (virtual
-> address space) can exceed 1 GB with mimalloc: that's reserved address space,
-> **not** physical memory (RSS/PSS are what matters).
-
-## Features & Roadmap to V1
-
-**V1 = feature parity with the official Telegram Desktop.** That is the
-target; below is where the project stands today compared to what V1 will bring.
-Features are shipped in batches, so releases stay few and meaningful.
-
-| Today (v0.2.1) | Planned for V1 (parity with Telegram Desktop) |
-|---|---|
-| Sign-in inside the app (phone → code → 2FA), persisted session | QR-code login, log out, multiple accounts, active-session management |
-| Chat list: avatars, previews, unread counts, scrolling | Search, chat folders/archive, pinning, mute |
-| Text messages, **real-time push** | Replies, forwards, editing/deleting your own messages, drafts, scheduled messages, polls |
-| Photo thumbnails + full-screen photo viewer | Sending photos/videos/files, full-resolution downloads, stickers, GIFs, custom emoji, voice messages |
-| Live message edits & deletions (from other devices) | Editing and deleting messages from this client |
-| Groups & channels (read + send) | Creating and managing groups/channels, members, admin tools, topics/threads |
-| Message timestamps | Date separators, sender names in groups, clickable links, text formatting |
-| Dark theme | Light theme, settings screen, keyboard shortcuts, clipboard & context menus, text selection |
-| Per-user data dir, HiDPI, 2 threads, ~61 MB RSS | Notifications + system tray, autostart, window-state persistence, audio |
-| — | Typing indicator, read receipts, online status, mark-as-read |
-| — | Global and in-chat message search |
-| — | Secret (end-to-end) chats |
-| — | Voice and video calls |
-
-Milestones will be tracked here as the project moves toward V1.
 
 ## Project layout
 
@@ -160,36 +166,6 @@ cargo run --release -p app
 Open a chat, send a message from your phone: it appears almost instantly (push);
 a 15 s safety net catches any missed update.
 
-## Methods
-
-Pre-built binaries for all platforms are attached to each
-[release](https://github.com/MrChausson/telegram-rs/releases):
-
-| Platform | Artifact | Contents |
-|---|---|---|
-| Linux (x86_64) | `tg-x86_64.AppImage` | Double-click, nothing to install |
-| Linux (x86_64) | `tg-linux-x86_64.tar.gz` | `app` binary + `install.sh` |
-| macOS (universal) | `tg-macos-universal.tar.gz` | Intel + Apple Silicon binary `tg` |
-| Windows (x86_64) | `tg-windows-x86_64.zip` | `tg.exe` |
-
-```bash
-# Install the tarball build to ~/.local/bin (+ menu entry)
-./install.sh
-
-# Run the development build straight from the repo
-cargo run --release -p app
-```
-
-## Notable technical decisions
-
-- **No GPU**: the entire pipeline is on the CPU — low power usage, no shell
-  graphics dependencies.
-- **Network safety net**: the push stream is the primary source; a discreet
-  refresh (15 s on the open chat, ~4 requests/min) guarantees nothing is lost
-  without spamming requests.
-- **Light session**: custom binary storage (bincode), atomic writes, saved
-  periodically so restarts don't re-sync from scratch.
-
 ## Status
 
 - **Working MVP**: read, send and receive in real time, groups and channels,
@@ -197,19 +173,6 @@ cargo run --release -p app
 - 56 unit tests (`cargo test`)
 - Tested on Arch Linux (X11/Wayland); macOS and Windows are compiled by CI on
   every push/PR as well.
-
-## CI / CD
-
-`.github/workflows/build.yml` builds on every push/PR and runs the tests on
-Linux, macOS **and** Windows. It produces per-platform artifacts:
-- Linux: `tg-linux-x86_64.tar.gz` (binary + `install.sh`) and `tg-x86_64.AppImage`;
-- macOS: `tg-macos-universal.tar.gz` (Intel + Apple Silicon via `lipo`);
-- Windows: `tg-windows-x86_64.zip` (`tg.exe`).
-
-On `v*` tags it also creates a **GitHub Release** with all three platforms'
-artifacts. Releasing a new version is done from the **Actions** tab →
-**Release** workflow → pick `patch` / `minor` / `major`; it bumps the version,
-rotates the changelog, tags, and publishes the release.
 
 ## License
 
