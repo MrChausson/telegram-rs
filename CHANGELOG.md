@@ -6,7 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- README: added a V1 roadmap comparing current features with the full
+  Telegram Desktop feature set.
+
 ## [v0.2.1] - 2026-08-16
+
+### Fixed
+- Restarting with a valid session no longer shows the sign-in screen: the
+  chat list arriving now marks the account as authenticated, so a persisted
+  session opens straight into the chats.
 
 ## [v0.2.0] - 2026-08-16
 

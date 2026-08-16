@@ -96,14 +96,29 @@ RSS on an active account**. This client uses **~10x less**, with no GPU.
 > address space) can exceed 1 GB with mimalloc: that's reserved address space,
 > **not** physical memory (RSS/PSS are what matters).
 
-## Features (MVP)
+## Features & Roadmap to V1
 
-- [x] User-account login (phone → code → 2FA), persisted session
-- [x] Chat list (avatars, previews, unread counts, scrolling)
-- [x] Chat view: history, send messages, **real-time receiving (push)**
-- [x] Live message edits and deletions
-- [x] HiDPI software rendering with adjustable scale
-- [ ] Media, stickers, calls, search (out of MVP scope)
+**V1 = feature parity with the official Telegram Desktop.** That is the
+target; below is where the project stands today compared to what V1 will bring.
+Features are shipped in batches, so releases stay few and meaningful.
+
+| Today (v0.2.1) | Planned for V1 (parity with Telegram Desktop) |
+|---|---|
+| Sign-in inside the app (phone → code → 2FA), persisted session | QR-code login, log out, multiple accounts, active-session management |
+| Chat list: avatars, previews, unread counts, scrolling | Search, chat folders/archive, pinning, mute |
+| Text messages, **real-time push** | Replies, forwards, editing/deleting your own messages, drafts, scheduled messages, polls |
+| Photo thumbnails + full-screen photo viewer | Sending photos/videos/files, full-resolution downloads, stickers, GIFs, custom emoji, voice messages |
+| Live message edits & deletions (from other devices) | Editing and deleting messages from this client |
+| Groups & channels (read + send) | Creating and managing groups/channels, members, admin tools, topics/threads |
+| Message timestamps | Date separators, sender names in groups, clickable links, text formatting |
+| Dark theme | Light theme, settings screen, keyboard shortcuts, clipboard & context menus, text selection |
+| Per-user data dir, HiDPI, 2 threads, ~61 MB RSS | Notifications + system tray, autostart, window-state persistence, audio |
+| — | Typing indicator, read receipts, online status, mark-as-read |
+| — | Global and in-chat message search |
+| — | Secret (end-to-end) chats |
+| — | Voice and video calls |
+
+Milestones will be tracked here as the project moves toward V1.
 
 ## Project layout
 
@@ -128,10 +143,8 @@ Prerequisites: stable Rust.
 echo "API_ID=123456"     >> .env
 echo "API_HASH=abcdef..." >> .env
 
-# 2. Interactive login (phone → code → token), saves the session
-cargo run -p tg --example login
-
-# 3. Launch the client
+# 2. Launch the client and sign in in the window (phone → code → 2FA);
+#    the session is saved automatically.
 cargo run --release -p app
 ```
 
@@ -179,11 +192,9 @@ cargo run --release -p app
 
 ## Status
 
-## Status
-
 - **Working MVP**: read, send and receive in real time, groups and channels,
   message edits and deletions.
-- 47 unit tests (`cargo test`)
+- 56 unit tests (`cargo test`)
 - Tested on Arch Linux (X11/Wayland); macOS and Windows are compiled by CI on
   every push/PR as well.
 
