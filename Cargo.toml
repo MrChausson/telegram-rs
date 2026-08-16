@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["tg", "ui", "app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+winit = "0.30"
+softbuffer = "0.4"
+tiny-skia = "0.11"
+mimalloc = "0.1"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# core2 0.4.0 (required by glass_pumpkin/grammers-crypto) is yanked on
+# crates.io; we provide it from a local, non-yanked archive.
+[patch.crates-io]
+core2 = { path = "vendor/core2-0.4.0" }

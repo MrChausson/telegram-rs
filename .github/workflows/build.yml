@@ -1,0 +1,88 @@
+name: Linux build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: System dependencies (winit / softbuffer)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libwayland-dev libx11-dev \
+            libxcursor-dev libxrandr-dev libxi-dev libxext-dev \
+            imagemagick fonts-dejavu-core
+
+      - name: Toolchain Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: Tarball Linux
+        run: |
+          mkdir -p dist
+          tar -C target/release -czf dist/tg-linux-$(uname -m).tar.gz app
+          cp install.sh dist/install.sh
+          chmod +x dist/install.sh
+
+      - name: AppImage - AppDir layout
+        run: |
+          rm -rf AppDir && mkdir -p AppDir/usr/bin
+          cp target/release/app AppDir/usr/bin/tg
+          # Icon (PNG) + menu entry
+          convert -size 256x256 xc:'#1e1f22' -fill '#32a852' \
+            -font DejaVu-Sans-Bold -pointsize 140 -gravity center \
+            -annotate 0 'tg' AppDir/tg.png
+          cat > AppDir/tg.desktop <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=tg
+          Comment=Client Telegram minimaliste en Rust
+          Exec=AppRun
+          Icon=tg
+          Terminal=false
+          Categories=Network;Chat;
+          EOF
+
+      - name: AppImage - build the image
+        run: |
+          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O /tmp/appimagetool
+          chmod +x /tmp/appimagetool
+          ARCH=x86_64 /tmp/appimagetool --appimage-extract-and-run AppDir dist/tg-x86_64.AppImage
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tg-linux
+          path: dist/
+
+      - name: GitHub Release (on tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/tg-linux-*.tar.gz
+            dist/tg-x86_64.AppImage
+            dist/install.sh

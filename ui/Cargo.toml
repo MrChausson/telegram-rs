@@ -1,0 +1,16 @@
+[package]
+name = "ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+winit.workspace = true
+softbuffer.workspace = true
+tiny-skia.workspace = true
+fontdue = "0.8"
+tokio = { version = "1", features = ["sync"] }
+
+[lib]
+name = "ui"
+path = "src/lib.rs"

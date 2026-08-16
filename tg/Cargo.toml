@@ -1,0 +1,17 @@
+[package]
+name = "tg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+grammers-client = { git = "https://github.com/Lonami/grammers" }
+grammers-mtsender = { git = "https://github.com/Lonami/grammers" }
+grammers-session = { git = "https://github.com/Lonami/grammers", features = ["serde"] }
+grammers-tl-types = { git = "https://github.com/Lonami/grammers" }
+tokio = { version = "1", features = ["rt", "macros", "sync", "net", "time", "io-util", "fs"] }
+anyhow = "1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+futures-core = { version = "0.3", default-features = false }
