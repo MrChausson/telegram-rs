@@ -9,7 +9,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::blit::blit_pixmap;
@@ -60,6 +60,16 @@ struct App {
     requested_photos: HashSet<(i64, i32)>,
     /// Chat ids already asked for a profile photo.
     requested_avatars: HashSet<i64>,
+    /// Current keyboard modifiers (kept for Ctrl shortcuts, including in IME).
+    mods: ModifiersState,
+    /// True while the left mouse button is held.
+    mouse_down: bool,
+    /// True once a press has turned into a text-selection drag.
+    dragging_selection: bool,
+    /// Logical position of the last left-button press.
+    press: (f32, f32),
+    /// System clipboard (created lazily; `None` when unavailable).
+    clipboard: Option<arboard::Clipboard>,
 }
 
 impl App {
@@ -80,6 +90,11 @@ impl App {
             photos: PhotoCache::new(),
             requested_photos: HashSet::new(),
             requested_avatars: HashSet::new(),
+            mods: ModifiersState::default(),
+            mouse_down: false,
+            dragging_selection: false,
+            press: (0.0, 0.0),
+            clipboard: None,
         }
     }
 
@@ -195,6 +210,7 @@ impl App {
             self.state.viewer.as_deref(),
             &self.photos,
             login,
+            self.state.selection(),
             scale,
         ) {
             eprintln!("render failed: {err}");
@@ -291,27 +307,73 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::CursorMoved { position, .. } => self.cursor = position,
+            WindowEvent::ModifiersChanged(mods) => self.mods = mods.state(),
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = position;
+                // Extend the text selection while dragging.
+                if self.mouse_down {
+                    let scale = self.ui_scale.max(0.1);
+                    let (w, _h) = self.logical_size();
+                    let lx = self.cursor.x as f32 / scale;
+                    let ly = self.cursor.y as f32 / scale;
+                    if !self.dragging_selection {
+                        // Turn the press into a selection drag only after a
+                        // small movement, so a plain click keeps its behavior.
+                        let dx = lx - self.press.0;
+                        let dy = ly - self.press.1;
+                        if dx * dx + dy * dy > 9.0
+                            && self.state.begin_selection(&self.text, self.press.0, self.press.1, w)
+                        {
+                            self.dragging_selection = true;
+                        }
+                    }
+                    if self.dragging_selection {
+                        self.state.update_selection(&self.text, lx, ly, w);
+                        self.request_redraw();
+                    }
+                }
+            }
             WindowEvent::MouseInput {
-                state: ElementState::Pressed,
+                state,
                 button: MouseButton::Left,
                 ..
-            } => {
-                let scale = self.ui_scale.max(0.1);
-                let (w, h) = self.logical_size();
-                let lx = self.cursor.x as f32 / scale;
-                let ly = self.cursor.y as f32 / scale;
-                let req = self.state.click(lx, ly, w, h);
-                if let Some(req) = req {
-                    let _ = self.tx.send(req);
+            } => match state {
+                ElementState::Pressed => {
+                    let scale = self.ui_scale.max(0.1);
+                    let lx = self.cursor.x as f32 / scale;
+                    let ly = self.cursor.y as f32 / scale;
+                    self.mouse_down = true;
+                    self.press = (lx, ly);
+                    self.dragging_selection = false;
                 }
-                if self.state.viewer.is_some() {
-                    self.state.close_viewer();
-                } else if let Some(path) = self.state.photo_at(lx, ly) {
-                    self.state.open_viewer(path);
+                ElementState::Released => {
+                    if !self.mouse_down {
+                        return;
+                    }
+                    self.mouse_down = false;
+                    if self.dragging_selection {
+                        self.dragging_selection = false;
+                        self.request_redraw();
+                        return;
+                    }
+                    // Plain click: selection is cleared, existing actions run.
+                    let scale = self.ui_scale.max(0.1);
+                    let (w, h) = self.logical_size();
+                    let lx = self.cursor.x as f32 / scale;
+                    let ly = self.cursor.y as f32 / scale;
+                    let req = self.state.click(lx, ly, w, h);
+                    if let Some(req) = req {
+                        let _ = self.tx.send(req);
+                    }
+                    if self.state.viewer.is_some() {
+                        self.state.close_viewer();
+                    } else if let Some(path) = self.state.photo_at(lx, ly, w) {
+                        self.state.open_viewer(path);
+                    }
+                    self.state.clear_selection();
+                    self.request_redraw();
                 }
-                self.request_redraw();
-            }
+            },
             WindowEvent::MouseWheel { delta, .. } => {
                 let scale = self.ui_scale.max(0.1);
                 let (w, h) = self.logical_size();
@@ -333,7 +395,15 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 let mut handled = true;
                 if event.state == ElementState::Pressed {
+                    let ctrl = self.mods.control_key() || self.mods.super_key();
                     match &event.logical_key {
+                        Key::Character(c) if !c.is_empty() && ctrl => {
+                            match c.to_ascii_lowercase().as_str() {
+                                "v" => self.paste_clipboard(),
+                                "c" => self.copy_to_clipboard(),
+                                _ => handled = false,
+                            }
+                        }
                         Key::Character(c) if !c.is_empty() => self.state.push_text(c),
                         Key::Named(NamedKey::Space) => self.state.push_text(" "),
                         Key::Named(NamedKey::Backspace) => self.state.backspace(),
@@ -345,6 +415,7 @@ impl ApplicationHandler for App {
                                     .scroll_messages_to_bottom(&self.text, w, h);
                             }
                         }
+                        Key::Named(NamedKey::Escape) => self.state.clear_selection(),
                         _ => handled = false,
                     }
                 } else {
@@ -355,8 +426,12 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
-                self.state.push_text(&text);
-                self.request_redraw();
+                // Ctrl shortcuts (e.g. Ctrl+V) arrive here as a committed
+                // character on some platforms; never type them.
+                if !self.mods.control_key() {
+                    self.state.push_text(&text);
+                    self.request_redraw();
+                }
             }
             WindowEvent::Resized(_) => {
                 self.request_redraw();
@@ -365,6 +440,39 @@ impl ApplicationHandler for App {
                 self.draw();
             }
             _ => {}
+        }
+    }
+}
+
+impl App {
+    /// Copies the current selection (else the hovered message, else the input
+    /// field) to the system clipboard.
+    fn copy_to_clipboard(&mut self) {
+        let scale = self.ui_scale.max(0.1);
+        let (w, _h) = self.logical_size();
+        let lx = self.cursor.x as f32 / scale;
+        let ly = self.cursor.y as f32 / scale;
+        let Some(text) = self.state.copy_source(&self.text, lx, ly, w) else {
+            return;
+        };
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new().ok();
+        }
+        if let Some(clip) = self.clipboard.as_mut() {
+            let _ = clip.set_text(text);
+        }
+    }
+
+    /// Pastes the system clipboard into the active text field.
+    fn paste_clipboard(&mut self) {
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new().ok();
+        }
+        let Some(clip) = self.clipboard.as_mut() else {
+            return;
+        };
+        if let Ok(text) = clip.get_text() {
+            self.state.push_text(&text);
         }
     }
 }

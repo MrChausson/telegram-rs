@@ -12,6 +12,7 @@ fontdue = "0.8"
 tokio = { version = "1", features = ["sync"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "alloc"] }
 jpeg-decoder = "0.3"
+arboard = "3.4"
 
 [lib]
 name = "ui"

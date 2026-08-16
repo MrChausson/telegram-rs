@@ -9,7 +9,7 @@ use tiny_skia::{Color, FillRule, Paint, Pixmap, Transform};
 use crate::chatlist::ChatList;
 use crate::icons;
 use crate::image::PhotoCache;
-use crate::messages::MessageList;
+use crate::messages::{MessageList, Selection};
 use crate::state::{LoginStep, Screen};
 use crate::text::TextRenderer;
 use crate::theme::{self, font, layout};
@@ -37,6 +37,7 @@ pub fn render(
     viewer: Option<&str>,
     photos: &PhotoCache,
     login: Option<LoginView<'_>>,
+    selection: Option<&Selection>,
     scale: f32,
 ) -> Result<(), &'static str> {
     if pixmap.width() == 0 || pixmap.height() == 0 {
@@ -119,7 +120,7 @@ pub fn render(
                     );
                 }
             } else {
-                messages.draw(pixmap, text, rx, area_y, rw, bottom - area_y, s, photos);
+                messages.draw(pixmap, text, rx, area_y, rw, bottom - area_y, s, photos, selection);
             }
 
             draw_composer(pixmap, text, input, rx, height - layout::INPUT_H * s, rw, s);
