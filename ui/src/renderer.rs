@@ -415,20 +415,7 @@ fn draw_chat_header(
     let mut drew_photo = false;
     if let Some(p) = avatar_path {
         if let Some(img) = photos.fitted(p, av, av) {
-            let iw = img.width() as f32;
-            let ih = img.height() as f32;
-            let mut mask = tiny_skia::Mask::new(pixmap.width(), pixmap.height()).unwrap();
-            if let Some(circle) = tiny_skia::PathBuilder::from_circle(avx, cy, av / 2.0) {
-                mask.fill_path(&circle, tiny_skia::FillRule::Winding, true, Transform::identity());
-            }
-            pixmap.draw_pixmap(
-                (avx - iw / 2.0).round() as i32,
-                (cy - ih / 2.0).round() as i32,
-                (*img).as_ref(),
-                &tiny_skia::PixmapPaint::default(),
-                Transform::identity(),
-                Some(&mask),
-            );
+            crate::image::draw_circle_image(pixmap, avx, cy, av / 2.0, &img);
             drew_photo = true;
         }
     }

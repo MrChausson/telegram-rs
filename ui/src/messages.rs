@@ -2,6 +2,8 @@
 //! with word wrap, timestamps and vertical scrolling.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 use tiny_skia::{Color, Paint, Pixmap, Transform};
 
@@ -70,6 +72,13 @@ pub struct MessageList {
     /// Off-screen pane pixel buffer, reused across frames (avoids a
     /// per-frame allocation and clips rows past the visible edges).
     pane: RefCell<Option<(u32, u32, Pixmap)>>,
+    /// Per-row rendered sprite cache: each visible message's bubble interior
+    /// (rounded rect + wrapped text or fitted photo) is composited once into a
+    /// small pixmap the size of the bubble, then re-blitted on every frame.
+    /// Scrolling a large window then costs a row copy instead of per-glyph
+    /// text draws. Keyed by (row content signature + pane width + scale);
+    /// sizes are kept with each entry so a resize never reuses a stale sprite.
+    sprites: RefCell<HashMap<u64, (u32, u32, Rc<Pixmap>)>>,
 }
 
 impl Default for MessageList {
@@ -87,6 +96,7 @@ impl MessageList {
             row_padding: 10.0,
             heights: RefCell::new(None),
             pane: RefCell::new(None),
+            sprites: RefCell::new(HashMap::new()),
         }
     }
 
@@ -135,6 +145,12 @@ impl MessageList {
             h = h.wrapping_mul(0x100_0000_01b3);
             if let Some((pw, ph)) = r.photo {
                 h ^= pw as u64 ^ (ph as u64) << 32;
+            }
+            if let Some(p) = &r.photo_path {
+                for &b in p.as_bytes() {
+                    h ^= b as u64;
+                    h = h.wrapping_mul(0x100_0000_01b3);
+                }
             }
         }
         h
@@ -302,8 +318,8 @@ impl MessageList {
             let phys_top = cursor * s;
             if phys_top + rh * s > 0.0 {
                 if phys_top < h {
-                    self.draw_bubble(
-                        pixmap, text, 0.0, phys_top, pw, rh, row_idx, msg, s, photos, selection,
+                    self.draw_row(
+                        pixmap, text, phys_top, rh, row_idx, msg, s, photos, selection, pw,
                     );
                 }
             }
@@ -314,88 +330,136 @@ impl MessageList {
         }
     }
 
-    fn fill_pane_bg(&self, pixmap: &mut Pixmap) {
-        pixmap.fill(Color::from_rgba8(theme::CHAT_BG.0, theme::CHAT_BG.1, theme::CHAT_BG.2, 255));
-    }
-
-    /// Draws a photo bubble: the downloaded thumbnail (or a placeholder while
-    /// it loads), rounded, fitted within the bubble.
-    fn draw_photo(
+    /// Renders one message row into the pane. Without selection, the bubble
+    /// interior is composited once into a sprite and re-blitted on every frame
+    /// (so scrolling a large window costs a row copy, not per-glyph draws);
+    /// with selection, the row is drawn directly so the highlight stays live.
+    fn draw_row(
         &self,
         pixmap: &mut Pixmap,
         text: &TextRenderer,
-        x: f32,
         top: f32,
-        bw: f32,
-        box_h: f32,
-        msg: &MsgRow,
-        s: f32,
-        photos: &PhotoCache,
-    ) {
-        let box_w = bw;
-        let radius = layout::BUBBLE_RADIUS * s;
-        let inset = 4.0 * s;
-
-        // Placeholder background (also the bubble when no image is decoded).
-        let (br, bg, bb) = if msg.out { theme::BUBBLE_SENT } else { theme::BUBBLE_RECV };
-        let mut bp = Paint::default();
-        bp.set_color(Color::from_rgba8(br, bg, bb, 255));
-        pixmap.fill_path(
-            &theme::rounded_rect(x, top, box_w, box_h, radius),
-            &bp,
-            tiny_skia::FillRule::Winding,
-            Transform::identity(),
-            None,
-        );
-
-        if let Some(path) = &msg.photo_path {
-            let max_w = (box_w - 2.0 * inset).max(1.0);
-            let max_h = (box_h - 2.0 * inset).max(1.0);
-            if let Some(img) = photos.fitted(path, max_w, max_h) {
-                let iw = img.width() as f32;
-                let ih = img.height() as f32;
-                let ix = x + (box_w - iw) / 2.0;
-                let iy = top + (box_h - ih) / 2.0;
-                crate::image::blit_opaque(pixmap, ix.round() as i32, iy.round() as i32, &img);
-                return;
-            }
-        }
-        // Placeholder cue while the thumbnail is not ready.
-        let cue = "…";
-        let px = font::MESSAGE * s;
-        let (tw, _) = text.measure(cue, px);
-        text.draw(pixmap, cue, x + (box_w - tw) / 2.0, top + box_h / 2.0, px, theme::TEXT_SECONDARY);
-    }
-
-    fn draw_bubble(
-        &self,
-        pixmap: &mut Pixmap,
-        text: &TextRenderer,
-        x: f32,
-        top: f32,
-        w: f32,
-        height_log: f32,
+        rh: f32,
         row_idx: usize,
         msg: &MsgRow,
         s: f32,
         photos: &PhotoCache,
         selection: Option<&Selection>,
+        pw: f32,
     ) {
-        let pad = 10.0 * s;
         let v_pad = 8.0 * s;
+        let pad = 10.0 * s;
+        let bubble_w = Self::bubble_width(msg.out, pw);
+        let bubble_h = (rh * s - 2.0 * v_pad).max(8.0);
+        let bx = if msg.out { pw - bubble_w - pad } else { pad };
+        let by = top + v_pad;
 
-        // Bubble centered in the row height, leaving vertical padding above
-        // and below so the text (with its ascenders) stays inside.
-        let bubble_h = (height_log * s - 2.0 * v_pad).max(8.0);
-        let bubble_top = top + v_pad;
+        let selection_hits = selection
+            .map(|sel| {
+                let (a, b) = sel.normalized();
+                row_idx >= a.row && row_idx <= b.row
+            })
+            .unwrap_or(false);
 
-        // Bubble aligned left (received) or right (sent), with rounded corners.
-        let bw = Self::bubble_width(msg.out, w);
-        let bx = if msg.out { x + w - bw - pad } else { x + pad };
-
-        if msg.photo.is_some() {
-            return self.draw_photo(pixmap, text, bx, bubble_top, bw, bubble_h, msg, s, photos);
+        if !selection_hits {
+            let key = self.sprite_key(row_idx, s, pw);
+            let (bw_px, bh_px) = (bubble_w.round() as u32, bubble_h.round() as u32);
+            let cached = self.sprites.borrow().get(&key).map(|(cw, ch, pix)| {
+                if *cw == bw_px && *ch == bh_px {
+                    Some(Rc::clone(pix))
+                } else {
+                    None
+                }
+            });
+            if let Some(Some(sprite)) = cached {
+                crate::image::blit_opaque(
+                    pixmap,
+                    bx.round() as i32,
+                    by.round() as i32,
+                    &sprite,
+                );
+                self.draw_timestamp(pixmap, text, msg, by, bubble_w, bubble_h, s, pw);
+                return;
+            }
+            // Miss: composite the bubble body once, cache it, then blit.
+            if let Some(sprite) = Pixmap::new(bw_px, bh_px) {
+                let mut sprite = sprite;
+                self.draw_body(
+                    &mut sprite,
+                    text,
+                    msg,
+                    bubble_w,
+                    bubble_h,
+                    row_idx,
+                    s,
+                    0.0,
+                    0.0,
+                    photos,
+                    None,
+                );
+                let mut sprites = self.sprites.borrow_mut();
+                if sprites.len() > 128 {
+                    sprites.clear();
+                }
+                sprites.insert(key, (bw_px, bh_px, Rc::new(sprite)));
+                drop(sprites);
+                crate::image::blit_opaque(
+                    pixmap,
+                    bx.round() as i32,
+                    by.round() as i32,
+                    self.sprites.borrow().get(&key).unwrap().2.as_ref(),
+                );
+                self.draw_timestamp(pixmap, text, msg, by, bubble_w, bubble_h, s, pw);
+                return;
+            }
         }
+
+        // Direct path (selection active, or sprite pixmap allocation failed).
+        self.draw_body(
+            pixmap,
+            text,
+            msg,
+            bubble_w,
+            bubble_h,
+            row_idx,
+            s,
+            bx,
+            by,
+            photos,
+            selection,
+        );
+        self.draw_timestamp(pixmap, text, msg, by, bubble_w, bubble_h, s, pw);
+    }
+
+    /// Stable hash key for a message row's rendered sprite: the row's content
+    /// signature (id, text, out, photo, photo_path), the scale and the pane
+    /// width. Any content change (new message, photo ready, resize) produces a
+    /// new key, so stale sprites are never reused.
+    fn sprite_key(&self, row_idx: usize, s: f32, pw: f32) -> u64 {
+        let sig = self.rows_signature();
+        let s_bits = (s.to_bits() as u64) << 32;
+        let pw_bits = (pw.to_bits() as u64) << 8;
+        sig ^ s_bits ^ pw_bits ^ row_idx as u64
+    }
+
+    /// Draws the bubble body (rounded rect + fitted photo or wrapped text,
+    /// with selection highlight when `selection` covers this row) into
+    /// `pixmap`, the bubble top-left at `(ox, oy)` and its size
+    /// `bubble_w × bubble_h`.
+    fn draw_body(
+        &self,
+        pixmap: &mut Pixmap,
+        text: &TextRenderer,
+        msg: &MsgRow,
+        bubble_w: f32,
+        bubble_h: f32,
+        row_idx: usize,
+        s: f32,
+        ox: f32,
+        oy: f32,
+        photos: &PhotoCache,
+        selection: Option<&Selection>,
+    ) {
         let radius = layout::BUBBLE_RADIUS * s;
         let (br, bg_, bb) = if msg.out {
             theme::BUBBLE_SENT
@@ -404,13 +468,28 @@ impl MessageList {
         };
         let mut bp = Paint::default();
         bp.set_color(Color::from_rgba8(br, bg_, bb, 255));
-        let bubble = theme::rounded_rect(bx, bubble_top, bw, bubble_h, radius);
+        let bubble = theme::rounded_rect(ox, oy, bubble_w, bubble_h, radius);
         pixmap.fill_path(&bubble, &bp, tiny_skia::FillRule::Winding, Transform::identity(), None);
 
-        // Text with word wrap, breaking at word boundaries. The first baseline
+        if msg.photo.is_some() {
+            self.draw_photo_in(
+                pixmap,
+                text,
+                msg,
+                ox,
+                oy,
+                bubble_w,
+                bubble_h,
+                s,
+                photos,
+            );
+            return;
+        }
+
+        // Text with word wrap, breaking at word boundaries; the first baseline
         // sits below the top of the bubble so glyph ascenders never overflow.
         let line_h = self.line_height * s;
-        let interior = (bw - 28.0).max(10.0);
+        let interior = (bubble_w - 28.0).max(10.0);
         let lines = wrap_lines(text, &msg.text, interior);
         let text_len = msg.text.chars().count();
 
@@ -425,9 +504,9 @@ impl MessageList {
             Some((sa.min(sb), sa.max(sb)))
         });
 
-        let mut text_y = bubble_top + 15.0 * s;
+        let mut text_y = oy + 15.0 * s;
         for line in &lines {
-            if text_y > bubble_top + bubble_h - 5.0 {
+            if text_y > oy + bubble_h - 5.0 {
                 break;
             }
             let line_len = line.text.chars().count();
@@ -436,22 +515,74 @@ impl MessageList {
                 let b = sb.saturating_sub(line.start).min(line_len);
                 (a.min(b), a.max(b))
             });
-            draw_line(pixmap, text, &line.text, bx + 14.0 * s, text_y, line_h, seg, s);
+            draw_line(pixmap, text, &line.text, ox + 14.0 * s, text_y, line_h, seg, s);
             text_y += line_h;
         }
+    }
 
-        // Timestamp, outside the bubble (opposite side).
-        if msg.date > 0 {
-            let ts = theme::fmt_time(msg.date);
-            let ts_px = font::TIMESTAMP * s;
-            let (tw, _) = text.measure(&ts, ts_px);
-            let baseline = bubble_top + bubble_h - 6.0 * s;
-            if msg.out {
-                text.draw(pixmap, &ts, bx - tw - 8.0 * s, baseline, ts_px, theme::TEXT_SECONDARY);
-            } else {
-                text.draw(pixmap, &ts, bx + bw + 8.0 * s, baseline, ts_px, theme::TEXT_SECONDARY);
+    /// Fits and blits a photo (or the "…" placeholder) inside an already
+    /// rounded bubble at `(ox, oy, bubble_w, bubble_h)`.
+    fn draw_photo_in(
+        &self,
+        pixmap: &mut Pixmap,
+        text: &TextRenderer,
+        msg: &MsgRow,
+        ox: f32,
+        oy: f32,
+        bubble_w: f32,
+        bubble_h: f32,
+        s: f32,
+        photos: &PhotoCache,
+    ) {
+        let inset = 4.0 * s;
+        let max_w = (bubble_w - 2.0 * inset).max(1.0);
+        let max_h = (bubble_h - 2.0 * inset).max(1.0);
+        if let Some(path) = &msg.photo_path {
+            if let Some(img) = photos.fitted(path, max_w, max_h) {
+                let iw = img.width() as f32;
+                let ih = img.height() as f32;
+                let ix = ox + (bubble_w - iw) / 2.0;
+                let iy = oy + (bubble_h - ih) / 2.0;
+                crate::image::blit_opaque(pixmap, ix.round() as i32, iy.round() as i32, &img);
+                return;
             }
         }
+        let cue = "…";
+        let px = font::MESSAGE * s;
+        let (tw, _) = text.measure(cue, px);
+        text.draw(pixmap, cue, ox + (bubble_w - tw) / 2.0, oy + bubble_h / 2.0, px, theme::TEXT_SECONDARY);
+    }
+
+    /// Timestamp, outside the bubble (opposite side). Drawn on every frame
+    /// (it is a few glyphs; not worth caching separately).
+    fn draw_timestamp(
+        &self,
+        pixmap: &mut Pixmap,
+        text: &TextRenderer,
+        msg: &MsgRow,
+        by: f32,
+        bubble_w: f32,
+        bubble_h: f32,
+        s: f32,
+        pw: f32,
+    ) {
+        if msg.date <= 0 {
+            return;
+        }
+        let bx = if msg.out { pw - bubble_w - 10.0 * s } else { 10.0 * s };
+        let ts = theme::fmt_time(msg.date);
+        let ts_px = font::TIMESTAMP * s;
+        let (tw, _) = text.measure(&ts, ts_px);
+        let baseline = by + bubble_h - 6.0 * s;
+        if msg.out {
+            text.draw(pixmap, &ts, bx - tw - 8.0 * s, baseline, ts_px, theme::TEXT_SECONDARY);
+        } else {
+            text.draw(pixmap, &ts, bx + bubble_w + 8.0 * s, baseline, ts_px, theme::TEXT_SECONDARY);
+        }
+    }
+
+    fn fill_pane_bg(&self, pixmap: &mut Pixmap) {
+        pixmap.fill(Color::from_rgba8(theme::CHAT_BG.0, theme::CHAT_BG.1, theme::CHAT_BG.2, 255));
     }
 }
 
@@ -774,7 +905,6 @@ mod tests {
 
     #[test]
     fn selected_text_joins_rows_forward_and_backward() {
-        let tr = text();
         let mut list = MessageList::new();
         list.rows.push(msg("hello"));
         list.rows.push(msg("world"));

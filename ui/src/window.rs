@@ -70,6 +70,31 @@ struct App {
     press: (f32, f32),
     /// System clipboard (created lazily; `None` when unavailable).
     clipboard: Option<arboard::Clipboard>,
+    /// Debug FPS meter: `fps.last_frame` = time of the previous draw,
+    /// `fps.ema_ms` = exponential average frame time (for the overlay/log).
+    fps: FpsMeter,
+}
+
+/// Rolling frame-time meter (1-second window) used when `TG_FPS=1`.
+struct FpsMeter {
+    last_frame: std::time::Instant,
+    ema_ms: f32,
+}
+
+impl FpsMeter {
+    fn new() -> Self {
+        Self {
+            last_frame: std::time::Instant::now(),
+            ema_ms: 0.0,
+        }
+    }
+
+    /// Reports the ms taken by the frame that just ended, maintaining a
+    /// running average (and returning the instantaneous ms).
+    fn frame(&mut self, elapsed: f32) {
+        // Exponential average half-life ≈ 30 frames.
+        self.ema_ms = self.ema_ms * 0.95 + elapsed * 0.05;
+    }
 }
 
 impl App {
@@ -95,6 +120,7 @@ impl App {
             dragging_selection: false,
             press: (0.0, 0.0),
             clipboard: None,
+            fps: FpsMeter::new(),
         }
     }
 
@@ -110,6 +136,8 @@ impl App {
             return;
         }
         let scale = self.ui_scale.max(0.1);
+        let fps_debug = std::env::var("TG_FPS").is_ok_and(|v| v == "1");
+        let frame_start = std::time::Instant::now();
 
         // Consume network messages (queued by `about_to_wait`).
         for msg in self.pending.drain(..) {
@@ -219,12 +247,24 @@ impl App {
         }
 
         let mut buffer = surface.buffer_mut().expect("buffer");
+        let blit_start = std::time::Instant::now();
         if let Err(err) = blit_pixmap(pixmap.as_ref(), &mut buffer, width, height) {
             eprintln!("blit failed: {err}");
             return;
         }
         buffer.present().expect("present");
         self.frame = pixmap;
+        let blit_ms = blit_start.elapsed().as_secs_f32() * 1000.0;
+
+        if fps_debug {
+            let dt = frame_start.elapsed().as_secs_f32();
+            let frame_ms = dt * 1000.0;
+            self.fps.frame(frame_ms);
+            let fps = 1000.0 / self.fps.ema_ms.max(0.001);
+            eprintln!(
+                "[fps] {fps:5.1} fps  {frame_ms:6.2} ms/frame (render+blit)  blit {blit_ms:6.2} ms  {width}x{height} (scale {scale:.2})"
+            );
+        }
     }
 
     /// Logical window size (physical pixels divided by the scale).

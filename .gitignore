@@ -4,4 +4,5 @@
 *.session
 .session
 .tg.session
-.opencode//data
+.opencode/
+/data

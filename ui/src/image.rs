@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use tiny_skia::{Pixmap, PixmapPaint, Transform};
+use tiny_skia::{Paint, Pixmap, PixmapPaint, Transform};
 
 /// Maximum decoded thumbnail side kept in memory. Matches the downloaded
 /// photo size (>= 512 px) so previews never look blocky.
@@ -19,6 +19,34 @@ pub const THUMB_MAX: u32 = 512;
 pub const CACHE_MAX: usize = 8;
 /// Maximum number of pre-fitted (bubble-sized) images cached.
 pub const FITTED_MAX: usize = 10;
+
+/// Draws an image clipped to a circle (avatar), centered at `(cx, cy)`.
+///
+/// The circle path is filled directly with the image as a `Pattern` shader:
+/// passing a full-window `Mask` to `draw_pixmap` forces a mask sized to the
+/// *whole* pixmap every frame (a large allocation that grows with the window),
+/// whereas a sized `Pattern` keeps the implicit clip inside the circle.
+pub fn draw_circle_image(pixmap: &mut Pixmap, cx: f32, cy: f32, r: f32, img: &Pixmap) {
+    let (iw, ih) = (img.width() as f32, img.height() as f32);
+    let scale = ((r * 2.0) / iw.max(ih)).min(1.0);
+    let dw = iw * scale;
+    let dh = ih * scale;
+    let x = cx - dw / 2.0;
+    let y = cy - dh / 2.0;
+    let pattern: tiny_skia::Shader = tiny_skia::Pattern::new(
+        img.as_ref(),
+        tiny_skia::SpreadMode::Pad,
+        tiny_skia::FilterQuality::Bilinear,
+        1.0,
+        Transform::from_scale(scale, scale).post_translate(x, y),
+    )
+    .into();
+    let mut paint = Paint::default();
+    paint.shader = pattern;
+    if let Some(circle) = tiny_skia::PathBuilder::from_circle(cx, cy, r) {
+        pixmap.fill_path(&circle, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
+    }
+}
 
 /// Blits an opaque `src` pixmap into `dst` at `(x, y)` (top-left), clipping to
 /// the destination bounds. Photos are fully opaque, so tiny-skia's per-pixel
