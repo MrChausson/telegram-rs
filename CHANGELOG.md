@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-08-16
+
 ### Added
 - In-app sign-in: the released binary can log in by itself (phone → code →
   two-step verification), no console helper or Rust toolchain required.
