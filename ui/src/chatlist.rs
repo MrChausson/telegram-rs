@@ -211,22 +211,22 @@ impl ChatList {
         selected: Option<i64>,
         photos: &PhotoCache,
     ) {
-        // Selected highlight.
-        if selected == Some(row.id) {
-            let mut sel = Paint::default();
-            sel.set_color(Color::from_rgba8(
-                theme::ROW_SELECTED.0,
-                theme::ROW_SELECTED.1,
-                theme::ROW_SELECTED.2,
-                255,
-            ));
-            pixmap.fill_rect(
-                tiny_skia::Rect::from_xywh(x, top, w, row_h).unwrap(),
-                &sel,
-                Transform::identity(),
-                None,
-            );
-        }
+        // Row background: LIST_BG, or ROW_SELECTED when highlighted. Filling
+        // here keeps every row opaque, so blitting a row sprite never leaves
+        // transparent (black) pixels over the list background.
+        let (br, bg, bb) = if selected == Some(row.id) {
+            theme::ROW_SELECTED
+        } else {
+            theme::LIST_BG
+        };
+        let mut bgp = Paint::default();
+        bgp.set_color(Color::from_rgba8(br, bg, bb, 255));
+        pixmap.fill_rect(
+            tiny_skia::Rect::from_xywh(x, top, w, row_h).unwrap(),
+            &bgp,
+            Transform::identity(),
+            None,
+        );
 
         let pad = self.padding * s;
 
@@ -374,6 +374,36 @@ mod tests {
             }
         }
         assert!(changed > 500);
+    }
+
+    #[test]
+    fn sprites_never_leave_black_pixels_in_the_list_background() {
+        // Regression: rows are drawn into a pre-rendered sprite and blitted
+        // with `blit_opaque`. If the sprite's untouched pixels stay transparent
+        // (0,0,0,0), the raw copy would paint black over the (dark but not
+        // black) list background. Every visible row must be opaque.
+        let mut list = ChatList::new();
+        list.rows = (0..8).map(|i| row(&format!("Chat {i}"))).collect();
+        let mut pixmap = Pixmap::new(300, 260).unwrap();
+        list.draw(&mut pixmap, &text(), 0.0, 0.0, 300.0, 260.0, 1.0, None, &PhotoCache::new());
+
+        let mut black = 0;
+        let mut bg_missing = 0;
+        for y in 0..260 {
+            for x in 0..300 {
+                let p = pixmap.pixel(x, y).unwrap();
+                // Pure black is never part of the theme.
+                if (p.red(), p.green(), p.blue()) == (0, 0, 0) {
+                    black += 1;
+                }
+                // Rows must be opaque (not transparent pixels leaking through).
+                if p.alpha() != 255 {
+                    bg_missing += 1;
+                }
+            }
+        }
+        assert_eq!(black, 0, "{black} black pixels leaked into the chat list");
+        assert_eq!(bg_missing, 0, "{bg_missing} transparent pixels leaked into the chat list");
     }
 
     #[test]

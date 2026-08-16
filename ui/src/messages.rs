@@ -384,6 +384,13 @@ impl MessageList {
             // Miss: composite the bubble body once, cache it, then blit.
             if let Some(sprite) = Pixmap::new(bw_px, bh_px) {
                 let mut sprite = sprite;
+                // The sprite is a box the size of the bubble; its corners
+                // outside the rounded rect must be the pane background when
+                // blitted (not transparent black).
+                sprite.fill(
+                    Color::from_rgba8(theme::CHAT_BG.0, theme::CHAT_BG.1, theme::CHAT_BG.2, 255),
+                );
+
                 self.draw_body(
                     &mut sprite,
                     text,
@@ -782,6 +789,33 @@ mod tests {
             }
         }
         assert!(changed > 300);
+    }
+
+    #[test]
+    fn bubbles_never_leave_black_pixels_on_the_chat_background() {
+        // Regression: each bubble is composited into a sprite once and blitted
+        // with `blit_opaque`. If the sprite's corners stay transparent black,
+        // the raw copy paints them as pure black around the rounded bubble.
+        let mut list = MessageList::new();
+        list.rows.push(msg("a text bubble"));
+        let mut pixmap = Pixmap::new(300, 200).unwrap();
+        list.draw(&mut pixmap, &text(), 0.0, 0.0, 300.0, 200.0, 1.0, &PhotoCache::new(), None);
+
+        let mut black = 0;
+        let mut transparent = 0;
+        for y in 0..200 {
+            for x in 0..300 {
+                let p = pixmap.pixel(x, y).unwrap();
+                if (p.red(), p.green(), p.blue()) == (0, 0, 0) {
+                    black += 1;
+                }
+                if p.alpha() != 255 {
+                    transparent += 1;
+                }
+            }
+        }
+        assert_eq!(black, 0, "{black} black pixels leaked around the bubble");
+        assert_eq!(transparent, 0, "{transparent} transparent pixels leaked into the pane");
     }
 
     #[test]

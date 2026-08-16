@@ -513,3 +513,77 @@ fn draw_composer(pixmap: &mut Pixmap, text: &TextRenderer, input: &str, x: f32, 
     pixmap.fill_path(&sc, &sp, tiny_skia::FillRule::Winding, Transform::identity(), None);
     icons::send(pixmap, sendx, sendy, 20.0 * s, theme::TEXT_PRIMARY);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chatlist::ChatRow;
+    use crate::messages::MsgRow;
+
+    fn full_scene_pixmap() -> (Pixmap, TextRenderer, ChatList, MessageList) {
+        let mut list = ChatList::new();
+        for i in 0..6 {
+            list.rows.push(ChatRow {
+                id: i,
+                title: format!("Chat {i}"),
+                subtitle: "a preview line".into(),
+                date: 1_700_000_000 + i as i32,
+                unread: (i * 3) as i32,
+                avatar_path: None,
+            });
+        }
+        let mut messages = MessageList::new();
+        for i in 0..4 {
+            messages.rows.push(crate::messages::MsgRow {
+                id: i,
+                text: if i % 2 == 0 { "hello there".into() } else { "reply".into() },
+                date: 1_700_000_000 + i * 60,
+                out: i % 3 == 0,
+                photo: None,
+                photo_path: None,
+            });
+        }
+        (Pixmap::new(800, 600).unwrap(), TextRenderer::new(), list, messages)
+    }
+
+    #[test]
+    fn full_scene_has_no_black_or_transparent_pixels() {
+        // Regression: the sprite caches blit rows/bubbles with `blit_opaque`;
+        // any untouched transparent-black sprite region would turn the dark
+        // (but never pure black) theme background into black boxes.
+        let (mut pixmap, text, list, messages) = full_scene_pixmap();
+        let screen = Screen::Chat { id: 2, loading: false };
+        let photos = PhotoCache::new();
+        render(
+            &mut pixmap,
+            &text,
+            &list,
+            &screen,
+            &messages,
+            "",
+            "",
+            None,
+            &photos,
+            None,
+            None,
+            1.6,
+        )
+        .unwrap();
+
+        let mut black = 0;
+        let mut transparent = 0;
+        for y in 0..pixmap.height() {
+            for x in 0..pixmap.width() {
+                let p = pixmap.pixel(x, y).unwrap();
+                if (p.red(), p.green(), p.blue()) == (0, 0, 0) {
+                    black += 1;
+                }
+                if p.alpha() != 255 {
+                    transparent += 1;
+                }
+            }
+        }
+        assert_eq!(black, 0, "{black} black pixels in the full frame");
+        assert_eq!(transparent, 0, "{transparent} transparent pixels in the full frame");
+    }
+}
