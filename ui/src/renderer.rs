@@ -370,7 +370,7 @@ pub fn draw_viewer_overlay(
             y0.round() as i32,
             (*img).as_ref(),
             &tiny_skia::PixmapPaint::default(),
-            Transform::from_scale(scale, scale),
+            crate::image::draw_scale_transform(scale, x0, y0),
             None,
         );
     } else {
@@ -446,7 +446,7 @@ fn draw_chat_header(
                 (cy - dh / 2.0).round() as i32,
                 (*img).as_ref(),
                 &tiny_skia::PixmapPaint::default(),
-                Transform::from_scale(scale, scale),
+                crate::image::draw_scale_transform(scale, avx - dw / 2.0, cy - dh / 2.0),
                 Some(&mask),
             );
             drew_photo = true;

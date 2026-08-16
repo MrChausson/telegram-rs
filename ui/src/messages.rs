@@ -289,7 +289,7 @@ impl MessageList {
                     iy.round() as i32,
                     (*img).as_ref(),
                     &tiny_skia::PixmapPaint::default(),
-                    Transform::from_scale(scale, scale),
+                    crate::image::draw_scale_transform(scale, ix, iy),
                     None,
                 );
                 return;
@@ -744,5 +744,66 @@ mod tests {
         // The selection must paint the accent highlight rect, so the frames
         // cannot be pixel-identical.
         assert_ne!(selected.as_ref().data(), plain.as_ref().data());
+    }
+
+    #[test]
+    fn photo_is_drawn_inside_its_bubble_rectangle() {
+        // Regression: `Transform::from_scale` alone made `draw_pixmap` pin the
+        // scaled image at (x·scale, y·scale), pushing photo content far away
+        // from the bubble (only a sliver of the top-left survived).
+        let dir = std::env::temp_dir().join(format!("tg-photo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shot.png");
+        let mut img = tiny_skia::Pixmap::new(2, 1).unwrap();
+        img.pixels_mut()[0] =
+            tiny_skia::PremultipliedColorU8::from_rgba(255, 0, 255, 255).unwrap();
+        img.pixels_mut()[1] =
+            tiny_skia::PremultipliedColorU8::from_rgba(0, 255, 255, 255).unwrap();
+        std::fs::write(&path, img.encode_png().unwrap()).unwrap();
+
+        let mut list = MessageList::new();
+        list.rows.push(MsgRow {
+            id: 1,
+            text: String::new(),
+            date: 0,
+            out: false,
+            photo: Some((2, 1)),
+            photo_path: Some(path.to_str().unwrap().to_string()),
+        });
+        let tr = text();
+        let cache = PhotoCache::new();
+        // Force the thumbnail decode.
+        assert!(cache.get(path.to_str().unwrap()).is_some());
+
+        let mut pixmap = tiny_skia::Pixmap::new(300, 100).unwrap();
+        list.draw(&mut pixmap, &tr, 0.0, 0.0, 300.0, 100.0, 1.0, &cache, None);
+
+        let mut magenta: Option<(u32, u32)> = None;
+        let mut cyan: Option<(u32, u32)> = None;
+        for y in 0..100 {
+            for x in 0..300 {
+                let p = pixmap.pixel(x, y).unwrap();
+                match (p.red(), p.green(), p.blue()) {
+                    (255, 0, 255) => magenta = Some((x, y)),
+                    (0, 255, 255) => cyan = Some((x, y)),
+                    _ => {}
+                }
+            }
+        }
+        // The bubble interior spans x ∈ [10, 220] (received bubble, 0.7·300).
+        // The 2×1 image is fitted to ~202×101 px centered in it, so the left
+        // (magenta) half lands x ≈ [14, 115) and the right (cyan) half
+        // x ≈ (115, 215].
+        let (mx, _my) = magenta.expect("photo left half not drawn at the bubble");
+        let (cx, _cy) = cyan.expect("photo right half not drawn at the bubble");
+        assert!(
+            (10.0..120.0).contains(&(mx as f32)),
+            "photo misplaced: left half at x={mx}"
+        );
+        assert!(
+            cx > mx && (170.0..220.0).contains(&(cx as f32)),
+            "photo right half misplaced at x={cx}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

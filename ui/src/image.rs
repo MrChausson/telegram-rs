@@ -17,6 +17,15 @@ pub const THUMB_MAX: u32 = 256;
 /// each, so the whole cache stays under a few MB).
 pub const CACHE_MAX: usize = 12;
 
+/// Transform for `Pixmap::draw_pixmap(x, y, …)`: tiny-skia translates the
+/// image's pattern to `(x, y)` but applies the caller's transform around the
+/// origin, so `Transform::from_scale` alone would pin the scaled image at
+/// `(x·scale, y·scale)` instead of `(x, y)`. Compose the translation so the
+/// scaled image keeps its top-left corner at `(x, y)`.
+pub fn draw_scale_transform(scale: f32, x: f32, y: f32) -> Transform {
+    Transform::from_scale(scale, scale).post_translate(x * (1.0 - scale), y * (1.0 - scale))
+}
+
 /// Decodes an image file into an RGBA thumbnail `Pixmap`, downscaled so its
 /// largest side is at most [`THUMB_MAX`]. Returns `None` on unsupported/corrupt.
 pub fn decode(path: &std::path::Path) -> Option<Pixmap> {
