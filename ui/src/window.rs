@@ -156,6 +156,7 @@ impl App {
             &self.state.messages,
             &self.state.status,
             &self.state.input,
+            self.state.viewer.as_deref(),
             &self.photos,
             scale,
         ) {
@@ -261,13 +262,16 @@ impl ApplicationHandler for App {
             } => {
                 let scale = self.ui_scale.max(0.1);
                 let (w, _) = self.logical_size();
-                let req = self.state.click(
-                    self.cursor.x as f32 / scale,
-                    self.cursor.y as f32 / scale,
-                    w,
-                );
+                let lx = self.cursor.x as f32 / scale;
+                let ly = self.cursor.y as f32 / scale;
+                let req = self.state.click(lx, ly, w);
                 if let Some(req) = req {
                     let _ = self.tx.send(req);
+                }
+                if self.state.viewer.is_some() {
+                    self.state.close_viewer();
+                } else if let Some(path) = self.state.photo_at(lx, ly) {
+                    self.state.open_viewer(path);
                 }
                 self.request_redraw();
             }

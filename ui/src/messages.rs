@@ -183,17 +183,13 @@ impl MessageList {
                 let ix = x + (box_w - dw) / 2.0;
                 let iy = top + (box_h - dh) / 2.0;
                 let scale = dw / iw;
-                let clip = theme::rounded_rect(ix, iy, dw, dh, radius * 0.75);
-                let mut mask =
-                    tiny_skia::Mask::new(pixmap.width(), pixmap.height()).unwrap();
-                mask.fill_path(&clip, tiny_skia::FillRule::Winding, true, Transform::identity());
                 pixmap.draw_pixmap(
                     ix.round() as i32,
                     iy.round() as i32,
                     (*img).as_ref(),
                     &tiny_skia::PixmapPaint::default(),
                     Transform::from_scale(scale, scale),
-                    Some(&mask),
+                    None,
                 );
                 return;
             }

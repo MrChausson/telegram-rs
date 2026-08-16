@@ -140,12 +140,18 @@ impl Telegram {
 
     /// Downloads a message's photo (a small thumbnail, ~256 px) into `dir`,
     /// returning the saved path, or `None` if the message has no photo.
+    /// If the thumbnail is already cached, no network request is made.
     pub async fn download_photo(
         &self,
         peer_ref: &grammers_session::types::PeerRef,
         msg_id: i32,
         dir: &std::path::Path,
     ) -> Result<Option<std::path::PathBuf>> {
+        std::fs::create_dir_all(dir)?;
+        let cached = dir.join(format!("{msg_id}.jpg"));
+        if cached.exists() {
+            return Ok(Some(cached));
+        }
         let msgs = self
             .client
             .get_messages_by_id(peer_ref.clone(), &[msg_id])
@@ -165,7 +171,6 @@ impl Telegram {
         if bytes.is_empty() {
             return Ok(None);
         }
-        std::fs::create_dir_all(dir)?;
         let path = dir.join(format!("{msg_id}.jpg"));
         let tmp = path.with_extension("tmp");
         std::fs::write(&tmp, &bytes)?;

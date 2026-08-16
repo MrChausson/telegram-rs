@@ -3,6 +3,8 @@
 use crate::bridge::{Request, UiMessage};
 use crate::chatlist::ChatList;
 use crate::messages::{MessageList, MsgRow};
+use std::collections::HashMap;
+
 use crate::theme::{self, layout};
 use crate::text::TextRenderer;
 
@@ -11,7 +13,7 @@ fn messages_viewport(h: f32) -> f32 {
     (h - layout::CHAT_HEADER_H - layout::INPUT_H - layout::MESSAGES_BOTTOM_GAP).max(0.0)
 }
 
-/// State of the right (conversation) pane. The chat list is always visible.
+/// Screen states / overlay for the photo viewer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Screen {
     /// No conversation selected: the right pane shows a placeholder.
@@ -28,6 +30,8 @@ pub struct UiState {
     pub status: String,
     /// Text typed in the composer (chat view).
     pub input: String,
+    /// On-disk path of a photo shown full-screen (overlay), if any.
+    pub viewer: Option<String>,
     /// True if a received message requires scrolling back to the bottom.
     needs_scroll_bottom: bool,
 }
@@ -46,6 +50,7 @@ impl UiState {
             screen: Screen::Idle,
             status: "Connecting…".to_string(),
             input: String::new(),
+            viewer: None,
             needs_scroll_bottom: false,
         }
     }
@@ -83,7 +88,25 @@ impl UiState {
                 if let Screen::Chat { id: current, .. } = &self.screen {
                     if *current == id {
                         let prev_len = self.messages.rows.len();
-                        self.messages.rows = rows;
+                        // Keep already-downloaded photo thumbnails across
+                        // refreshes (the network list does not carry them).
+                        let paths: HashMap<i32, String> = self
+                            .messages
+                            .rows
+                            .iter()
+                            .filter_map(|r| r.photo_path.clone().map(|p| (r.id, p)))
+                            .collect();
+                        self.messages.rows = rows
+                            .into_iter()
+                            .map(|mut r| {
+                                if r.photo_path.is_none() {
+                                    if let Some(p) = paths.get(&r.id) {
+                                        r.photo_path = Some(p.clone());
+                                    }
+                                }
+                                r
+                            })
+                            .collect();
                         if let Screen::Chat { loading, .. } = &mut self.screen {
                             *loading = false;
                         }
@@ -199,6 +222,38 @@ impl UiState {
     /// Insights whether a click/touch position is inside the left pane.
     pub fn is_left_pane(&self, x: f32) -> bool {
         x < theme::layout::LIST_W
+    }
+
+    /// Path of the photo under a click in the conversation pane (logical
+    /// coordinates), if any.
+    pub fn photo_at(&self, _x: f32, y: f32) -> Option<String> {
+        if !matches!(self.screen, Screen::Chat { .. }) {
+            return None;
+        }
+        let tr = crate::text::TextRenderer::new();
+        let rows = &self.messages.rows;
+        let mut top = -self.messages.scroll;
+        for row in rows {
+            let row_h = self.messages.row_height(&tr, row, 700.0);
+            if y >= top && y < top + row_h {
+                if row.photo.is_some() {
+                    return row.photo_path.clone();
+                }
+                return None;
+            }
+            top += row_h;
+        }
+        None
+    }
+
+    /// Opens the photo viewer overlay for `path`.
+    pub fn open_viewer(&mut self, path: String) {
+        self.viewer = Some(path);
+    }
+
+    /// Closes the photo viewer overlay, if open.
+    pub fn close_viewer(&mut self) {
+        self.viewer = None;
     }
 
     /// Mouse wheel: the list scrolls when the cursor is over the left pane,

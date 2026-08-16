@@ -25,6 +25,7 @@ pub fn render(
     messages: &MessageList,
     status: &str,
     input: &str,
+    viewer: Option<&str>,
     photos: &PhotoCache,
     scale: f32,
 ) -> Result<(), &'static str> {
@@ -32,6 +33,10 @@ pub fn render(
         return Err("empty pixmap");
     }
     pixmap.fill(color(theme::CHAT_BG));
+    if let Some(path) = viewer {
+        draw_viewer_overlay(pixmap, text, photos, path, pixmap.width(), pixmap.height());
+        return Ok(());
+    }
 
     let s = scale.max(0.1);
     let width = pixmap.width() as f32;
@@ -115,6 +120,59 @@ pub fn render(
 
 fn color(c: (u8, u8, u8)) -> Color {
     Color::from_rgba8(c.0, c.1, c.2, 255)
+}
+
+/// Full-screen photo viewer: dimmed background + the image centered.
+pub fn draw_viewer_overlay(
+    pixmap: &mut Pixmap,
+    text: &TextRenderer,
+    photos: &PhotoCache,
+    path: &str,
+    w: u32,
+    h: u32,
+) {
+    let mut dim = Paint::default();
+    dim.set_color(tiny_skia::Color::from_rgba8(0, 0, 0, 190));
+    pixmap.fill_rect(
+        tiny_skia::Rect::from_xywh(0.0, 0.0, w as f32, h as f32).unwrap(),
+        &dim,
+        Transform::identity(),
+        None,
+    );
+
+    if let Some(img) = photos.get(path) {
+        let (iw, ih) = (img.width() as f32, img.height() as f32);
+        let max_w = (w as f32) * 0.72;
+        let max_h = (h as f32) * 0.72;
+        let aspect = ih / iw;
+        let mut dw = max_w;
+        let mut dh = dw * aspect;
+        if dh > max_h {
+            dh = max_h;
+            dw = dh / aspect;
+        }
+        let x0 = (w as f32 - dw) / 2.0;
+        let y0 = (h as f32 - dh) / 2.0;
+        let scale = dw / iw;
+        pixmap.draw_pixmap(
+            x0.round() as i32,
+            y0.round() as i32,
+            (*img).as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            Transform::from_scale(scale, scale),
+            None,
+        );
+    } else {
+        let cue = "Loading…";
+        let px = font::MESSAGE * 1.0;
+        let (tw, _) = text.measure(cue, px);
+        text.draw(pixmap, cue, (w as f32 - tw) / 2.0, h as f32 / 2.0, px, theme::TEXT_PRIMARY);
+    }
+
+    let hint = "Click anywhere to close";
+    let px = font::TIMESTAMP * 1.0;
+    let (tw, _) = text.measure(hint, px);
+    text.draw(pixmap, hint, (w as f32 - tw) / 2.0, (h as f32) * 0.93, px, theme::TEXT_SECONDARY);
 }
 
 
