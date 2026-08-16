@@ -67,6 +67,9 @@ pub struct MessageList {
     /// Cache of per-row heights: `(text sig, pane width, heights)`.
     /// Rebuilt lazily only when the rows' text or the pane width changed.
     heights: RefCell<Option<(u64, f32, Vec<f32>)>>,
+    /// Off-screen pane pixel buffer, reused across frames (avoids a
+    /// per-frame allocation and clips rows past the visible edges).
+    pane: RefCell<Option<(u32, u32, Pixmap)>>,
 }
 
 impl Default for MessageList {
@@ -83,6 +86,7 @@ impl MessageList {
             line_height: 16.0,
             row_padding: 10.0,
             heights: RefCell::new(None),
+            pane: RefCell::new(None),
         }
     }
 
@@ -240,7 +244,7 @@ impl MessageList {
         out
     }
 
-    /// Draws the messages into `pixmap`, between `(x, y)` and `(x+w, y+h)`.
+/// Draws the messages into `pixmap`, between `(x, y)` and `(x+w, y+h)`.
     pub fn draw(
         &self,
         pixmap: &mut Pixmap,
@@ -256,34 +260,62 @@ impl MessageList {
         if w <= 0.0 || h <= 0.0 {
             return;
         }
-        self.fill_bg(pixmap, x, y, w, h);
+        // Rows scrolled partially past the pane's top edge would otherwise leak
+        // over the chat header. Drawing into an off-screen buffer the size of
+        // the pane clips them naturally (the pixmap clamps to its bounds), then
+        // we blit the result 1:1. The buffer is reused across frames.
+        let (pw, ph) = (w.round() as u32, h.round() as u32);
+        let mut cache = self.pane.borrow_mut();
+        let good = cache
+            .as_mut()
+            .is_some_and(|(cw, ch, _)| *cw == pw && *ch == ph);
+        if !good {
+            *cache = Some((pw, ph, Pixmap::new(pw, ph).expect("messages pane")));
+        }
+        let pane: &mut Pixmap = &mut cache.as_mut().unwrap().2;
+        self.draw_into(pane, text, w, h, scale, photos, selection);
+        crate::image::blit_opaque(pixmap, x.round() as i32, y.round() as i32, pane);
+    }
+
+    /// Draws the messages scene into `pixmap` whose top-left corner is `(0,0)`
+    /// and whose size is the pane size (`w × h`).
+    fn draw_into(
+        &self,
+        pixmap: &mut Pixmap,
+        text: &TextRenderer,
+        w: f32,
+        h: f32,
+        scale: f32,
+        photos: &PhotoCache,
+        selection: Option<&Selection>,
+    ) {
+        self.fill_pane_bg(pixmap);
 
         let s = scale.max(0.1);
+        let pw = pixmap.width() as f32;
         let lw = w / s;
         // Scroll is stored in logical coordinates; `s` projects it to physical.
         let heights = self.heights(text, lw);
         let mut cursor = -self.scroll;
         for (row_idx, msg) in self.rows.iter().enumerate() {
             let rh = heights[row_idx];
-            let phys_top = y + cursor * s;
-            if phys_top + rh * s > y {
-                if phys_top < y + h {
+            let phys_top = cursor * s;
+            if phys_top + rh * s > 0.0 {
+                if phys_top < h {
                     self.draw_bubble(
-                        pixmap, text, x, phys_top, w, rh, row_idx, msg, s, photos, selection,
+                        pixmap, text, 0.0, phys_top, pw, rh, row_idx, msg, s, photos, selection,
                     );
                 }
             }
-            if phys_top >= y + h {
+            if phys_top >= h {
                 break;
             }
             cursor += rh;
         }
     }
 
-    fn fill_bg(&self, pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32) {
-        let mut bg = Paint::default();
-        bg.set_color(Color::from_rgba8(theme::CHAT_BG.0, theme::CHAT_BG.1, theme::CHAT_BG.2, 255));
-        pixmap.fill_rect(tiny_skia::Rect::from_xywh(x, y, w, h).unwrap(), &bg, Transform::identity(), None);
+    fn fill_pane_bg(&self, pixmap: &mut Pixmap) {
+        pixmap.fill(Color::from_rgba8(theme::CHAT_BG.0, theme::CHAT_BG.1, theme::CHAT_BG.2, 255));
     }
 
     /// Draws a photo bubble: the downloaded thumbnail (or a placeholder while
@@ -302,6 +334,7 @@ impl MessageList {
     ) {
         let box_w = bw;
         let radius = layout::BUBBLE_RADIUS * s;
+        let inset = 4.0 * s;
 
         // Placeholder background (also the bubble when no image is decoded).
         let (br, bg, bb) = if msg.out { theme::BUBBLE_SENT } else { theme::BUBBLE_RECV };
@@ -316,30 +349,14 @@ impl MessageList {
         );
 
         if let Some(path) = &msg.photo_path {
-            if let Some(img) = photos.get(path) {
-                let inset = 4.0 * s;
+            let max_w = (box_w - 2.0 * inset).max(1.0);
+            let max_h = (box_h - 2.0 * inset).max(1.0);
+            if let Some(img) = photos.fitted(path, max_w, max_h) {
                 let iw = img.width() as f32;
                 let ih = img.height() as f32;
-                let max_w = (bw - 2.0 * inset).max(1.0);
-                let max_h = (box_h - 2.0 * inset).max(1.0);
-                let i_aspect = ih / iw;
-                let mut dw = max_w;
-                let mut dh = dw * i_aspect;
-                if dh > max_h {
-                    dh = max_h;
-                    dw = dh / i_aspect;
-                }
-                let ix = x + (box_w - dw) / 2.0;
-                let iy = top + (box_h - dh) / 2.0;
-                let scale = dw / iw;
-                pixmap.draw_pixmap(
-                    ix.round() as i32,
-                    iy.round() as i32,
-                    (*img).as_ref(),
-                    &tiny_skia::PixmapPaint::default(),
-                    crate::image::draw_scale_transform(scale, ix, iy),
-                    None,
-                );
+                let ix = x + (box_w - iw) / 2.0;
+                let iy = top + (box_h - ih) / 2.0;
+                crate::image::blit_opaque(pixmap, ix.round() as i32, iy.round() as i32, &img);
                 return;
             }
         }

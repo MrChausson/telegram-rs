@@ -351,28 +351,11 @@ pub fn draw_viewer_overlay(
         None,
     );
 
-    if let Some(img) = photos.get(path) {
+if let Some(img) = photos.fitted(path, (w as f32) * 0.72, (h as f32) * 0.72) {
         let (iw, ih) = (img.width() as f32, img.height() as f32);
-        let max_w = (w as f32) * 0.72;
-        let max_h = (h as f32) * 0.72;
-        let aspect = ih / iw;
-        let mut dw = max_w;
-        let mut dh = dw * aspect;
-        if dh > max_h {
-            dh = max_h;
-            dw = dh / aspect;
-        }
-        let x0 = (w as f32 - dw) / 2.0;
-        let y0 = (h as f32 - dh) / 2.0;
-        let scale = dw / iw;
-        pixmap.draw_pixmap(
-            x0.round() as i32,
-            y0.round() as i32,
-            (*img).as_ref(),
-            &tiny_skia::PixmapPaint::default(),
-            crate::image::draw_scale_transform(scale, x0, y0),
-            None,
-        );
+        let x0 = (w as f32 - iw) / 2.0;
+        let y0 = (h as f32 - ih) / 2.0;
+        crate::image::blit_opaque(pixmap, x0.round() as i32, y0.round() as i32, &img);
     } else {
         let cue = "Loading…";
         let px = font::MESSAGE * 1.0;
@@ -431,22 +414,19 @@ fn draw_chat_header(
     let avx = x + pad * 2.0 + 16.0 * s;
     let mut drew_photo = false;
     if let Some(p) = avatar_path {
-        if let Some(img) = photos.get(p) {
+        if let Some(img) = photos.fitted(p, av, av) {
             let iw = img.width() as f32;
             let ih = img.height() as f32;
-            let scale = ((av) / iw.max(ih)).min(1.0);
-            let dw = iw * scale;
-            let dh = ih * scale;
             let mut mask = tiny_skia::Mask::new(pixmap.width(), pixmap.height()).unwrap();
             if let Some(circle) = tiny_skia::PathBuilder::from_circle(avx, cy, av / 2.0) {
                 mask.fill_path(&circle, tiny_skia::FillRule::Winding, true, Transform::identity());
             }
             pixmap.draw_pixmap(
-                (avx - dw / 2.0).round() as i32,
-                (cy - dh / 2.0).round() as i32,
+                (avx - iw / 2.0).round() as i32,
+                (cy - ih / 2.0).round() as i32,
                 (*img).as_ref(),
                 &tiny_skia::PixmapPaint::default(),
-                crate::image::draw_scale_transform(scale, avx - dw / 2.0, cy - dh / 2.0),
+                Transform::identity(),
                 Some(&mask),
             );
             drew_photo = true;

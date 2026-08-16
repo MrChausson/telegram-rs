@@ -11,19 +11,40 @@ use std::rc::Rc;
 
 use tiny_skia::{Pixmap, PixmapPaint, Transform};
 
-/// Maximum decoded thumbnail side kept in memory.
-pub const THUMB_MAX: u32 = 256;
-/// Maximum number of decoded thumbnails in the LRU cache (256*256*4 ≈ 256 KB
-/// each, so the whole cache stays under a few MB).
-pub const CACHE_MAX: usize = 12;
+/// Maximum decoded thumbnail side kept in memory. Matches the downloaded
+/// photo size (>= 512 px) so previews never look blocky.
+pub const THUMB_MAX: u32 = 512;
+/// Maximum number of decoded thumbnails in the LRU cache (each ≤ 512*512*4
+/// ≈ 1 MB, so the whole cache stays around a few MB).
+pub const CACHE_MAX: usize = 8;
+/// Maximum number of pre-fitted (bubble-sized) images cached.
+pub const FITTED_MAX: usize = 10;
 
-/// Transform for `Pixmap::draw_pixmap(x, y, …)`: tiny-skia translates the
-/// image's pattern to `(x, y)` but applies the caller's transform around the
-/// origin, so `Transform::from_scale` alone would pin the scaled image at
-/// `(x·scale, y·scale)` instead of `(x, y)`. Compose the translation so the
-/// scaled image keeps its top-left corner at `(x, y)`.
-pub fn draw_scale_transform(scale: f32, x: f32, y: f32) -> Transform {
-    Transform::from_scale(scale, scale).post_translate(x * (1.0 - scale), y * (1.0 - scale))
+/// Blits an opaque `src` pixmap into `dst` at `(x, y)` (top-left), clipping to
+/// the destination bounds. Photos are fully opaque, so tiny-skia's per-pixel
+/// alpha compositing is wasted work; a straight row copy is ~100–300× faster.
+pub fn blit_opaque(dst: &mut Pixmap, x: i32, y: i32, src: &Pixmap) {
+    let (dw, dh) = (dst.width() as i32, dst.height() as i32);
+    let (sw, sh) = (src.width() as i32, src.height() as i32);
+    // Source columns left/right of the target.
+    let col0 = x.max(0) - x;
+    let col1 = (x + sw).min(dw) - x;
+    // Source rows above/below the target.
+    let row0 = y.max(0) - y;
+    let row1 = (y + sh).min(dh) - y;
+    if col0 >= col1 || row0 >= row1 {
+        return;
+    }
+    let cols = (col1 - col0) as usize;
+    let src_px = src.pixels();
+    let dst_px = dst.pixels_mut();
+    let src_w = sw as usize;
+    let dst_w = dw as usize;
+    for r in row0..row1 {
+        let dst_row = (y + r) as usize * dst_w + (x + col0) as usize;
+        let src_row = r as usize * src_w + col0 as usize;
+        dst_px[dst_row..dst_row + cols].copy_from_slice(&src_px[src_row..src_row + cols]);
+    }
 }
 
 /// Decodes an image file into an RGBA thumbnail `Pixmap`, downscaled so its
@@ -86,11 +107,13 @@ fn downscale(src: &Pixmap) -> Pixmap {
     let dw = ((w as f32 * scale).round().max(1.0)) as u32;
     let dh = ((h as f32 * scale).round().max(1.0)) as u32;
     let mut dst = Pixmap::new(dw, dh).unwrap();
+    let mut paint = PixmapPaint::default();
+    paint.quality = tiny_skia::FilterQuality::Bilinear;
     dst.draw_pixmap(
         0,
         0,
         src.as_ref(),
-        &PixmapPaint::default(),
+        &paint,
         Transform::from_scale(scale, scale),
         None,
     );
@@ -102,6 +125,10 @@ fn downscale(src: &Pixmap) -> Pixmap {
 pub struct PhotoCache {
     images: RefCell<HashMap<String, Rc<Pixmap>>>,
     order: RefCell<VecDeque<String>>,
+    /// Pre-fitted images (already scaled to their display box), so drawing a
+    /// frame is a 1:1 blit instead of a tiny-skia scale per frame.
+    fitted: RefCell<HashMap<(String, u32, u32), Rc<Pixmap>>>,
+    fitted_order: RefCell<VecDeque<(String, u32, u32)>>,
 }
 
 impl PhotoCache {
@@ -120,6 +147,51 @@ impl PhotoCache {
         cache.insert(path.to_string(), Rc::clone(&img));
         order.push_back(path.to_string());
         while cache.len() > CACHE_MAX {
+            if let Some(oldest) = order.pop_front() {
+                cache.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        Some(img)
+    }
+
+    /// Returns the image for `path` scaled so it fits (without distortion)
+    /// inside a `fit_w × fit_h` box, caching the pre-scaled result. Falls back
+    /// to the raw thumbnail when no scaling is needed.
+    pub fn fitted(&self, path: &str, fit_w: f32, fit_h: f32) -> Option<Rc<Pixmap>> {
+        let fit_w = fit_w.max(1.0);
+        let fit_h = fit_h.max(1.0);
+        let key = (path.to_string(), fit_w as u32, fit_h as u32);
+        if let Some(img) = self.fitted.borrow().get(&key) {
+            return Some(Rc::clone(img));
+        }
+        let base = self.get(path)?;
+        let (bw, bh) = (base.width() as f32, base.height() as f32);
+        let scale = (fit_w / bw).min(fit_h / bh);
+        let dw = ((bw * scale).round() as u32).max(1);
+        let dh = ((bh * scale).round() as u32).max(1);
+        // 1:1 (or the source itself already fits the box): nothing to scale.
+        if dw == base.width() && dh == base.height() {
+            return Some(base);
+        }
+        let mut dst = Pixmap::new(dw, dh)?;
+        let mut paint = PixmapPaint::default();
+        paint.quality = tiny_skia::FilterQuality::Bilinear;
+        dst.draw_pixmap(
+            0,
+            0,
+            (*base).as_ref(),
+            &paint,
+            Transform::from_scale(scale, scale),
+            None,
+        );
+        let img = Rc::new(dst);
+        let mut cache = self.fitted.borrow_mut();
+        let mut order = self.fitted_order.borrow_mut();
+        cache.insert(key.clone(), Rc::clone(&img));
+        order.push_back(key.clone());
+        while cache.len() > FITTED_MAX {
             if let Some(oldest) = order.pop_front() {
                 cache.remove(&oldest);
             } else {

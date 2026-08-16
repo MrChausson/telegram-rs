@@ -150,9 +150,9 @@ impl ChatList {
         // Avatar: profile photo (if downloaded) or colored circle + initial.
         let av_size = layout::AVATAR_LIST * s;
         let (cx, cy) = (x + pad + av_size / 2.0, top + row_h / 2.0);
-        if row.avatar_path.as_ref().and_then(|p| photos.get(p)).is_some() {
+        if row.avatar_path.as_ref().and_then(|p| photos.fitted(p, av_size, av_size)).is_some() {
             if let Some(path) = &row.avatar_path {
-                if let Some(img) = photos.get(path) {
+                if let Some(img) = photos.fitted(path, av_size, av_size) {
                     draw_avatar_image(pixmap, cx, cy, av_size / 2.0, img);
                 }
             }
