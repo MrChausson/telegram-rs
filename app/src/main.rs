@@ -111,6 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 id: d.id.bot_api_dialog_id(),
                                 title: d.title.clone(),
                                 subtitle: d.last_message.clone().unwrap_or_default(),
+                                date: d.last_date.unwrap_or(0),
                                 unread: d.unread_count,
                             }
                         })
@@ -201,6 +202,7 @@ async fn serve(
                                 .map(|m| MsgRow {
                                     id: m.id,
                                     text: m.text,
+                                    date: m.date,
                                     out: m.out,
                                 })
                                 .collect();
@@ -251,6 +253,7 @@ fn handle_update(ui_tx: &mpsc::UnboundedSender<UiMessage>, update: Update) {
                     chat_id: peer.id().bot_api_dialog_id(),
                     id: msg.id(),
                     text: msg.text().to_string(),
+                    date: msg.date().timestamp() as i32,
                     out: msg.outgoing(),
                 });
             }
@@ -261,6 +264,7 @@ fn handle_update(ui_tx: &mpsc::UnboundedSender<UiMessage>, update: Update) {
                     chat_id: peer.id().bot_api_dialog_id(),
                     id: msg.id(),
                     text: msg.text().to_string(),
+                    date: msg.date().timestamp() as i32,
                 });
             }
         }
@@ -289,6 +293,7 @@ async fn handle_request(
                         .map(|m| MsgRow {
                             id: m.id,
                             text: m.text,
+                            date: m.date,
                             out: m.out,
                         })
                         .collect();

@@ -10,6 +10,7 @@ softbuffer.workspace = true
 tiny-skia.workspace = true
 fontdue = "0.8"
 tokio = { version = "1", features = ["sync"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "alloc"] }
 
 [lib]
 name = "ui"

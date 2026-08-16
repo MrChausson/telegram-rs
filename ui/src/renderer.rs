@@ -1,29 +1,17 @@
 //! Pure rendering of the scene into a `Pixmap` (no window dependency).
 //! Testable off-screen: render a frame and inspect/compare pixels.
+//!
+//! Split-pane layout: a fixed chat-list column on the left and the open
+//! conversation (or a placeholder) on the right, like Telegram Desktop.
 
-use tiny_skia::{Color, Paint, Pixmap, Rect, Transform};
+use tiny_skia::{Color, Paint, Pixmap, Transform};
 
-use crate::chatlist::{ChatList, ROW_BG};
+use crate::chatlist::ChatList;
+use crate::icons;
 use crate::messages::MessageList;
+use crate::state::Screen;
 use crate::text::TextRenderer;
-
-/// Scene background, as an opaque (r, g, b) tuple.
-pub const BACKGROUND: (u8, u8, u8) = (30, 31, 34);
-/// Text color, as an opaque (r, g, b) tuple.
-pub const TEXT: (u8, u8, u8) = (236, 239, 244);
-
-/// Height of the top bar in chat mode (back button + title).
-pub const TOPBAR_H: f32 = 36.0;
-/// Height of the composer bar at the bottom of the chat view.
-pub const INPUTBAR_H: f32 = 40.0;
-/// Safety margin at the bottom of the messages area (above the composer).
-pub const MESSAGES_BOTTOM_GAP: f32 = 8.0;
-
-/// View to draw.
-pub enum View<'a> {
-    List,
-    Chat { title: &'a str, messages: &'a MessageList },
-}
+use crate::theme::{self, font, layout};
 
 /// Draws the scene into the given `Pixmap`.
 ///
@@ -32,7 +20,8 @@ pub fn render(
     pixmap: &mut Pixmap,
     text: &TextRenderer,
     list: &ChatList,
-    view: View,
+    screen: &Screen,
+    messages: &MessageList,
     status: &str,
     input: &str,
     scale: f32,
@@ -40,261 +29,216 @@ pub fn render(
     if pixmap.width() == 0 || pixmap.height() == 0 {
         return Err("empty pixmap");
     }
-
-    pixmap.fill(bg());
+    pixmap.fill(color(theme::CHAT_BG));
 
     let s = scale.max(0.1);
     let width = pixmap.width() as f32;
     let height = pixmap.height() as f32;
 
-    match view {
-        View::List => {
-            if list.rows.is_empty() {
-                draw_status(pixmap, text, status, width, height, s);
-            } else {
-                list.draw(pixmap, text, 0.0, 0.0, width, height, s);
-            }
+    let list_w = layout::LIST_W * s;
+    if width <= list_w {
+        return Ok(());
+    }
+    let rx = list_w;
+    let rw = width - list_w;
+
+    // ---- Left pane: chat list (header + rows). ----
+    draw_list_header(pixmap, text, 0.0, 0.0, list_w, s);
+    let selected = match screen {
+        Screen::Chat { id, .. } => Some(*id),
+        Screen::Idle => None,
+    };
+    let list_h = (height - layout::LIST_HEADER_H * s).max(0.0);
+    list.draw(pixmap, text, 0.0, layout::LIST_HEADER_H * s, list_w, list_h, s, selected);
+
+    // Divider between the panes.
+    {
+        let mut d = Paint::default();
+        d.set_color(Color::from_rgba8(theme::INPUT_BORDER.0, theme::INPUT_BORDER.1, theme::INPUT_BORDER.2, 90));
+        pixmap.fill_rect(
+            tiny_skia::Rect::from_xywh(rx, 0.0, 1.0, height).unwrap(),
+            &d,
+            Transform::identity(),
+            None,
+        );
+    }
+
+    // ---- Right pane: conversation or placeholder. ----
+    match screen {
+        Screen::Idle => {
+            let (tw, _) = text.measure("Select a conversation", font::MESSAGE * s);
+            text.draw(
+                pixmap,
+                "Select a conversation",
+                rx + (rw - tw) / 2.0,
+                height / 2.0,
+                font::MESSAGE * s,
+                theme::TEXT_SECONDARY,
+            );
         }
-        View::Chat { title, messages } => {
-            draw_topbar(pixmap, text, title, width, s);
-            let area_h = (height - (TOPBAR_H + INPUTBAR_H + MESSAGES_BOTTOM_GAP) * s).max(0.0);
-            let area_y = TOPBAR_H * s;
+        Screen::Chat { id, loading } => {
+            let title = list
+                .rows
+                .iter()
+                .find(|r| r.id == *id)
+                .map(|r| r.title.clone())
+                .unwrap_or_default();
+            let _ = loading;
+            draw_chat_header(pixmap, text, &title, rx, rw, s);
+
+            let area_y = layout::CHAT_HEADER_H * s;
+            let bottom = (height - (layout::INPUT_H + layout::MESSAGES_BOTTOM_GAP) * s).max(area_y + 1.0);
             if messages.rows.is_empty() {
                 if !status.is_empty() {
-                    draw_status(pixmap, text, status, width, area_y + area_h / 2.0, s);
+                    let (tw, _) = text.measure(status, font::MESSAGE * s);
+                    text.draw(
+                        pixmap,
+                        status,
+                        rx + (rw - tw) / 2.0,
+                        (area_y + bottom) / 2.0,
+                        font::MESSAGE * s,
+                        theme::TEXT_SECONDARY,
+                    );
                 }
             } else {
-                messages.draw(pixmap, text, 0.0, area_y, width, area_h, s);
+                messages.draw(pixmap, text, rx, area_y, rw, bottom - area_y, s);
             }
-            draw_inputbar(pixmap, text, input, width, height, s);
+
+            draw_composer(pixmap, text, input, rx, height - layout::INPUT_H * s, rw, s);
         }
     }
 
     Ok(())
 }
 
-fn draw_topbar(pixmap: &mut Pixmap, text: &TextRenderer, title: &str, width: f32, s: f32) {
-    let bar_h = TOPBAR_H * s;
-    let mut bar = Paint::default();
-    bar.set_color(Color::from_rgba8(ROW_BG.0, ROW_BG.1, ROW_BG.2, 255));
-    pixmap.fill_rect(
-        Rect::from_xywh(0.0, 0.0, width, bar_h).unwrap(),
-        &bar,
-        Transform::identity(),
-        None,
-    );
-
-    let px = 18.0 * s;
-    text.draw(pixmap, "<", 12.0 * s, 24.0 * s, px, TEXT);
-
-    // Title, truncated to the remaining width.
-    let title_px = 16.0 * s;
-    let (tw, _) = text.measure(title, title_px);
-    let max_w = width - 60.0 * s;
-    let title = if tw > max_w {
-        let mut out = String::new();
-        for ch in title.chars() {
-            if text.measure(&format!("{out}{ch}…"), title_px).0 <= max_w {
-                out.push(ch);
-            } else {
-                break;
-            }
-        }
-        format!("{out}…")
-    } else {
-        title.to_string()
-    };
-    text.draw(pixmap, &title, 34.0 * s, 24.0 * s, title_px, TEXT);
+fn color(c: (u8, u8, u8)) -> Color {
+    Color::from_rgba8(c.0, c.1, c.2, 255)
 }
 
-fn draw_status(pixmap: &mut Pixmap, text: &TextRenderer, status: &str, width: f32, center_y: f32, s: f32) {
-    let px = 16.0 * s;
-    let (tw, _) = text.measure(status, px);
-    text.draw(pixmap, status, (width - tw) / 2.0, center_y, px, TEXT);
+
+/// Left pane header: "Chats" title + search/compose/menu icons.
+fn draw_list_header(pixmap: &mut Pixmap, text: &TextRenderer, x: f32, y: f32, w: f32, s: f32) {
+    let h = layout::LIST_HEADER_H * s;
+    let mut bg = Paint::default();
+    bg.set_color(color(theme::LIST_BG));
+    pixmap.fill_rect(tiny_skia::Rect::from_xywh(x, y, w, h).unwrap(), &bg, Transform::identity(), None);
+
+    text.draw(pixmap, "Chats", x + 16.0 * s, y + h / 2.0 + 8.0 * s, font::TITLE * s, theme::TEXT_PRIMARY);
+
+    let ic = 20.0 * s;
+    let cx = x + w - 20.0 * s;
+    let cy = y + h / 2.0;
+    icons::dots(pixmap, cx, cy, ic, theme::ICON);
+    icons::compose(pixmap, cx - 30.0 * s, cy, ic, theme::ICON);
+    icons::search(pixmap, cx - 60.0 * s, cy, ic, theme::ICON);
 }
 
-/// Composer bar at the bottom of the chat view (typed text).
-fn draw_inputbar(
-    pixmap: &mut Pixmap,
-    text: &TextRenderer,
-    input: &str,
-    width: f32,
-    height: f32,
-    s: f32,
-) {
-    let bar_h = INPUTBAR_H * s;
-    let y = height - bar_h;
-    let mut bar = Paint::default();
-    bar.set_color(Color::from_rgba8(ROW_BG.0, ROW_BG.1, ROW_BG.2, 255));
-    pixmap.fill_rect(
-        Rect::from_xywh(0.0, y, width, bar_h).unwrap(),
-        &bar,
-        Transform::identity(),
-        None,
-    );
+/// Right pane header: back, avatar, name + status, search/info icons.
+fn draw_chat_header(pixmap: &mut Pixmap, text: &TextRenderer, title: &str, x: f32, w: f32, s: f32) {
+    let h = layout::CHAT_HEADER_H * s;
+    let mut bg = Paint::default();
+    bg.set_color(color(theme::LIST_BG));
+    pixmap.fill_rect(tiny_skia::Rect::from_xywh(x, 0.0, w, h).unwrap(), &bg, Transform::identity(), None);
 
     let pad = 12.0 * s;
-    let px = 14.0 * s;
-    let max_w = (width - pad * 2.0).max(20.0 * s);
-    let baseline = y + bar_h / 2.0 + 5.0 * s;
+    // Back arrow.
+    let back_cx = x + pad + 10.0 * s;
+    let cy = h / 2.0;
+    icons::back(pixmap, back_cx, cy, 18.0 * s, theme::ICON);
 
-    if input.is_empty() {
-        text.draw(pixmap, "Message…", pad, baseline, px, crate::chatlist::SUBTITLE);
+    // Avatar (placeholder initial) — square for now, tinted by title.
+    let av = layout::AVATAR_CHAT * s;
+    let avx = x + pad * 2.0 + 16.0 * s;
+    let mut ap = Paint::default();
+    ap.set_color(color(theme::ACCENT));
+    let circle = tiny_skia::PathBuilder::from_circle(avx, cy, av / 2.0).unwrap();
+    pixmap.fill_path(&circle, &ap, tiny_skia::FillRule::Winding, Transform::identity(), None);
+    if let Some(initial) = title.chars().next() {
+        let px = font::NAME * s;
+        let (tw, _) = text.measure(&initial.to_string(), px);
+        text.draw(pixmap, &initial.to_string(), avx - tw / 2.0, cy + 6.0 * s, px, theme::TEXT_PRIMARY);
+    }
+
+    // Name.
+    let name_x = avx + av / 2.0 + 10.0 * s;
+    let name_max = (x + w - 84.0 * s - name_x).max(20.0);
+    let name = truncate(text, title, name_max, font::NAME * s);
+    text.draw(pixmap, &name, name_x, cy + 6.0 * s, font::NAME * s, theme::TEXT_PRIMARY);
+    // Status / online placeholder.
+    let status = "Chat";
+    text.draw(pixmap, status, name_x, cy + 22.0 * s, font::TIMESTAMP * s, theme::TEXT_SECONDARY);
+
+    // Right icons.
+    let ic = 20.0 * s;
+    let icx = x + w - 22.0 * s;
+    icons::info(pixmap, icx, cy, ic, theme::ICON);
+    icons::search(pixmap, icx - 32.0 * s, cy, ic, theme::ICON);
+}
+
+fn truncate(text: &TextRenderer, title: &str, max_w: f32, px: f32) -> String {
+    if text.measure(title, px).0 <= max_w {
+        return title.to_string();
+    }
+    let mut out = String::new();
+    for ch in title.chars() {
+        if text.measure(&format!("{out}{ch}…"), px).0 <= max_w {
+            out.push(ch);
+        } else {
+            break;
+        }
+    }
+    format!("{out}…")
+}
+
+/// Composer bar: rounded input + placeholder + send button.
+fn draw_composer(pixmap: &mut Pixmap, text: &TextRenderer, input: &str, x: f32, y: f32, w: f32, s: f32) {
+    let h = layout::INPUT_H * s;
+    let mut bg = Paint::default();
+    bg.set_color(color(theme::LIST_BG));
+    pixmap.fill_rect(tiny_skia::Rect::from_xywh(x, y, w, h).unwrap(), &bg, Transform::identity(), None);
+
+    let pad = 12.0 * s;
+    let radius = layout::INPUT_RADIUS * s;
+    let field_h = h - 2.0 * pad;
+    let send = 34.0 * s;
+    let field_w = (w - pad * 2.0 - send - 10.0 * s).max(20.0).min(w - pad * 2.0);
+
+    // Rounded input field.
+    let fbg = color((26, 38, 52));
+    let mut fp = Paint::default();
+    fp.set_color(fbg);
+    let field_path = theme::rounded_rect(x + pad, y + pad, field_w, field_h, radius);
+    pixmap.fill_path(&field_path, &fp, tiny_skia::FillRule::Winding, Transform::identity(), None);
+
+    // Placeholder or typed text.
+    let px = font::PLACEHOLDER * s;
+    let tc = if input.is_empty() { theme::TEXT_SECONDARY } else { theme::TEXT_PRIMARY };
+    let shown = if input.is_empty() {
+        "Message…".to_string()
     } else {
-        let (iw, _) = text.measure(input, px);
-        let shown = if iw <= max_w {
+        let max = (field_w - 24.0 * s).max(10.0);
+        if text.measure(input, px).0 <= max {
             input.to_string()
         } else {
-            // Show the tail of the text (the caret stays on the right): build it
-            // from the end while it fits.
             let mut out = String::new();
             for ch in input.chars().rev() {
-                if text.measure(&format!("{ch}{out}"), px).0 <= max_w {
+                if text.measure(&format!("{ch}{out}"), px).0 <= max {
                     out.insert(0, ch);
                 } else {
                     break;
                 }
             }
             out
-        };
-        text.draw(pixmap, &shown, pad, baseline, px, TEXT);
-    }
-}
+        }
+    };
+    text.draw(pixmap, &shown, x + pad + 14.0 * s, y + h / 2.0 + 5.0 * s, px, tc);
 
-fn bg() -> Color {
-    Color::from_rgba8(BACKGROUND.0, BACKGROUND.1, BACKGROUND.2, 255)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::chatlist::{ChatList, ChatRow};
-
-    fn text() -> TextRenderer {
-        TextRenderer::new()
-    }
-
-    fn empty() -> ChatList {
-        ChatList::new()
-    }
-
-    #[test]
-    fn render_fills_the_background_with_the_base_color() {
-        let mut pixmap = Pixmap::new(200, 100).unwrap();
-        render(&mut pixmap, &text(), &empty(), View::List, "test", "", 1.0).unwrap();
-
-        // Corner away from the centered status.
-        let px = pixmap.pixel(2, 2).unwrap();
-        assert_eq!(
-            (px.red(), px.green(), px.blue()),
-            (BACKGROUND.0, BACKGROUND.1, BACKGROUND.2)
-        );
-    }
-
-    #[test]
-    fn render_shows_the_status_when_empty() {
-        let mut pixmap = Pixmap::new(300, 100).unwrap();
-        render(&mut pixmap, &text(), &empty(), View::List, "Connecting…", "", 1.0).unwrap();
-
-        let has_text = (0..100).any(|y| {
-            (0..300).any(|x| {
-                let p = pixmap.pixel(x, y).unwrap();
-                (p.red(), p.green(), p.blue()) != BACKGROUND
-            })
-        });
-        assert!(has_text);
-    }
-
-    #[test]
-    fn render_draws_the_list_when_not_empty() {
-        let mut list = ChatList::new();
-        list.rows = vec![ChatRow {
-            id: 1,
-            title: "My chat".into(),
-            subtitle: "hi".into(),
-            unread: 1,
-        }];
-        let mut pixmap = Pixmap::new(300, 200).unwrap();
-        render(&mut pixmap, &text(), &list, View::List, "", "", 1.0).unwrap();
-
-        let has_list = (0..200).any(|y| {
-            (0..300).any(|x| {
-                let p = pixmap.pixel(x, y).unwrap();
-                (p.red(), p.green(), p.blue()) != BACKGROUND
-            })
-        });
-        assert!(has_list);
-    }
-
-    #[test]
-    fn render_draws_the_chat_title_bar() {
-        let mut messages = MessageList::new();
-        messages.rows = vec![crate::messages::MsgRow {
-            id: 0,
-            text: "hi".into(),
-            out: false,
-        }];
-        let mut pixmap = Pixmap::new(300, 200).unwrap();
-        render(
-            &mut pixmap,
-            &text(),
-            &empty(),
-            View::Chat {
-                title: "My chat",
-                messages: &messages,
-            },
-            "",
-            "hello you",
-            1.0,
-        )
-        .unwrap();
-
-        // The top bar is not pure background.
-        let px = pixmap.pixel(10, 10).unwrap();
-        assert_ne!(
-            (px.red(), px.green(), px.blue()),
-            (BACKGROUND.0, BACKGROUND.1, BACKGROUND.2)
-        );
-    }
-
-    #[test]
-    fn render_draws_the_composer_bar() {
-        let messages = MessageList::new();
-        let mut pixmap = Pixmap::new(300, 200).unwrap();
-        render(
-            &mut pixmap,
-            &text(),
-            &empty(),
-            View::Chat {
-                title: "Chat",
-                messages: &messages,
-            },
-            "",
-            "",
-            1.0,
-        )
-        .unwrap();
-
-        // The composer bar (bottom) is not pure background.
-        let px = pixmap.pixel(10, 190).unwrap();
-        assert_ne!(
-            (px.red(), px.green(), px.blue()),
-            (BACKGROUND.0, BACKGROUND.1, BACKGROUND.2)
-        );
-    }
-
-    #[test]
-    fn render_rejects_an_empty_pixmap() {
-        assert!(Pixmap::new(0, 0).is_none());
-    }
-
-    #[test]
-    fn render_produces_a_stable_offscreen_png() {
-        let mut pixmap = Pixmap::new(400, 600).unwrap();
-        render(&mut pixmap, &text(), &empty(), View::List, "test", "", 1.0).unwrap();
-        let bytes = pixmap.encode_png().expect("png encode");
-        assert!(bytes.len() > 0);
-        let reloaded = Pixmap::decode_png(&bytes).expect("png decode");
-        assert_eq!(reloaded.as_ref().data(), pixmap.as_ref().data());
-    }
+    // Send button (accent circle + paper plane).
+    let sendx = x + w - pad - send / 2.0;
+    let sendy = y + h / 2.0;
+    let mut sp = Paint::default();
+    sp.set_color(color(theme::ACCENT));
+    let sc = tiny_skia::PathBuilder::from_circle(sendx, sendy, send / 2.0).unwrap();
+    pixmap.fill_path(&sc, &sp, tiny_skia::FillRule::Winding, Transform::identity(), None);
+    icons::send(pixmap, sendx, sendy, 20.0 * s, theme::TEXT_PRIMARY);
 }

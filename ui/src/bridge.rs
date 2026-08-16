@@ -26,9 +26,9 @@ pub enum UiMessage {
     },
     /// A new message was received live (incoming, or sent from another
     /// device of the same account).
-    NewMessage { chat_id: i64, id: i32, text: String, out: bool },
+    NewMessage { chat_id: i64, id: i32, text: String, date: i32, out: bool },
     /// An existing message was edited live.
-    MessageEdited { chat_id: i64, id: i32, text: String },
+    MessageEdited { chat_id: i64, id: i32, text: String, date: i32 },
     /// Some messages were deleted live (in the open chat).
     MessageDeleted { ids: Vec<i32> },
     /// Error to display (status).

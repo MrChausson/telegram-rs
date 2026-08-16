@@ -13,11 +13,11 @@ use winit::window::{Window, WindowId};
 
 use crate::blit::blit_pixmap;
 use crate::bridge::{Request, UiMessage};
-use crate::renderer::{View, render};
+use crate::renderer::render;
 use crate::state::{Screen, UiState};
 
-const WIDTH: f64 = 480.0;
-const HEIGHT: f64 = 680.0;
+const WIDTH: f64 = 980.0;
+const HEIGHT: f64 = 720.0;
 
 /// Runs the event loop. `rx` receives network messages; `tx` sends UI
 /// requests (open a chat, etc.). With `auto_open_title`, the matching chat is
@@ -96,8 +96,8 @@ impl App {
         }
 
         // Test mode: open the target chat as soon as the list is loaded.
-if let Some(target) = &self.auto_open {
-            if let Screen::List = self.state.screen {
+        if let Some(target) = &self.auto_open {
+            if let Screen::Idle = self.state.screen {
                 let id = if target == "*" {
                     self.state.list.rows.first().map(|r| r.id)
                 } else {
@@ -121,23 +121,6 @@ if let Some(target) = &self.auto_open {
             )
             .expect("resize surface");
 
-        let title = self.state.chat_title();
-        let view = match &self.state.screen {
-            Screen::List => View::List,
-            Screen::Chat { loading, .. } => {
-                if *loading {
-                    self.state.status = "Loading…".to_string();
-                }
-                View::Chat {
-                    title: &title,
-                    messages: &self.state.messages,
-                }
-            }
-        };
-
-        // Direct rendering at PHYSICAL resolution; the internal metrics
-        // (font sizes, line heights...) are scaled by `ui_scale` for a crisp
-        // result (no coarse upscale).
         let mut pixmap = std::mem::replace(&mut self.frame, tiny_skia::Pixmap::new(1, 1).expect("pixmap"));
         if pixmap.width() != width || pixmap.height() != height {
             pixmap = tiny_skia::Pixmap::new(width, height).expect("pixmap");
@@ -146,7 +129,8 @@ if let Some(target) = &self.auto_open {
             &mut pixmap,
             &self.text,
             &self.state.list,
-            view,
+            &self.state.screen,
+            &self.state.messages,
             &self.state.status,
             &self.state.input,
             scale,
@@ -216,7 +200,7 @@ impl ApplicationHandler for App {
                         .with_title("tg")
                         .with_inner_size(LogicalSize::new(WIDTH, HEIGHT)),
                 )
-.expect("window creation"),
+                .expect("window creation"),
         );
         window.set_ime_allowed(true);
         let detected = window.scale_factor() as f32;
@@ -242,7 +226,7 @@ impl ApplicationHandler for App {
         self.surface = Some(surface);
     }
 
-fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::CursorMoved { position, .. } => self.cursor = position,
@@ -277,7 +261,8 @@ fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: W
                 // down (reveals the start of the conversation). This is the
                 // "natural" trackpad direction. `TG_SCROLL_INVERT=1` flips it.
                 let invert = std::env::var("TG_SCROLL_INVERT").is_ok_and(|v| v == "1");
-                self.state.scroll(if invert { dy } else { -dy }, w, h, &self.text);
+                let x = self.cursor.x as f32 / scale;
+                self.state.scroll(if invert { dy } else { -dy }, x, w, h, &self.text);
                 self.request_redraw();
             }
             WindowEvent::KeyboardInput { event, .. } => {

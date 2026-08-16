@@ -3,18 +3,20 @@
 use crate::bridge::{Request, UiMessage};
 use crate::chatlist::ChatList;
 use crate::messages::{MessageList, MsgRow};
-use crate::renderer::{INPUTBAR_H, MESSAGES_BOTTOM_GAP, TOPBAR_H};
+use crate::theme::{self, layout};
 use crate::text::TextRenderer;
 
 /// Usable height of the messages area (logical units).
 fn messages_viewport(h: f32) -> f32 {
-    (h - TOPBAR_H - INPUTBAR_H - MESSAGES_BOTTOM_GAP).max(0.0)
+    (h - layout::CHAT_HEADER_H - layout::INPUT_H - layout::MESSAGES_BOTTOM_GAP).max(0.0)
 }
 
-/// Current screen.
+/// State of the right (conversation) pane. The chat list is always visible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Screen {
-    List,
+    /// No conversation selected: the right pane shows a placeholder.
+    Idle,
+    /// A conversation is open.
     Chat { id: i64, loading: bool },
 }
 
@@ -41,7 +43,7 @@ impl UiState {
         Self {
             list: ChatList::new(),
             messages: MessageList::new(),
-            screen: Screen::List,
+            screen: Screen::Idle,
             status: "Connecting…".to_string(),
             input: String::new(),
             needs_scroll_bottom: false,
@@ -62,7 +64,7 @@ impl UiState {
                 .find(|r| r.id == *id)
                 .map(|r| r.title.clone())
                 .unwrap_or_default(),
-            Screen::List => String::new(),
+            Screen::Idle => String::new(),
         }
     }
 
@@ -95,7 +97,7 @@ impl UiState {
                     }
                 }
             }
-            UiMessage::NewMessage { chat_id, id, text, out } => {
+            UiMessage::NewMessage { chat_id, id, text, date, out } => {
                 // Open chat? Merge the message (dedupe the optimistic local
                 // send, which is tagged id=0).
                 if let Screen::Chat { id: opened, .. } = &self.screen {
@@ -109,7 +111,7 @@ impl UiState {
                             m.id = id;
                             m.out = out;
                         } else {
-                            rows.push(MsgRow { id, text, out });
+                            rows.push(MsgRow { id, text, date, out });
                             self.needs_scroll_bottom = true;
                         }
                         return;
@@ -124,12 +126,13 @@ impl UiState {
                     }
                 }
             }
-            UiMessage::MessageEdited { chat_id, id, text } => {
+            UiMessage::MessageEdited { chat_id, id, text, date } => {
                 // Open chat? Update the matching message's text.
                 if let Screen::Chat { id: open, .. } = &self.screen {
                     if *open == chat_id {
                         if let Some(msg) = self.messages.rows.iter_mut().find(|m| m.id == id) {
                             msg.text = text;
+                            msg.date = date;
                         }
                         return;
                     }
@@ -152,20 +155,21 @@ impl UiState {
         }
     }
 
-    /// Mouse click: returns the request to send to the network (or `None`).
+    /// Mouse click (logical coordinates): routes to the left list pane or the
+    /// right conversation pane, returning the request to send (or `None`).
     pub fn click(&mut self, x: f32, y: f32, _width: f32) -> Option<Request> {
-        match &self.screen {
-            Screen::List => {
-                let id = self.list.row_at(y)?;
-                self.enter_chat(id)
-            }
-            Screen::Chat { .. } => {
-                if (x as f32) < 120.0 && (y as f32) < TOPBAR_H {
-                    self.screen = Screen::List;
-                }
-                None
+        if x < theme::layout::LIST_W {
+            let id = self.list.row_at(y)?;
+            return self.enter_chat(id);
+        }
+        // Right pane: the back arrow (top-left of the chat header) clears
+        // the selection.
+        if let Screen::Chat { .. } = &self.screen {
+            if (x - theme::layout::LIST_W) < 96.0 && (y as f32) < theme::layout::CHAT_HEADER_H {
+                self.screen = Screen::Idle;
             }
         }
+        None
     }
 
     /// Opens a chat directly by id (programmed click / test).
@@ -176,15 +180,22 @@ impl UiState {
         Some(Request::OpenChat { id })
     }
 
-    /// Mouse wheel.
-    pub fn scroll(&mut self, dy: f32, w: f32, h: f32, text: &TextRenderer) {
-        match &self.screen {
-            Screen::List => self.list.scroll_by(dy, h),
-            Screen::Chat { .. } => {
-                let viewport = messages_viewport(h);
-                let content = self.messages.content_height(text, w);
-                self.messages.scroll_by(dy, viewport, content);
-            }
+    /// Insights whether a click/touch position is inside the left pane.
+    pub fn is_left_pane(&self, x: f32) -> bool {
+        x < theme::layout::LIST_W
+    }
+
+    /// Mouse wheel: the list scrolls when the cursor is over the left pane,
+    /// the conversation otherwise (logical coordinates).
+    pub fn scroll(&mut self, dy: f32, x: f32, w: f32, h: f32, text: &TextRenderer) {
+        if x < theme::layout::LIST_W {
+            self.list.scroll_by(dy, h);
+            return;
+        }
+        if let Screen::Chat { .. } = &self.screen {
+            let viewport = messages_viewport(h);
+            let content = self.messages.content_height(text, w);
+            self.messages.scroll_by(dy, viewport, content);
         }
     }
 
@@ -207,17 +218,17 @@ impl UiState {
     pub fn enter(&mut self) -> Option<Request> {
         let (id, text) = match &self.screen {
             Screen::Chat { id, .. } => (*id, self.input.trim().to_string()),
-            Screen::List => return None,
+            Screen::Idle => return None,
         };
         if text.is_empty() {
             return None;
         }
         self.input.clear();
-        // Optimistic local send: the id is unknown (incoming updates will
-        // provide it).
+        // Optimistic local send: the id and date are unknown (incoming
+        // updates will provide them).
         self.messages
             .rows
-            .push(MsgRow { id: 0, text: text.clone(), out: true });
+            .push(MsgRow { id: 0, text: text.clone(), date: 0, out: true });
         Some(Request::SendMessage { id, text })
     }
 
@@ -243,18 +254,21 @@ mod tests {
                 id: 1,
                 title: "Alpha".into(),
                 subtitle: "hi".into(),
+                date: 0,
                 unread: 0,
             },
             ChatRow {
                 id: 2,
                 title: "Beta".into(),
                 subtitle: "hey".into(),
+                date: 0,
                 unread: 2,
             },
             ChatRow {
                 id: 3,
                 title: "Gamma".into(),
                 subtitle: "hello".into(),
+                date: 0,
                 unread: 0,
             },
         ]
@@ -285,8 +299,8 @@ mod tests {
         state.on_message(UiMessage::Dialogs(rows()));
         state.click(50.0, 70.0, 400.0);
 
-        state.click(10.0, 10.0, 400.0);
-        assert_eq!(state.screen, Screen::List);
+        state.click(310.0, 10.0, 400.0);
+        assert_eq!(state.screen, Screen::Idle);
     }
 
     #[test]
@@ -294,9 +308,9 @@ mod tests {
         let mut state = UiState::new();
         state.on_message(UiMessage::Dialogs(rows()));
 
-        let req = state.click(50.0, 1000.0, 400.0);
+        let req = state.click(150.0, 1000.0, 400.0);
         assert!(req.is_none());
-        assert_eq!(state.screen, Screen::List);
+        assert_eq!(state.screen, Screen::Idle);
     }
 
     #[test]
@@ -311,6 +325,7 @@ mod tests {
             rows: vec![MsgRow {
                 id: 99,
                 text: "first".into(),
+            date: 0,
                 out: false,
             }],
         });
@@ -334,6 +349,7 @@ mod tests {
             rows: vec![MsgRow {
                 id: 101,
                 text: "other".into(),
+            date: 0,
                 out: true,
             }],
         });
@@ -351,6 +367,7 @@ mod tests {
             chat_id: 2,
             id: 100,
             text: "already here (edited)".into(),
+            date: 0,
         });
 
         assert_eq!(state.messages.rows[0].text, "already here (edited)");
@@ -369,6 +386,7 @@ mod tests {
             chat_id: 2,
             id: 300,
             text: "sent from phone".into(),
+            date: 0,
             out: true,
         });
 
@@ -392,6 +410,7 @@ mod tests {
             chat_id: 2,
             id: 777,
             text: "hello".into(),
+            date: 0,
             out: true,
         });
 
@@ -424,6 +443,7 @@ mod tests {
             rows: vec![MsgRow {
                 id: 100,
                 text: "already here".into(),
+            date: 0,
                 out: false,
             }],
         });
@@ -486,6 +506,7 @@ mod tests {
             chat_id: 2,
             id: 55,
             text: "coucou en direct".into(),
+            date: 0,
             out: false,
         });
 
@@ -504,6 +525,7 @@ mod tests {
             chat_id: 1,
             id: 56,
             text: "for Alpha".into(),
+            date: 0,
             out: false,
         });
 
@@ -523,6 +545,7 @@ mod tests {
             chat_id: 3,
             id: 57,
             text: "Gamma parle".into(),
+            date: 0,
             out: false,
         });
         let gamma = state.list.rows.iter().find(|r| r.id == 3).unwrap();

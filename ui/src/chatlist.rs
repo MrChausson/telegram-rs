@@ -1,8 +1,9 @@
 //! Scrollable chat list: pure rendering into a `Pixmap`, testable off-screen.
 
-use tiny_skia::{Color, Paint, Pixmap, Rect, Transform};
+use tiny_skia::{Color, Paint, Pixmap, Transform};
 
 use crate::text::TextRenderer;
+use crate::theme::{self, font, layout};
 
 /// A single chat row.
 #[derive(Debug, Clone)]
@@ -10,6 +11,8 @@ pub struct ChatRow {
     pub id: i64,
     pub title: String,
     pub subtitle: String,
+    /// Unix timestamp of the last message (0 if none).
+    pub date: i32,
     pub unread: i32,
 }
 
@@ -21,13 +24,8 @@ pub struct ChatList {
     pub padding: f32,
 }
 
-pub const BG: (u8, u8, u8) = (30, 31, 34);
-pub const ROW_BG: (u8, u8, u8) = (35, 37, 42);
-pub const TEXT_COLOR: (u8, u8, u8) = (236, 239, 244);
-pub const SUBTITLE: (u8, u8, u8) = (150, 155, 165);
-pub const ACCENT: (u8, u8, u8) = (50, 168, 82);
 pub const AVATAR_PALETTE: [(u8, u8, u8); 6] = [
-    (50, 168, 82),
+    (51, 144, 236),
     (40, 130, 200),
     (210, 120, 60),
     (150, 90, 190),
@@ -47,7 +45,7 @@ impl ChatList {
             rows: Vec::new(),
             scroll: 0.0,
             row_height: 64.0,
-            padding: 8.0,
+            padding: 14.0,
         }
     }
 
@@ -66,8 +64,8 @@ impl ChatList {
         self.scroll = value.clamp(0.0, max);
     }
 
-    /// Draws the list into `pixmap` between `(x, y)` and `(x+w, y+h)` (physical
-    /// pixels). `scale` multiplies the internal metrics (rows, text).
+    /// Draws the rows into `pixmap` between `(x, y)` and `(x+w, y+h)`
+    /// (physical pixels). `scale` multiplies the internal metrics.
     pub fn draw(
         &self,
         pixmap: &mut Pixmap,
@@ -77,13 +75,12 @@ impl ChatList {
         w: f32,
         h: f32,
         scale: f32,
+        selected: Option<i64>,
     ) {
         if w <= 0.0 || h <= 0.0 {
             return;
         }
-        let mut bg = Paint::default();
-        bg.set_color(Color::from_rgba8(BG.0, BG.1, BG.2, 255));
-        pixmap.fill_rect(Rect::from_xywh(x, y, w, h).unwrap(), &bg, Transform::identity(), None);
+        self.fill_bg(pixmap, x, y, w, h);
 
         let s = scale.max(0.1);
         let row_h = self.row_height * s;
@@ -97,12 +94,18 @@ impl ChatList {
             if row_top + row_h < y {
                 continue;
             }
-            self.draw_row(pixmap, text, x, row_top, w, row_h, &self.rows[i], s);
+            self.draw_row(pixmap, text, x, row_top, w, row_h, &self.rows[i], s, selected);
         }
     }
 
-    /// Returns the id of the chat under `py` (viewport coordinates, `y` at the
-    /// top of the list), or `None` if outside any row.
+    pub fn fill_bg(&self, pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32) {
+        let mut bg = Paint::default();
+        bg.set_color(Color::from_rgba8(theme::LIST_BG.0, theme::LIST_BG.1, theme::LIST_BG.2, 255));
+        pixmap.fill_rect(tiny_skia::Rect::from_xywh(x, y, w, h).unwrap(), &bg, Transform::identity(), None);
+    }
+
+    /// Returns the id of the chat under `py` (logical viewport coordinates),
+    /// or `None` if outside any row.
     pub fn row_at(&self, y: f32) -> Option<i64> {
         let idx = ((y + self.scroll) / self.row_height).floor() as usize;
         self.rows.get(idx).map(|r| r.id)
@@ -118,20 +121,29 @@ impl ChatList {
         row_h: f32,
         row: &ChatRow,
         s: f32,
+        selected: Option<i64>,
     ) {
-        // Row background.
-        let mut bg = Paint::default();
-        bg.set_color(Color::from_rgba8(ROW_BG.0, ROW_BG.1, ROW_BG.2, 255));
-        pixmap.fill_rect(
-            Rect::from_xywh(x, top, w, row_h).unwrap(),
-            &bg,
-            Transform::identity(),
-            None,
-        );
+        // Selected highlight.
+        if selected == Some(row.id) {
+            let mut sel = Paint::default();
+            sel.set_color(Color::from_rgba8(
+                theme::ROW_SELECTED.0,
+                theme::ROW_SELECTED.1,
+                theme::ROW_SELECTED.2,
+                255,
+            ));
+            pixmap.fill_rect(
+                tiny_skia::Rect::from_xywh(x, top, w, row_h).unwrap(),
+                &sel,
+                Transform::identity(),
+                None,
+            );
+        }
 
-        // Avatar: colored circle + initial.
         let pad = self.padding * s;
-        let av_size = row_h - pad * 2.0;
+
+        // Avatar: colored circle + initial (photo avatars are out of MVP).
+        let av_size = layout::AVATAR_LIST * s;
         let (cx, cy) = (x + pad + av_size / 2.0, top + row_h / 2.0);
         let idx = (hash(&row.title) as usize) % AVATAR_PALETTE.len();
         let (ar, ag, ab) = AVATAR_PALETTE[idx];
@@ -140,52 +152,47 @@ impl ChatList {
         let circle = tiny_skia::PathBuilder::from_circle(cx, cy, av_size / 2.0).unwrap();
         pixmap.fill_path(&circle, &ap, tiny_skia::FillRule::Winding, Transform::identity(), None);
 
-        // Initial at the center of the avatar.
         if let Some(initial) = row.title.chars().next() {
-            let px = 20.0 * s;
+            let px = font::NAME * s;
             let (tw, _) = text.measure(&initial.to_string(), px);
-            text.draw(pixmap, &initial.to_string(), cx - tw / 2.0, cy + 6.0 * s, px, TEXT_COLOR);
+            text.draw(pixmap, &initial.to_string(), cx - tw / 2.0, cy + 6.0 * s, px, theme::TEXT_PRIMARY);
         }
 
         let text_x = x + pad * 2.0 + av_size;
+        let right_edge = x + w - pad;
 
-        // Title (truncated) + subtitle.
-        let title_max = w - text_x - 16.0 * s;
-        let title_px = 16.0 * s;
-        let title = truncate(text, &row.title, title_max, title_px);
-        text.draw(pixmap, &title, text_x, top + pad + 16.0 * s, title_px, TEXT_COLOR);
+        // Name and preview.
+        let name_px = font::NAME * s;
+        let msg_px = font::MESSAGE * s;
+        let ts_px = font::TIMESTAMP * s;
 
-        let sub_px = 12.0 * s;
-        let subtitle = truncate(text, &row.subtitle, title_max, sub_px);
-        text.draw(
-            pixmap,
-            &subtitle,
-            text_x,
-            top + pad + 32.0 * s,
-            sub_px,
-            SUBTITLE,
-        );
+        let name_max = right_edge - text_x - 60.0 * s;
+        let name = truncate(text, &row.title, name_max, name_px);
+        text.draw(pixmap, &name, text_x, top + 22.0 * s, name_px, theme::TEXT_PRIMARY);
 
-        // Unread badge.
+        let sub_max = right_edge - text_x - 8.0 * s;
+        let subtitle = truncate(text, &row.subtitle, sub_max, msg_px);
+        text.draw(pixmap, &subtitle, text_x, top + 34.0 * s, msg_px, theme::TEXT_SECONDARY);
+
+        // Timestamp (top-right).
+        if row.date > 0 {
+            let ts = crate::theme::fmt_time(row.date);
+            let (tw, _) = text.measure(&ts, ts_px);
+            text.draw(pixmap, &ts, right_edge - tw, top + 18.0 * s, ts_px, theme::TEXT_SECONDARY);
+        }
+
+        // Unread badge (blue circle, bottom-right).
         if row.unread > 0 {
+            let size = layout::BADGE_SIZE * s;
+            let bx = right_edge - size / 2.0;
+            let by = top + row_h - size / 2.0 - 4.0 * s;
             let count = row.unread.to_string();
-            let (cw, _) = text.measure(&count, sub_px);
-            let badge_r = 9.0 * s;
-            let bw = (cw + 12.0 * s).max(badge_r * 2.0);
-            let bx = x + w - bw - pad;
-            let by = top + pad;
+            let (cw, _) = text.measure(&count, font::BADGE * s);
             let mut bp = Paint::default();
-            bp.set_color(Color::from_rgba8(ACCENT.0, ACCENT.1, ACCENT.2, 255));
-            let badge_rect = Rect::from_xywh(bx, by, bw, 18.0 * s).unwrap();
-            pixmap.fill_rect(badge_rect, &bp, Transform::identity(), None);
-            text.draw(
-                pixmap,
-                &count,
-                bx + (bw - cw) / 2.0,
-                by + 13.0 * s,
-                sub_px,
-                TEXT_COLOR,
-            );
+            bp.set_color(Color::from_rgba8(theme::ACCENT.0, theme::ACCENT.1, theme::ACCENT.2, 255));
+            let badge = tiny_skia::PathBuilder::from_circle(bx, by, size / 2.0).unwrap();
+            pixmap.fill_path(&badge, &bp, tiny_skia::FillRule::Winding, Transform::identity(), None);
+            text.draw(pixmap, &count, bx - cw / 2.0, by + 4.0 * s, font::BADGE * s, theme::TEXT_PRIMARY);
         }
     }
 }
@@ -231,6 +238,7 @@ mod tests {
             id: title.len() as i64,
             title: title.to_string(),
             subtitle: "Last message".to_string(),
+            date: 1_700_000_000,
             unread: 3,
         }
     }
@@ -253,22 +261,31 @@ mod tests {
     }
 
     #[test]
-    fn draw_paints_rows() {
+    fn draw_paints_rows_and_selection() {
         let mut list = ChatList::new();
         list.rows = (0..5).map(|i| row(&format!("Chat {i}"))).collect();
         let mut pixmap = Pixmap::new(300, 200).unwrap();
-        list.draw(&mut pixmap, &text(), 0.0, 0.0, 300.0, 200.0, 1.0);
+        list.draw(&mut pixmap, &text(), 0.0, 0.0, 300.0, 200.0, 1.0, Some(6));
 
         let mut changed = 0;
         for y in 0..200 {
             for x in 0..300 {
                 let p = pixmap.pixel(x, y).unwrap();
-                if (p.red(), p.green(), p.blue()) != BG {
+                if (p.red(), p.green(), p.blue()) != theme::LIST_BG {
                     changed += 1;
                 }
             }
         }
         assert!(changed > 500);
+    }
+
+    #[test]
+    fn row_at_maps_to_the_right_chat() {
+        let mut list = ChatList::new();
+        list.rows = vec![row("Alpha"), row("Beta")];
+        assert_eq!(list.row_at(0.0), Some(5));
+        assert_eq!(list.row_at(64.0), Some(4));
+        assert_eq!(list.row_at(1000.0), None);
     }
 
     #[test]
@@ -278,5 +295,14 @@ mod tests {
         let short = truncate(&tr, &long, 150.0, 16.0);
         assert!(short.ends_with('…'));
         assert!(tr.measure(&short, 16.0).0 <= 150.0 + 1.0);
+    }
+
+    #[test]
+    fn fmt_time_formats_hh_mm() {
+        // Local timezone is machine-dependent; check the shape only.
+        let s = theme::fmt_time(1_683_000_000);
+        assert_eq!(s.len(), 5);
+        assert!(s.as_bytes()[2] == b':');
+        assert!(s.as_bytes()[0].is_ascii_digit());
     }
 }

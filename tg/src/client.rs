@@ -102,11 +102,13 @@ impl Telegram {
                 grammers_client::tl::enums::Dialog::Folder(_) => 0,
             };
             let peer_ref = dialog.peer_ref();
+            let last_date = dialog.last_message.as_ref().map(|m| m.date().timestamp() as i32);
             let last_message = dialog.last_message.map(|m| m.text().to_string());
             out.push(ChatInfo {
                 id,
                 title,
                 last_message,
+                last_date,
                 unread_count,
                 peer_ref,
             });
@@ -126,6 +128,7 @@ impl Telegram {
             out.push(MessageInfo {
                 id: msg.id(),
                 text: msg.text().to_string(),
+                date: msg.date().timestamp() as i32,
                 out: msg.outgoing(),
             });
         }
