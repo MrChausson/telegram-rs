@@ -1,4 +1,4 @@
-name: Linux build
+name: Build
 
 on:
   push:
@@ -14,8 +14,6 @@ env:
 jobs:
   build-linux:
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -77,12 +75,92 @@ jobs:
         with:
           name: tg-linux
           path: dist/
+          if-no-files-found: error
+
+  build-macos:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add cross-compile targets
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (release, Intel)
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Build (release, Apple Silicon)
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Bundle universal binary and tarball
+        run: |
+          mkdir -p dist
+          lipo -create \
+            target/x86_64-apple-darwin/release/app \
+            target/aarch64-apple-darwin/release/app \
+            -output dist/tg
+          tar -C dist -czf dist/tg-macos-universal.tar.gz tg
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tg-macos
+          path: dist/
+          if-no-files-found: error
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Zip the binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist, pkg | Out-Null
+          Copy-Item target/release/app.exe pkg/tg.exe
+          Compress-Archive -Path pkg/tg.exe -DestinationPath dist/tg-windows-x86_64.zip
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tg-windows
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tg-*
+          path: dist
+          merge-multiple: true
+
+      - name: List dist
+        run: ls -la dist
 
       - name: GitHub Release (on tag v*)
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/tg-linux-*.tar.gz
-            dist/tg-x86_64.AppImage
-            dist/install.sh
+          files: dist/*

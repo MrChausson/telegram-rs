@@ -5,6 +5,66 @@ with a **100% software renderer** (no GPU required). Built for people who care
 about resource usage: little RAM, little CPU, a clean and responsive UI — without
 the hundreds of megabytes of mainstream clients.
 
+## Quick start
+
+Every [release](https://github.com/MrChausson/telegram-rs/releases) ships
+ready-to-run binaries built by CI for Linux, macOS **and** Windows.
+
+### 1. Install
+
+**Linux** — pick one:
+
+```bash
+# AppImage (no install needed)
+chmod +x tg-x86_64.AppImage
+./tg-x86_64.AppImage
+
+# Or tarball + installer:
+tar xzf tg-linux-x86_64.tar.gz        # extracts app + install.sh
+./install.sh                          # → ~/.local/bin/tg + menu entry
+```
+
+**macOS** (universal: Intel & Apple Silicon):
+
+```bash
+tar xzf tg-macos-universal.tar.gz
+./tg
+# Unsigned build → first launch: right-click → Open, or
+# xattr -dr com.apple.quarantine tg
+```
+
+**Windows**:
+
+```powershell
+Expand-Archive tg-windows-x86_64.zip -DestinationPath tg
+tg\tg.exe  # or right-click → Extract and double-click tg.exe (SmartScreen: "More info" → "Run anyway")
+```
+
+### 2. Configure your account (one time, any OS)
+
+The client needs API credentials and a one-time interactive login:
+
+```bash
+git clone https://github.com/MrChausson/telegram-rs
+cd telegram-rs
+
+echo "API_ID=123456"      >> .env   # from https://my.telegram.org (API tools)
+echo "API_HASH=abcdef…"   >> .env
+
+cargo run -p tg --example login      # phone → code → 2FA; creates .tg.session
+```
+
+The client reads `.env` and `.tg.session` **from the directory you launch it
+in**, so keep them in the same folder as the binary, then:
+
+```bash
+# in that folder:
+./app          # Linux tarball   |  ./tg   macOS  |  tg.exe  Windows
+```
+
+> Rust is only needed for the one-time login step; an in-app login flow
+> (no cargo, from the released binary) is planned.
+
 ## Why it's light
 
 | Choice | Detail |
@@ -91,12 +151,22 @@ a 15 s safety net catches any missed update.
 
 ## Methods
 
+Pre-built binaries for all platforms are attached to each
+[release](https://github.com/MrChausson/telegram-rs/releases):
+
+| Platform | Artifact | Contents |
+|---|---|---|
+| Linux (x86_64) | `tg-x86_64.AppImage` | Double-click, nothing to install |
+| Linux (x86_64) | `tg-linux-x86_64.tar.gz` | `app` binary + `install.sh` |
+| macOS (universal) | `tg-macos-universal.tar.gz` | Intel + Apple Silicon binary `tg` |
+| Windows (x86_64) | `tg-windows-x86_64.zip` | `tg.exe` |
+
 ```bash
-# Install to ~/.local/bin (+ menu entry)
+# Install the tarball build to ~/.local/bin (+ menu entry)
 ./install.sh
 
-# Or download the Linux tarball / AppImage from the GitHub Releases
-# (triggered by CI on each v* tag).
+# Run the development build straight from the repo
+cargo run --release -p app
 ```
 
 ## Notable technical decisions
@@ -111,20 +181,26 @@ a 15 s safety net catches any missed update.
 
 ## Status
 
+## Status
+
 - **Working MVP**: read, send and receive in real time, groups and channels,
   message edits and deletions.
 - 47 unit tests (`cargo test`)
-- Tested on Arch Linux (X11/Wayland); targets macOS/Windows (winit/softbuffer).
+- Tested on Arch Linux (X11/Wayland); macOS and Windows are compiled by CI on
+  every push/PR as well.
 
 ## CI / CD
 
-`.github/workflows/build.yml` builds on every push/PR, runs the tests, and
-produces:
-- a Linux tarball (`tg-linux-$(uname -m).tar.gz`) with the binary and
-  `install.sh`;
-- an **AppImage** (`tg-x86_64.AppImage`).
+`.github/workflows/build.yml` builds on every push/PR and runs the tests on
+Linux, macOS **and** Windows. It produces per-platform artifacts:
+- Linux: `tg-linux-x86_64.tar.gz` (binary + `install.sh`) and `tg-x86_64.AppImage`;
+- macOS: `tg-macos-universal.tar.gz` (Intel + Apple Silicon via `lipo`);
+- Windows: `tg-windows-x86_64.zip` (`tg.exe`).
 
-On `v*` tags it also creates a **GitHub Release** with both artifacts.
+On `v*` tags it also creates a **GitHub Release** with all three platforms'
+artifacts. Releasing a new version is done from the **Actions** tab →
+**Release** workflow → pick `patch` / `minor` / `major`; it bumps the version,
+rotates the changelog, tags, and publishes the release.
 
 ## License
 
