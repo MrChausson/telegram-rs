@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.2.2] - 2026-08-16
+
 ### Changed
 - README: added a V1 roadmap comparing current features with the full
   Telegram Desktop feature set.
