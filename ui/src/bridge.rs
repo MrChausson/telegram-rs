@@ -9,8 +9,16 @@ use crate::messages::MsgRow;
 pub enum Request {
     /// Opens a chat: loads its history.
     OpenChat { id: i64 },
+    /// Marks all messages in a chat as read (server side).
+    MarkRead { id: i64 },
+    /// Tells the server the user started (`typing=true`) or stopped typing.
+    Typing { id: i64, typing: bool },
     /// Sends a text message to a chat.
     SendMessage { id: i64, text: String },
+    /// Edits an outgoing message (text only).
+    EditMessage { id: i64, msg_id: i32, text: String },
+    /// Deletes one of the user's messages (from all devices).
+    DeleteMessage { id: i64, msg_id: i32 },
     /// Downloads a message's photo thumbnail into the local cache.
     DownloadPhoto { chat_id: i64, msg_id: i32 },
     /// Downloads a chat's profile photo thumbnail.
@@ -41,6 +49,16 @@ pub enum UiMessage {
     MessageEdited { chat_id: i64, id: i32, text: String, date: i32 },
     /// A photo thumbnail was downloaded (path = on-disk location).
     PhotoReady { chat_id: i64, msg_id: i32, path: Option<String> },
+    /// A chat was marked read (server-side), so the local badge can clear.
+    ChatRead { id: i64 },
+    /// Another device read a chat: sync its unread badge.
+    UnreadCount { chat_id: i64, count: i32 },
+    /// The other party read our outgoing messages up to `max_id`; mark them
+    /// as read (double check).
+    OutboxRead { chat_id: i64, max_id: i32 },
+    /// A peer is typing in a chat (`typing=true`) or stopped (`false`).
+    /// Shown as a "typing…" status in the header of the open chat.
+    PeerTyping { chat_id: i64, typing: bool },
     /// A profile photo thumbnail was downloaded (path = option).
     AvatarReady { chat_id: i64, path: Option<String> },
     /// Some messages were deleted live (in the open chat).

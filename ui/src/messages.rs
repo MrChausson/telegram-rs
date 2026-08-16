@@ -24,6 +24,8 @@ pub struct MsgRow {
     pub photo: Option<(u32, u32)>,
     /// On-disk path of the downloaded photo thumbnail, once ready.
     pub photo_path: Option<String>,
+    /// True once the (outgoing) message was read by the other party.
+    pub read: bool,
 }
 
 /// A character position inside a specific message row.
@@ -143,6 +145,8 @@ impl MessageList {
             }
             h ^= r.out as u64;
             h = h.wrapping_mul(0x100_0000_01b3);
+            h ^= r.read as u64;
+            h = h.wrapping_mul(0x100_0000_01b3);
             if let Some((pw, ph)) = r.photo {
                 h ^= pw as u64 ^ (ph as u64) << 32;
             }
@@ -232,6 +236,24 @@ impl MessageList {
                     row: row_idx,
                     char: line.start + ch,
                 });
+            }
+            cursor += rh;
+        }
+        None
+    }
+
+    /// Index of the message row under a logical point within the pane,
+    /// considering the scroll offset (mirrors `draw_into`'s loop). Returns
+    /// `None` for empty space or panes without rows.
+    pub fn row_at(&self, text: &TextRenderer, y: f32, width: f32) -> Option<usize> {
+        if self.rows.is_empty() || y < 0.0 {
+            return None;
+        }
+        let heights = self.heights(text, width);
+        let mut cursor = -self.scroll;
+        for (row_idx, rh) in heights.iter().enumerate() {
+            if y >= cursor && y < cursor + rh {
+                return Some(row_idx);
             }
             cursor += rh;
         }
@@ -582,6 +604,30 @@ impl MessageList {
         let (tw, _) = text.measure(&ts, ts_px);
         let baseline = by + bubble_h - 6.0 * s;
         if msg.out {
+            // Message status tick(s): awaiting -> modest accent double tick for
+            // read messages, single tick for sent-but-unread.
+            let tick_w = 15.0 * s;
+            if msg.read {
+                let tx = bx - tw - 8.0 * s - tick_w;
+                crate::icons::tick(
+                    pixmap,
+                    tx + tick_w / 2.0,
+                    baseline - tick_w * 0.12,
+                    tick_w,
+                    true,
+                    theme::ACCENT,
+                );
+            } else {
+                let tx = bx - tw - 8.0 * s - tick_w;
+                crate::icons::tick(
+                    pixmap,
+                    tx + tick_w / 2.0,
+                    baseline - tick_w * 0.12,
+                    tick_w,
+                    false,
+                    theme::TEXT_SECONDARY,
+                );
+            }
             text.draw(pixmap, &ts, bx - tw - 8.0 * s, baseline, ts_px, theme::TEXT_SECONDARY);
         } else {
             text.draw(pixmap, &ts, bx + bubble_w + 8.0 * s, baseline, ts_px, theme::TEXT_SECONDARY);
@@ -726,6 +772,7 @@ mod tests {
             out: false,
             photo: None,
             photo_path: None,
+            read: false,
         }
     }
 
@@ -737,6 +784,7 @@ mod tests {
             out: true,
             photo: None,
             photo_path: None,
+            read: false,
         }
     }
 
@@ -822,8 +870,8 @@ mod tests {
     fn draw_renders_bubble_timestamps() {
         let mut list = MessageList::new();
         list.rows = vec![
-            MsgRow { id: 1, text: "hey".into(), date: 1_700_000_000, out: false, photo: None, photo_path: None },
-            MsgRow { id: 2, text: "yo".into(), date: 1_700_000_800, out: true, photo: None, photo_path: None },
+            MsgRow { id: 1, text: "hey".into(), date: 1_700_000_000, out: false, photo: None, photo_path: None, read: false },
+            MsgRow { id: 2, text: "yo".into(), date: 1_700_000_800, out: true, photo: None, photo_path: None, read: false },
         ];
         let mut pixmap = Pixmap::new(300, 200).unwrap();
         list.draw(&mut pixmap, &text(), 0.0, 0.0, 300.0, 200.0, 1.0, &PhotoCache::new(), None);
@@ -843,6 +891,7 @@ mod tests {
             out: false,
             photo: None,
             photo_path: None,
+            read: false,
         }];
         let s = 4.0;
         let mut pixmap = Pixmap::new(300, 200).unwrap();
@@ -1016,6 +1065,7 @@ mod tests {
             out: false,
             photo: Some((2, 1)),
             photo_path: Some(path.to_str().unwrap().to_string()),
+            read: false,
         });
         let tr = text();
         let cache = PhotoCache::new();

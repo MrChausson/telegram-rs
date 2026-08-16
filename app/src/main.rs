@@ -114,21 +114,27 @@ fn api_hash(env: &HashMap<String, String>) -> Option<String> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let env = load_env(&env_path());
-    let api_id: i32 = api_id(&env)?;
-    let api_hash = api_hash(&env);
     // `--open "<title>"` opens that chat at startup (useful for tests);
     // `--open-first` is a shortcut for the first chat (equivalent to
     // `--open "*"`).
+    // `--demo` runs a canned, offline backend so the UI can be exercised
+    // end-to-end (clicks, edit, delete, badges) without a network (or an
+    // account only every tenth of the interaction needs real data).
     let mut auto_open = None;
+    let mut demo = false;
     let mut iter = std::env::args().skip(1);
     while let Some(a) = iter.next() {
         match a.as_str() {
             "--open" => auto_open = iter.next(),
             "--open-first" => auto_open = Some("*".to_string()),
+            "--demo" => demo = true,
             _ => {}
         }
     }
+    let env = load_env(&env_path());
+    // Demo does not touch the network: no API credentials required.
+    let api_id = if demo { 0 } else { api_id(&env)? };
+    let api_hash = api_hash(&env);
 
     // A pristine home for the session and the cache, regardless of the
     // directory the binary is launched from.
@@ -152,6 +158,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build()
             .expect("tokio runtime");
         rt.block_on(async move {
+            if demo {
+                serve_demo(&ui_tx, &mut req_rx).await;
+                std::future::pending::<()>().await;
+            }
             let session = Arc::new(load_or_new(&session_path));
             let tg = match Telegram::connect(session.clone(), api_id).await {
                 Ok(tg) => tg,
@@ -207,6 +217,136 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     ui::window::run(ui_rx, req_tx, auto_open)?;
     Ok(())
+}
+
+/// Offline "backend" for `--demo`: replays canned dialogs/messages and
+/// echoes edits/deletes so the real UI can be exercised end-to-end without
+/// a network (or an account).
+async fn serve_demo(
+    ui_tx: &mpsc::UnboundedSender<UiMessage>,
+    req_rx: &mut mpsc::UnboundedReceiver<Request>,
+) {
+    const DEMO_CHAT: i64 = 42;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i32;
+
+    // A chat list with varied badges so the e2e script can click any of them.
+    let rows = vec![
+        ChatRow {
+            id: DEMO_CHAT,
+            title: "Démo TG".to_string(),
+            subtitle: "dis bonjour 👋 aux coches".to_string(),
+            date: now - 30,
+            unread: 3,
+            avatar_path: None,
+        },
+        ChatRow {
+            id: 43,
+            title: "Liste de courses".to_string(),
+            subtitle: "Pense à acheter du lait".to_string(),
+            date: now - 7200,
+            unread: 1,
+            avatar_path: None,
+        },
+        ChatRow {
+            id: 44,
+            title: "Canal Photos".to_string(),
+            subtitle: "Les vacances d'été 🏖".to_string(),
+            date: now - 86400,
+            unread: 0,
+            avatar_path: None,
+        },
+    ];
+    let _ = ui_tx.send(UiMessage::Dialogs(rows));
+
+    // Canned history: several outgoing rows (some read → double check) so the
+    // context menu has incoming targets, plus one photo placeholder.
+    let messages = vec![
+        MsgRow {
+            id: 1,
+            text: "Hello, this is a longer incoming message designed to wrap across several lines".to_string(),
+            date: now - 3600,
+            out: false,
+            photo: None,
+            photo_path: None,
+            read: false,
+        },
+        MsgRow {
+            id: 2,
+            text: "First reply from me".to_string(),
+            date: now - 3000,
+            out: true,
+            photo: None,
+            photo_path: None,
+            read: true,
+        },
+        MsgRow {
+            id: 3,
+            text: "Second one, shorter".to_string(),
+            date: now - 2000,
+            out: true,
+            photo: None,
+            photo_path: None,
+            read: false,
+        },
+        MsgRow {
+            id: 4,
+            text: "An incoming note".to_string(),
+            date: now - 1000,
+            out: false,
+            photo: None,
+            photo_path: None,
+            read: false,
+        },
+    ];
+
+    let mut edits: HashMap<i32, String> = HashMap::new();
+    loop {
+        let mut pending: Vec<Request> =
+            std::iter::from_fn(|| req_rx.try_recv().ok()).collect();
+        for req in pending.drain(..) {
+            match req {
+                Request::OpenChat { id } => {
+                    let _ = ui_tx.send(UiMessage::Messages {
+                        id,
+                        title: "Démo TG".to_string(),
+                        rows: messages
+                            .iter()
+                            .map(|m| {
+                                let mut m = m.clone();
+                                if let Some(text) = edits.get(&m.id) {
+                                    m.text = text.clone();
+                                }
+                                m
+                            })
+                            .collect(),
+                    });
+                }
+                Request::EditMessage { id, msg_id, text } => {
+                    edits.insert(msg_id, text.clone());
+                    let _ = ui_tx.send(UiMessage::MessageEdited {
+                        chat_id: id,
+                        id: msg_id,
+                        text,
+                        date: now,
+                    });
+                }
+                Request::DeleteMessage { id: _, msg_id } => {
+                    edits.remove(&msg_id);
+                    let _ = ui_tx.send(UiMessage::MessageDeleted { ids: vec![msg_id] });
+                }
+                Request::MarkRead { id } => {
+                    let _ = ui_tx.send(UiMessage::ChatRead { id });
+                }
+                // Silent, offline-friendly no-ops for everything else.
+                _ => {}
+            }
+        }
+        // Idle: stop the CPU grinding in a tight loop.
+        tokio::task::yield_now().await;
+    }
 }
 
 /// Resolves the sign-in flow, fielding the login requests until the account
@@ -408,6 +548,7 @@ async fn serve(
                                         tg::model::MediaKind::Photo { width, height } => (width, height),
                                     }),
                                     photo_path: None,
+                                    read: false,
                                 })
                                 .collect();
                             let _ = ui_tx.send(UiMessage::Messages {
@@ -480,8 +621,56 @@ fn handle_update(ui_tx: &mpsc::UnboundedSender<UiMessage>, update: Update) {
                 ids: m.messages().to_vec(),
             });
         }
+        // Raw updates not covered by the friendly enum above: read history
+        // changes (used to sync the unread badge), typing indicators and
+        // online presence.
+        Update::Raw(raw) => match &*raw {
+            grammers_client::tl::enums::Update::ReadHistoryInbox(u) => {
+                let id = grammers_session::types::PeerId::from(u.peer.clone()).bot_api_dialog_id();
+                let _ = ui_tx.send(UiMessage::UnreadCount {
+                    chat_id: id,
+                    count: u.still_unread_count.max(0),
+                });
+            }
+            grammers_client::tl::enums::Update::ReadHistoryOutbox(u) => {
+                let id = grammers_session::types::PeerId::from(u.peer.clone()).bot_api_dialog_id();
+                let _ = ui_tx.send(UiMessage::ChatRead { id });
+                let _ = ui_tx.send(UiMessage::OutboxRead {
+                    chat_id: id,
+                    max_id: u.max_id,
+                });
+            }
+            grammers_client::tl::enums::Update::UserTyping(u) => {
+                let _ = ui_tx.send(UiMessage::PeerTyping {
+                    chat_id: grammers_session::types::PeerId::user(u.user_id).bot_api_dialog_id(),
+                    typing: !action_is_cancel(&u.action),
+                });
+            }
+            grammers_client::tl::enums::Update::ChatUserTyping(u) => {
+                let _ = ui_tx.send(UiMessage::PeerTyping {
+                    chat_id: grammers_session::types::PeerId::chat(u.chat_id).bot_api_dialog_id(),
+                    typing: !action_is_cancel(&u.action),
+                });
+            }
+            grammers_client::tl::enums::Update::ChannelUserTyping(u) => {
+                let _ = ui_tx.send(UiMessage::PeerTyping {
+                    chat_id: grammers_session::types::PeerId::channel(u.channel_id)
+                        .bot_api_dialog_id(),
+                    typing: !action_is_cancel(&u.action),
+                });
+            }
+            _ => {}
+        }
         _ => {}
     }
+}
+
+/// True when a raw typing update is the "stopped typing" cancel signal.
+fn action_is_cancel(action: &grammers_client::tl::enums::SendMessageAction) -> bool {
+    matches!(
+        action,
+        grammers_client::tl::enums::SendMessageAction::SendMessageCancelAction
+    )
 }
 
 /// Handles a UI request.
@@ -492,6 +681,18 @@ async fn handle_request(
     peers: &HashMap<i64, (String, PeerRef)>,
 ) {
     match req {
+        Request::Typing { id, typing } => {
+            if let Some((_, peer_ref)) = peers.get(&id) {
+                let _ = tg.set_typing(peer_ref, typing).await;
+            }
+        }
+        Request::MarkRead { id } => {
+            if let Some((_, peer_ref)) = peers.get(&id) {
+                if tg.mark_read(peer_ref).await.is_ok() {
+                    let _ = ui_tx.send(UiMessage::ChatRead { id });
+                }
+            }
+        }
         Request::OpenChat { id } => {
             match peers.get(&id) {
             Some((title, peer_ref)) => match tg.get_messages(peer_ref, MESSAGE_LIMIT).await {
@@ -507,6 +708,7 @@ async fn handle_request(
                                 tg::model::MediaKind::Photo { width, height } => (width, height),
                             }),
                             photo_path: None,
+                            read: false,
                         })
                         .collect();
                     let _ = ui_tx.send(UiMessage::Messages {
@@ -524,6 +726,11 @@ async fn handle_request(
             None => {
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
             }
+        }
+        // Opening reads the conversation (server + local badge).
+        if let Some((_, peer_ref)) = peers.get(&id) {
+            let _ = tg.mark_read(peer_ref).await;
+            let _ = ui_tx.send(UiMessage::ChatRead { id });
         }
         },
         Request::DownloadPhoto { chat_id, msg_id } => match peers.get(&chat_id) {
@@ -556,6 +763,26 @@ async fn handle_request(
             Some((_, peer_ref)) => {
                 if let Err(e) = tg.send_message(peer_ref, &text).await {
                     let _ = ui_tx.send(UiMessage::Error(format!("Send failed: {e}")));
+                }
+            }
+            None => {
+                let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+            }
+        },
+        Request::EditMessage { id, msg_id, text } => match peers.get(&id) {
+            Some((_, peer_ref)) => {
+                if let Err(e) = tg.edit_message(peer_ref, msg_id, &text).await {
+                    let _ = ui_tx.send(UiMessage::Error(format!("Edit failed: {e}")));
+                }
+            }
+            None => {
+                let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+            }
+        },
+        Request::DeleteMessage { id, msg_id } => match peers.get(&id) {
+            Some((_, peer_ref)) => {
+                if let Err(e) = tg.delete_message(peer_ref, msg_id).await {
+                    let _ = ui_tx.send(UiMessage::Error(format!("Delete failed: {e}")));
                 }
             }
             None => {

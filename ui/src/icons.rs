@@ -124,6 +124,35 @@ pub fn presence_dot(pixmap: &mut Pixmap, cx: f32, cy: f32, r: f32, color: (u8, u
     fill_circle(pixmap, cx, cy, r, color);
 }
 
+/// Check marks like Telegram's message status: `sent` (single tick) or
+/// `read` (double tick). Center `(cx, cy)`, overall `size` in physical px.
+pub fn tick(pixmap: &mut Pixmap, cx: f32, cy: f32, size: f32, read: bool, color: (u8, u8, u8)) {
+    let w = size * 0.09;
+    let x0 = cx - size / 2.0;
+    let y0 = cy - size / 2.0;
+    // A check slopes from bottom-left to top-right: (0.55, 0.62) -> (0.90,
+    // 0.28) shadow... single tick path:
+    //   (0.28, 0.62) -> (0.45, 0.78) -> (0.72, 0.30)
+    // Double tick = that vertical span shifted left by `gap`.
+    let gap = size * 0.26;
+    let segs: [&[(f32, f32)]; 2] = [
+        &[
+            (x0 + size * 0.24, y0 + size * 0.60),
+            (x0 + size * 0.44, y0 + size * 0.78),
+            (x0 + size * 0.74, y0 + size * 0.28),
+        ],
+        &[
+            (x0 + size * 0.24 - gap, y0 + size * 0.60),
+            (x0 + size * 0.44 - gap, y0 + size * 0.78),
+            (x0 + size * 0.74 - gap, y0 + size * 0.28),
+        ],
+    ];
+    polyline(pixmap, segs[0], color, w);
+    if read {
+        polyline(pixmap, segs[1], color, w);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,10 +187,26 @@ mod tests {
             |p: &mut Pixmap| smiley(p, 40.0, 40.0, 24.0, (255, 255, 255)),
             |p: &mut Pixmap| attach(p, 40.0, 40.0, 24.0, (255, 255, 255)),
             |p: &mut Pixmap| info(p, 40.0, 40.0, 24.0, (255, 255, 255)),
+            |p: &mut Pixmap| tick(p, 40.0, 40.0, 24.0, false, (255, 255, 255)),
+            |p: &mut Pixmap| tick(p, 40.0, 40.0, 24.0, true, (255, 255, 255)),
         ] {
             let mut canvas = canvas();
             icon(&mut canvas);
             assert!(painted(&canvas) > 20, "icon painted too little");
         }
+    }
+
+    #[test]
+    fn read_tick_has_more_pixels_than_single_tick() {
+        let mut single = canvas();
+        tick(&mut single, 40.0, 40.0, 24.0, false, (255, 255, 255));
+        let mut double = canvas();
+        tick(&mut double, 40.0, 40.0, 24.0, true, (255, 255, 255));
+        assert!(
+            painted(&double) > painted(&single) * 3 / 2,
+            "double tick should add a second stroke ({} vs {})",
+            painted(&double),
+            painted(&single)
+        );
     }
 }

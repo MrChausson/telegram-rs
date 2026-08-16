@@ -10,7 +10,7 @@ use crate::chatlist::ChatList;
 use crate::icons;
 use crate::image::PhotoCache;
 use crate::messages::{MessageList, Selection};
-use crate::state::{LoginStep, Screen};
+use crate::state::{ContextMenu, LoginStep, Screen};
 use crate::text::TextRenderer;
 use crate::theme::{self, font, layout};
 
@@ -37,6 +37,9 @@ pub fn render(
     viewer: Option<&str>,
     photos: &PhotoCache,
     login: Option<LoginView<'_>>,
+    typing: Option<i64>,
+    editing: bool,
+    context: Option<&ContextMenu>,
     selection: Option<&Selection>,
     scale: f32,
 ) -> Result<(), &'static str> {
@@ -103,7 +106,18 @@ pub fn render(
             let title = row.map(|r| r.title.clone()).unwrap_or_default();
             let avatar = row.and_then(|r| r.avatar_path.clone());
             let _ = loading;
-            draw_chat_header(pixmap, text, &title, rx, rw, s, photos, avatar.as_deref());
+            let peer_typing = typing == Some(*id);
+            draw_chat_header(
+                pixmap,
+                text,
+                &title,
+                rx,
+                rw,
+                s,
+                photos,
+                avatar.as_deref(),
+                peer_typing,
+            );
 
             let area_y = layout::CHAT_HEADER_H * s;
             let bottom = (height - (layout::INPUT_H + layout::MESSAGES_BOTTOM_GAP) * s).max(area_y + 1.0);
@@ -123,11 +137,52 @@ pub fn render(
                 messages.draw(pixmap, text, rx, area_y, rw, bottom - area_y, s, photos, selection);
             }
 
-            draw_composer(pixmap, text, input, rx, height - layout::INPUT_H * s, rw, s);
+            draw_composer(pixmap, text, input, rx, height - layout::INPUT_H * s, rw, s, editing);
+
+            // Message context menu (right-click on an outgoing message).
+            if context.is_some() {
+                draw_context_menu(pixmap, text, rx, s, context);
+            }
         }
     }
 
     Ok(())
+}
+
+/// Draws the right-click menu over the open chat, anchored near the message
+/// that raised it.
+fn draw_context_menu(
+    pixmap: &mut Pixmap,
+    text: &TextRenderer,
+    x: f32,
+    s: f32,
+    context: Option<&ContextMenu>,
+) {
+    let Some(menu) = context else {
+        return;
+    };
+    let item_w = layout::CONTEXT_W * s;
+    let item_h = layout::CONTEXT_ITEM_H * s;
+    // Same geometry as the hit-test: the two items rise from a point six
+    // logical px above the message's top.
+    let raw_h = layout::CONTEXT_ITEM_H;
+    let my = (menu.y - raw_h - 6.0).max(4.0);
+    let y = my * s;
+    let h = raw_h * 2.0 * s;
+
+    // Rounded menu background.
+    let mut bgp = Paint::default();
+    bgp.set_color(color((30, 42, 58)));
+    let path = theme::rounded_rect(x + 10.0 * s, y, item_w, h, 8.0 * s);
+    pixmap.fill_path(&path, &bgp, tiny_skia::FillRule::Winding, Transform::identity(), None);
+
+    let baseline = |iy: f32| iy + (item_h / 2.0) + 6.0 * s;
+    let items = [("Modifier", theme::TEXT_PRIMARY), ("Supprimer", theme::ERROR)];
+    for (i, (label, color)) in items.iter().enumerate() {
+        let iy = y + i as f32 * item_h;
+        let txt_x = x + 10.0 * s + 16.0 * s;
+        text.draw(pixmap, label, txt_x, baseline(iy), font::PLACEHOLDER * s, *color);
+    }
 }
 
 /// Full-window sign-in screen: centered card with the logo, the step
@@ -397,6 +452,7 @@ fn draw_chat_header(
     s: f32,
     photos: &PhotoCache,
     avatar_path: Option<&str>,
+    typing: bool,
 ) {
     let h = layout::CHAT_HEADER_H * s;
     let mut bg = Paint::default();
@@ -435,9 +491,10 @@ fn draw_chat_header(
     let name_max = (x + w - 84.0 * s - name_x).max(20.0);
     let name = truncate(text, title, name_max, font::NAME * s);
     text.draw(pixmap, &name, name_x, cy + 6.0 * s, font::NAME * s, theme::TEXT_PRIMARY);
-    // Status / online placeholder.
-    let status = "Chat";
-    text.draw(pixmap, status, name_x, cy + 22.0 * s, font::TIMESTAMP * s, theme::TEXT_SECONDARY);
+    // Status: online placeholder, or a live "typing…" when the peer types.
+    let status = if typing { "typing…" } else { "Chat" };
+    let status_color = if typing { theme::ACCENT } else { theme::TEXT_SECONDARY };
+    text.draw(pixmap, status, name_x, cy + 22.0 * s, font::TIMESTAMP * s, status_color);
 
     // Right icons.
     let ic = 20.0 * s;
@@ -461,8 +518,17 @@ fn truncate(text: &TextRenderer, title: &str, max_w: f32, px: f32) -> String {
     format!("{out}…")
 }
 
-/// Composer bar: rounded input + placeholder + send button.
-fn draw_composer(pixmap: &mut Pixmap, text: &TextRenderer, input: &str, x: f32, y: f32, w: f32, s: f32) {
+/// Composer bar: rounded input + placeholder + send (or edit ✓) button.
+fn draw_composer(
+    pixmap: &mut Pixmap,
+    text: &TextRenderer,
+    input: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+    s: f32,
+    editing: bool,
+) {
     let h = layout::INPUT_H * s;
     let mut bg = Paint::default();
     bg.set_color(color(theme::LIST_BG));
@@ -485,7 +551,7 @@ fn draw_composer(pixmap: &mut Pixmap, text: &TextRenderer, input: &str, x: f32, 
     let px = font::PLACEHOLDER * s;
     let tc = if input.is_empty() { theme::TEXT_SECONDARY } else { theme::TEXT_PRIMARY };
     let shown = if input.is_empty() {
-        "Message…".to_string()
+        if editing { "Modifier le message…".to_string() } else { "Message…".to_string() }
     } else {
         let max = (field_w - 24.0 * s).max(10.0);
         if text.measure(input, px).0 <= max {
@@ -504,14 +570,18 @@ fn draw_composer(pixmap: &mut Pixmap, text: &TextRenderer, input: &str, x: f32, 
     };
     text.draw(pixmap, &shown, x + pad + 14.0 * s, y + h / 2.0 + 5.0 * s, px, tc);
 
-    // Send button (accent circle + paper plane).
+    // Send / confirm button (accent circle + paper plane or check).
     let sendx = x + w - pad - send / 2.0;
     let sendy = y + h / 2.0;
     let mut sp = Paint::default();
     sp.set_color(color(theme::ACCENT));
     let sc = tiny_skia::PathBuilder::from_circle(sendx, sendy, send / 2.0).unwrap();
     pixmap.fill_path(&sc, &sp, tiny_skia::FillRule::Winding, Transform::identity(), None);
-    icons::send(pixmap, sendx, sendy, 20.0 * s, theme::TEXT_PRIMARY);
+    if editing {
+        icons::tick(pixmap, sendx, sendy, 22.0 * s, true, theme::TEXT_PRIMARY);
+    } else {
+        icons::send(pixmap, sendx, sendy, 20.0 * s, theme::TEXT_PRIMARY);
+    }
 }
 
 #[cfg(test)]
@@ -541,6 +611,7 @@ mod tests {
                 out: i % 3 == 0,
                 photo: None,
                 photo_path: None,
+                read: false,
             });
         }
         (Pixmap::new(800, 600).unwrap(), TextRenderer::new(), list, messages)
@@ -566,6 +637,9 @@ mod tests {
             &photos,
             None,
             None,
+            false,
+            None,
+            None,
             1.6,
         )
         .unwrap();
@@ -585,5 +659,72 @@ mod tests {
         }
         assert_eq!(black, 0, "{black} black pixels in the full frame");
         assert_eq!(transparent, 0, "{transparent} transparent pixels in the full frame");
+    }
+
+    /// Counts pixels that differ from the pane background (i.e. something was
+    /// painted) inside a region.
+    fn painted_in_region(pixmap: &Pixmap, x0: u32, y0: u32, x1: u32, y1: u32) -> u32 {
+        let mut n = 0;
+        for y in y0..y1.min(pixmap.height()) {
+            for x in x0..x1.min(pixmap.width()) {
+                let p = pixmap.pixel(x, y).unwrap();
+                if p.alpha() == 255
+                    && (p.red(), p.green(), p.blue())
+                        != (theme::CHAT_BG.0, theme::CHAT_BG.1, theme::CHAT_BG.2)
+                {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn context_menu_overlays_the_scene_without_black_gaps() {
+        // Regression: the right-click menu is drawn on top of the messages
+        // pane; it must be fully opaque and never leave the background stark
+        // black (the theme background is a dark blue-grey, never #000000).
+        let (mut pixmap, text, list, messages) = full_scene_pixmap();
+        let screen = Screen::Chat { id: 2, loading: false };
+        let photos = PhotoCache::new();
+        let menu = ContextMenu { row: 0, y: 100.0 };
+
+        render(
+            &mut pixmap,
+            &text,
+            &list,
+            &screen,
+            &messages,
+            "",
+            "",
+            None,
+            &photos,
+            None,
+            None,
+            false,
+            Some(&menu),
+            None,
+            1.6,
+        )
+        .unwrap();
+
+        // The menu box (pane x=10..170, y≈66..206 logical → 1.6x) is painted.
+        let pane_x = (theme::layout::LIST_W * 1.6) as u32;
+        let painted = painted_in_region(&pixmap, pane_x + 16, 106, pane_x + 270, 330);
+        // The menu background (30,42,58) is not CHAT_BG, so something inside
+        // the region must be non-background; and no pure-black pixel anywhere.
+        assert!(painted > 0, "the context menu was not drawn");
+
+        let mut black = 0;
+        for y in 0..pixmap.height() {
+            for x in 0..pixmap.width() {
+                if (pixmap.pixel(x, y).unwrap().red(),
+                    pixmap.pixel(x, y).unwrap().green(),
+                    pixmap.pixel(x, y).unwrap().blue()) == (0, 0, 0) {
+                    black += 1;
+                }
+            }
+        }
+        assert_eq!(black, 0, "{black} black pixels leaked under the context menu");
     }
 }
