@@ -5,22 +5,22 @@ A fast, minimalist **Telegram desktop client** written in Rust, rendered
 should while using a fraction of the RAM of mainstream clients.
 
 - ⚡ **Real-time by push** — messages arrive in < 1 s, no polling spam
-- 💾 **~10× less RAM** — ≈61 MB RSS vs 300-500 MB for Telegram Desktop
-- 🧠 **100% CPU rendering** — runs on any hardware, low power draw
-- 📦 **Tiny footprint** — ~4 MB binary, ~12 KB session file, no database
+- 💾 **~10× less RAM** — ≈30 MB RSS vs 300-500 MB for Telegram Desktop
+- 🧠 **100% CPU rendering** — Iced on the tiny-skia software backend
+- 📦 **Tiny footprint** — ~7 MB binary, ~12 KB session file, no database
 - 🔒 **Sign in inside the app** — phone → code → 2FA, nothing else to install
 
 ## Measured performance
 
-Measured on a real session (HiDPI ~2x, Arch Linux, `--release`):
+Measured on a real session (HiDPI 1.6×, Arch Linux, `--release`):
 
 | Metric | tg | Telegram Desktop |
 |---|---|---|
-| **Resident memory (RSS)** | **~61 MB** | 300-500 MB |
-| **PSS** (proportional size) | **~50 MB** | — |
+| **Resident memory (RSS)** | **~30 MB** | 300-500 MB |
+| **PSS** (proportional size) | **~18 MB** | — |
 | **Idle CPU** | **~0.7%** | — |
 | **Threads** | **2** | dozens |
-| **Binary size** | **~4.0 MB** | ~100+ MB |
+| **Binary size** | **~7 MB** | ~100+ MB |
 | **Persisted session** | **~12 KB** | SQLite DBs |
 | **Message latency** | < 1 s (push) | < 1 s |
 
@@ -119,25 +119,24 @@ batches — each release moves the needle, not dribbles.
 
 | Choice | Detail |
 |---|---|
-| **Pure CPU rendering** | `tiny-skia` (software rasterizer) + `softbuffer`: no GPU, no platform-graphics dependency at runtime. |
+| **Pure CPU rendering** | [Iced](https://iced.rs) on its **tiny-skia** software backend: no GPU, no platform-graphics dependency at runtime. |
 | **HiDPI-aware** | Rendered at physical resolution with scaled metrics — crisp text, no upscaling. |
 | **No database** | Session persisted in a **small binary file** (~12 KB), no SQLite. |
 | **Single network thread** | `current_thread` tokio runtime; 2 threads total (UI + network). |
-| **No continuous redraw** | On-demand rendering + glyph cache; ~0.7% CPU at idle. |
+| **No continuous redraw** | On-demand rendering; ~0.7% CPU at idle. |
 | **Tiny binary** | `opt-level="z"`, `lto="fat"`, `panic="abort"`, stripped symbols. |
 
 ## Project layout
 
 ```
-app/   → main binary (UI ↔ network bridge)
-ui/    → custom UI: winit + softbuffer + tiny-skia + fontdue
-tg/    → core networking: grammers (MTProto), persisted session
+app-iced/ → Iced-based UI (tiny-skia backend) + app state, headless-tested
+tg/       → core networking: grammers (MTProto), persisted session
 ```
 
 - **MTProto**: [grammers](https://github.com/Lonami/grammers) (Rust) — a real
   user client, compatible with all other Telegram clients.
-- **Rendering**: `tiny-skia` (CPU), `softbuffer` (window framebuffer), `winit`
-  (window/input) — cross-platform Linux/macOS/Windows.
+- **UI**: [iced](https://iced.rs) with the `tiny-skia` software renderer —
+  cross-platform Linux/macOS/Windows.
 
 ## Build & run
 
@@ -151,15 +150,16 @@ echo "API_HASH=abcdef..." >> .env
 
 # 2. Launch the client and sign in in the window (phone → code → 2FA);
 #    the session is saved automatically.
-cargo run --release -p app
+cargo run --release -p app-iced
 ```
 
-### Settings
+### Demo mode
 
-| Variable | Effect |
-|---|---|
-| `TG_UI_SCALE` | UI scale factor (default: auto, 1.6 when undetected) |
-| `TG_SCROLL_INVERT` | `1` to flip the scroll direction |
+A canned offline backend exercises the UI without a network session:
+
+```bash
+cargo run -p app-iced -- --demo --open-first
+```
 
 ### Real-time test
 
@@ -169,8 +169,8 @@ a 15 s safety net catches any missed update.
 ## Status
 
 - **Working MVP**: read, send and receive in real time, groups and channels,
-  message edits and deletions.
-- 56 unit tests (`cargo test`)
+  message edits and deletions, in-app sign-in with a persisted session.
+- 90 unit tests (`cargo test --workspace`), including headless UI-state tests.
 - Tested on Arch Linux (X11/Wayland); macOS and Windows are compiled by CI on
   every push/PR as well.
 

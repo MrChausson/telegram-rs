@@ -4,7 +4,7 @@
 # Usage: ./install.sh
 set -euo pipefail
 
-BIN="${TGRAPH:-$(dirname "$0")/target/release/app}"
+BIN="${TGRAPH:-$(dirname "$0")/target/release/app-iced}"
 PREFIX="${PREFIX:-$HOME/.local}"
 
 if [[ ! -x "$BIN" ]]; then

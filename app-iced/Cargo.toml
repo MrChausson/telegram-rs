@@ -1,14 +1,20 @@
 [package]
-name = "app"
+name = "app-iced"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "app-iced"
+path = "src/main.rs"
+
 [dependencies]
-ui = { path = "../ui" }
+iced.workspace = true
 tg = { path = "../tg" }
 grammers-client = { git = "https://github.com/Lonami/grammers" }
 grammers-session = { git = "https://github.com/Lonami/grammers" }
 tokio = { version = "1", features = ["rt", "macros", "sync", "net", "time", "io-util", "fs"] }
 anyhow = "1"
 mimalloc.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "alloc"] }
+tiny-skia.workspace = true

@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Rewrote the UI on **Iced (tiny-skia software backend)** — replaces the
+  custom winit/softbuffer renderer. Roughly half the RAM (~30 MB RSS), with
+  headless-tested application state.
+- Dropped the old `app/` and `ui/` crates; the workspace is now `tg` (MTProto
+  core) + `app-iced` (UI).
+
+### Fixed
+- Restarting with a valid session no longer shows the sign-in screen: the
+  chat list arriving now marks the account as authenticated, so a persisted
+  session opens straight into the chats.
+- Nested icon rendering: icons are rasterized with tiny-skia and shown as
+  images, sidestepping an `iced_tiny_skia` canvas-translation bug that made
+  embedded icons invisible.
+- The sign-in screen is now centered in the window.
+
 ## [v0.2.2] - 2026-08-16
 
 ### Changed

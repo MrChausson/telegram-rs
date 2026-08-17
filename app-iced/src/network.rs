@@ -1,4 +1,7 @@
-//! Main binary: bridge between the network runtime (tokio) and the window (winit).
+//! Network runtime: a tokio thread (current_thread) that talks MTProto, plus
+//! the Iced `Subscription` that streams `UiMessage`s into the UI. Adapted from
+//! the custom `app` binary so the exact same `Request`/`UiMessage` bridge is
+//! reused.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -10,34 +13,25 @@ use grammers_session::types::PeerRef;
 use tg::client::Telegram;
 use tg::session::load_or_new;
 use tokio::sync::mpsc;
-use ui::bridge::{Request, UiMessage};
-use ui::chatlist::ChatRow;
 
-// mimalloc allocator: returns freed memory to the OS (less resident RSS
-// than glibc, whose arenas keep previously allocated memory).
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-use ui::messages::MsgRow;
+use crate::bridge::{ChatRow, MsgRow, Request, UiMessage};
 
 const ENV_FILE: &str = ".env";
 const SESSION_FILE: &str = ".tg.session";
 const MESSAGE_LIMIT: usize = 200;
 
-/// Compiled-in default API credentials, injected at build time from the
-/// `TG_API_ID` / `TG_API_HASH` secrets (GitHub Actions). The end user only
-/// sees the in-app login screen; `.env` / env vars still override these.
 const DEFAULT_API_ID: Option<&str> = option_env!("TG_API_ID");
 const DEFAULT_API_HASH: Option<&str> = option_env!("TG_API_HASH");
 
-/// Per-user data directory holding `.env`, `.tg.session` and the cache so the
-/// binary works whichever directory it is launched from. Falls back to the
-/// current directory when developing (a `.env` present there).
-fn data_dir() -> PathBuf {
+/// Receiver end of the UI feed, taken once by the Iced subscription.
+static UI_RX: std::sync::Mutex<Option<mpsc::UnboundedReceiver<UiMessage>>> =
+    std::sync::Mutex::new(None);
+
+/// Per-user data directory (same logic as the custom `app`).
+pub fn data_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("TG_DATA_DIR") {
         return PathBuf::from(p);
     }
-    // A `.env` in the current directory means "dev mode": keep the old
-    // behavior for the repo checkout.
     if std::fs::metadata(ENV_FILE).is_ok() {
         return PathBuf::from(".");
     }
@@ -66,16 +60,12 @@ fn data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn env_path() -> PathBuf {
+pub fn env_path() -> PathBuf {
     data_dir().join(ENV_FILE)
 }
 
-fn session_path() -> PathBuf {
+pub fn session_path() -> PathBuf {
     data_dir().join(SESSION_FILE)
-}
-
-fn cache_dir() -> PathBuf {
-    data_dir().join("data")
 }
 
 fn load_env(path: &Path) -> HashMap<String, String> {
@@ -100,7 +90,7 @@ fn env_var(env: &HashMap<String, String>, name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-fn api_id(env: &HashMap<String, String>) -> anyhow::Result<i32> {
+pub fn api_id(env: &HashMap<String, String>) -> anyhow::Result<i32> {
     let raw = env_var(env, "API_ID").or_else(|| DEFAULT_API_ID.map(String::from));
     let Some(raw) = raw else {
         anyhow::bail!("API_ID is missing — embed it at build time or add it to .env");
@@ -109,119 +99,117 @@ fn api_id(env: &HashMap<String, String>) -> anyhow::Result<i32> {
         .map_err(|_| anyhow::anyhow!("API_ID must be a number"))
 }
 
-fn api_hash(env: &HashMap<String, String>) -> Option<String> {
+pub fn api_hash(env: &HashMap<String, String>) -> Option<String> {
     env_var(env, "API_HASH").or_else(|| DEFAULT_API_HASH.map(String::from))
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // `--open "<title>"` opens that chat at startup (useful for tests);
-    // `--open-first` is a shortcut for the first chat (equivalent to
-    // `--open "*"`).
-    // `--demo` runs a canned, offline backend so the UI can be exercised
-    // end-to-end (clicks, edit, delete, badges) without a network (or an
-    // account only every tenth of the interaction needs real data).
-    let mut auto_open = None;
-    let mut demo = false;
-    let mut iter = std::env::args().skip(1);
-    while let Some(a) = iter.next() {
-        match a.as_str() {
-            "--open" => auto_open = iter.next(),
-            "--open-first" => auto_open = Some("*".to_string()),
-            "--demo" => demo = true,
-            _ => {}
-        }
-    }
-    let env = load_env(&env_path());
-    // Demo does not touch the network: no API credentials required.
-    let api_id = if demo { 0 } else { api_id(&env)? };
-    let api_hash = api_hash(&env);
-
-    // A pristine home for the session and the cache, regardless of the
-    // directory the binary is launched from.
-    if let Some(dir) = data_dir().parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::create_dir_all(cache_dir());
-    let session_path = session_path();
-
+/// Spawns the network thread and returns the request sender for the UI.
+///
+/// `demo=true` runs the canned offline backend (with a photo message so image
+/// rendering can be tested too); `false` connects to the real account.
+pub fn spawn_network(demo: bool) -> UnboundedSender<Request> {
     let (ui_tx, ui_rx) = mpsc::unbounded_channel::<UiMessage>();
     let (req_tx, mut req_rx) = mpsc::unbounded_channel::<Request>();
+    {
+        let mut guard = UI_RX.lock().expect("UI_RX lock");
+        *guard = Some(ui_rx);
+    }
 
-    // Network runtime on a separate thread (winit lives on the main thread).
-    // Reduced stack for the network thread (tokio fits in 1 MiB; the default
-    // 2-8 MiB stacks inflate RSS).
-    let _ = std::thread::Builder::new()
+    std::thread::Builder::new()
         .stack_size(1 << 20)
+        .name("network".into())
         .spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
-        rt.block_on(async move {
-            if demo {
-                serve_demo(&ui_tx, &mut req_rx).await;
-                std::future::pending::<()>().await;
-            }
-            let session = Arc::new(load_or_new(&session_path));
-            let tg = match Telegram::connect(session.clone(), api_id).await {
-                Ok(tg) => tg,
-                Err(e) => {
-                    let _ = ui_tx.send(UiMessage::Error(format!("Could not connect: {e}")));
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            rt.block_on(async move {
+                if demo {
+                    serve_demo(&ui_tx, &mut req_rx).await;
                     std::future::pending::<()>().await;
-                    return;
                 }
-            };
+                let session_path = session_path();
+                let session = Arc::new(load_or_new(&session_path));
+                let env = load_env(&env_path());
+                let api_id = api_id(&env).expect("API_ID");
+                let api_hash = api_hash(&env);
+                let tg = match Telegram::connect(session.clone(), api_id).await {
+                    Ok(tg) => tg,
+                    Err(e) => {
+                        let _ = ui_tx.send(UiMessage::Error(format!("Could not connect: {e}")));
+                        std::future::pending::<()>().await;
+                        return;
+                    }
+                };
 
-            if !tg.is_authorized().await.unwrap_or(false) {
-                serve_login(&tg, api_hash.as_deref(), &ui_tx, &mut req_rx).await;
-                let _ = tg::session::save(&session, &session_path);
-            }
-
-            // Cache the self user: otherwise `stream_updates` never triggers
-            // the initial `GetState` and the updates stream stays silent.
-            let _ = tg.client().get_me().await;
-
-            match tg.get_dialogs().await {
-                Ok(dialogs) => {
-                    let mut peers: HashMap<i64, (String, PeerRef)> = HashMap::new();
-                    let rows: Vec<ChatRow> = dialogs
-                        .iter()
-                        .map(|d| {
-                            peers.insert(
-                                d.id.bot_api_dialog_id(),
-                                (d.title.clone(), d.peer_ref),
-                            );
-                            ChatRow {
-                                id: d.id.bot_api_dialog_id(),
-                                title: d.title.clone(),
-                                subtitle: d.last_message.clone().unwrap_or_default(),
-                                date: d.last_date.unwrap_or(0),
-                                unread: d.unread_count,
-                                avatar_path: None,
-                            }
-                        })
-                        .collect();
-                    let _ = ui_tx.send(UiMessage::Dialogs(rows));
-                    serve(tg, &ui_tx, &mut req_rx, &peers).await;
+                if !tg.is_authorized().await.unwrap_or(false) {
+                    serve_login(&tg, api_hash.as_deref(), &ui_tx, &mut req_rx).await;
+                    let _ = tg::session::save(&session, &session_path);
                 }
-                Err(e) => {
-                    let _ = ui_tx.send(UiMessage::Error(format!(
-                        "Could not load chats: {e}"
-                    )));
+
+                let _ = tg.client().get_me().await;
+
+                match tg.get_dialogs().await {
+                    Ok(dialogs) => {
+                        let mut peers: HashMap<i64, (String, PeerRef)> = HashMap::new();
+                        let rows: Vec<ChatRow> = dialogs
+                            .iter()
+                            .map(|d| {
+                                peers.insert(
+                                    d.id.bot_api_dialog_id(),
+                                    (d.title.clone(), d.peer_ref),
+                                );
+                                ChatRow {
+                                    id: d.id.bot_api_dialog_id(),
+                                    title: d.title.clone(),
+                                    subtitle: d.last_message.clone().unwrap_or_default(),
+                                    date: d.last_date.unwrap_or(0),
+                                    unread: d.unread_count,
+                                    avatar_path: None,
+                                }
+                            })
+                            .collect();
+                        let _ = ui_tx.send(UiMessage::Dialogs(rows));
+                        serve(tg, &ui_tx, &mut req_rx, &peers).await;
+                    }
+                    Err(e) => {
+                        let _ = ui_tx.send(UiMessage::Error(format!(
+                            "Could not load chats: {e}"
+                        )));
+                    }
                 }
-            }
+                std::future::pending::<()>().await;
+            });
+        })
+        .expect("spawn network thread");
 
-            std::future::pending::<()>().await;
-        });
-    });
-
-    ui::window::run(ui_rx, req_tx, auto_open)?;
-    Ok(())
+    req_tx
 }
 
-/// Offline "backend" for `--demo`: replays canned dialogs/messages and
-/// echoes edits/deletes so the real UI can be exercised end-to-end without
-/// a network (or an account).
+/// Iced subscription: a stream over the network's `UiMessage` channel.
+pub fn network_subscription() -> iced::Subscription<crate::Message> {
+    use iced::futures::stream::{poll_fn, Stream};
+    use std::task::Poll;
+
+    fn stream() -> impl Stream<Item = crate::Message> {
+        // Take the receiver out of the static once; the app only runs one
+        // subscription instance.
+        let mut rx = UI_RX
+            .lock()
+            .expect("UI_RX lock")
+            .take()
+            .expect("UI_RX initialized before app run");
+        poll_fn(move |cx| match rx.poll_recv(cx) {
+            Poll::Ready(Some(msg)) => Poll::Ready(Some(crate::Message::Ui(msg))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        })
+    }
+    iced::Subscription::run(stream)
+}
+
+/// Offline "backend" for `--demo`: replays canned dialogs/messages, echoes
+/// edits/deletes, and includes one photo message so image rendering is tested.
 async fn serve_demo(
     ui_tx: &mpsc::UnboundedSender<UiMessage>,
     req_rx: &mut mpsc::UnboundedReceiver<Request>,
@@ -232,7 +220,6 @@ async fn serve_demo(
         .unwrap_or_default()
         .as_secs() as i32;
 
-    // A chat list with varied badges so the e2e script can click any of them.
     let rows = vec![
         ChatRow {
             id: DEMO_CHAT,
@@ -260,9 +247,13 @@ async fn serve_demo(
         },
     ];
     let _ = ui_tx.send(UiMessage::Dialogs(rows));
+    // Demo starts signed-in: the chat UI is the surface we want to exercise.
+    let _ = ui_tx.send(UiMessage::LoginOk {
+        name: "Demo".to_string(),
+    });
 
-    // Canned history: several outgoing rows (some read → double check) so the
-    // context menu has incoming targets, plus one photo placeholder.
+    // One message carries a photo (dimensions only; the demo never downloads),
+    // so the image widget path is exercised.
     let messages = vec![
         MsgRow {
             id: 1,
@@ -278,7 +269,7 @@ async fn serve_demo(
             text: "First reply from me".to_string(),
             date: now - 3000,
             out: true,
-            photo: None,
+            photo: Some((640, 480)),
             photo_path: None,
             read: true,
         },
@@ -340,17 +331,14 @@ async fn serve_demo(
                 Request::MarkRead { id } => {
                     let _ = ui_tx.send(UiMessage::ChatRead { id });
                 }
-                // Silent, offline-friendly no-ops for everything else.
                 _ => {}
             }
         }
-        // Idle: stop the CPU grinding in a tight loop.
         tokio::task::yield_now().await;
     }
 }
 
-/// Resolves the sign-in flow, fielding the login requests until the account
-/// is authorized (or the user closes the window).
+/// Sign-in flow (phone → code → 2FA).
 async fn serve_login(
     tg: &Telegram,
     api_hash: Option<&str>,
@@ -394,8 +382,7 @@ async fn serve_login(
                     };
                     match tg.sign_in(t, &code).await {
                         Ok(Ok(())) => {
-                            let name = me_name(tg).await;
-                            let _ = ui_tx.send(UiMessage::LoginOk { name });
+                            let _ = ui_tx.send(UiMessage::LoginOk { name: String::new() });
                             return;
                         }
                         Ok(Err(SignInError::PasswordRequired(tok))) => {
@@ -422,50 +409,28 @@ async fn serve_login(
                         }
                     }
                 }
-                Request::LoginPassword { password: password_input } => {
-                    let Some(tok) = password.take() else {
-                        let _ = ui_tx.send(UiMessage::Error(
-                            "No password request in progress".to_string(),
-                        ));
-                        continue;
-                    };
-                    match tg.check_password(tok, &password_input).await {
+                Request::LoginPassword { password: pwd } => {
+                    let Some(t) = password.take() else { continue };
+                    match tg.check_password(t, &pwd).await {
                         Ok(Ok(())) => {
-                            let name = me_name(tg).await;
-                            let _ = ui_tx.send(UiMessage::LoginOk { name });
+                            let _ = ui_tx.send(UiMessage::LoginOk { name: String::new() });
                             return;
                         }
                         Ok(Err(new_token)) => {
-                            // Wrong password: Telegram gave us a fresh token
-                            // to try again.
                             password = Some(new_token);
                             let _ = ui_tx.send(UiMessage::Error(
                                 "Wrong password, try again".to_string(),
                             ));
                         }
                         Err(e) => {
-                            let _ = ui_tx.send(UiMessage::Error(format!(
-                                "2FA failed: {e}"
-                            )));
+                            let _ = ui_tx.send(UiMessage::Error(format!("2FA failed: {e}")));
                         }
                     }
                 }
                 _ => {}
             }
         }
-        // Back off briefly: the winit loop sends requests lazily.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-}
-
-/// Best-effort display name of the signed-in account.
-async fn me_name(tg: &Telegram) -> String {
-    match tg.client().get_me().await {
-        Ok(me) => me
-            .first_name()
-            .map(|f| f.to_string())
-            .unwrap_or_else(|| "your account".to_string()),
-        Err(_) => "your account".to_string(),
     }
 }
 
@@ -477,8 +442,6 @@ async fn serve(
     peers: &HashMap<i64, (String, PeerRef)>,
 ) {
     let updates_rx = tg.take_updates();
-    // `catch_up = true`: syncs the update state at startup (like the official
-    // app); subsequent updates are pushed live by the server.
     let mut updates = tg
         .client()
         .stream_updates(
@@ -490,30 +453,21 @@ async fn serve(
         )
         .await;
 
-// Discreet safety net (15 s, ~4 req/min on the open chat): catches any
-    // missed update without spamming Telegram.
     let refresh = std::time::Duration::from_secs(15);
     let mut last_refresh = std::time::Instant::now();
     let mut open_id: Option<i64> = None;
     let mut open_sig: Option<(usize, String)> = None;
 
-    // Periodic session save (pts + peer cache): avoids replaying a big
-    // `catch_up` on every restart (hence less memory and startup work).
     let save_every = std::time::Duration::from_secs(30);
     let mut last_save = std::time::Instant::now();
     let session = tg.session().clone();
 
-    // Grace period: `catch_up` replays history at startup; we do not relay
-    // that replay to the UI (it would only be old updates).
     let started = std::time::Instant::now();
     let grace = std::time::Duration::from_secs(10);
 
     loop {
-        // Drain queued requests (without blocking update reception).
         let mut pending: Vec<Request> =
             std::iter::from_fn(|| req_rx.try_recv().ok()).collect();
-        // Open the requested chat first: thumbnails/downloads behind it in
-        // the queue must not starve the history load.
         pending.sort_by_key(|r| !matches!(r, Request::OpenChat { .. }));
         for req in pending {
             if let Request::OpenChat { id } = req {
@@ -523,7 +477,6 @@ async fn serve(
             handle_request(&tg, ui_tx, req, peers).await;
         }
 
-        // Discrete catch-up of the open chat.
         if last_refresh.elapsed() >= refresh {
             last_refresh = std::time::Instant::now();
             if let Some(open) = open_id {
@@ -545,7 +498,9 @@ async fn serve(
                                     date: m.date,
                                     out: m.out,
                                     photo: m.media.map(|k| match k {
-                                        tg::model::MediaKind::Photo { width, height } => (width, height),
+                                        tg::model::MediaKind::Photo { width, height } => {
+                                            (width, height)
+                                        }
                                     }),
                                     photo_path: None,
                                     read: false,
@@ -562,7 +517,6 @@ async fn serve(
             }
         }
 
-        // Periodic session save (update state, peer cache).
         if last_save.elapsed() >= save_every {
             last_save = std::time::Instant::now();
             if let Err(e) = tg::session::save(&session, &session_path()) {
@@ -570,14 +524,12 @@ async fn serve(
             }
         }
 
-        // Await a server-pushed update (up to 200 ms).
         if let Ok(Ok(update)) = tokio::time::timeout(
             std::time::Duration::from_millis(200),
             updates.next(),
         )
         .await
         {
-            // During the grace period, drain the replay without showing it.
             if started.elapsed() >= grace {
                 handle_update(ui_tx, update);
             }
@@ -585,11 +537,6 @@ async fn serve(
     }
 }
 
-/// Relays pushed updates (new messages, edits, deletions).
-///
-/// Unlike local sends (optimistic), a message sent with `out=true` from
-/// ANOTHER device (e.g. the phone) must be displayed: we do not filter
-/// outgoing — the UI deduplicates against the optimistic local send.
 fn handle_update(ui_tx: &mpsc::UnboundedSender<UiMessage>, update: Update) {
     match update {
         Update::NewMessage(msg) => {
@@ -621,9 +568,6 @@ fn handle_update(ui_tx: &mpsc::UnboundedSender<UiMessage>, update: Update) {
                 ids: m.messages().to_vec(),
             });
         }
-        // Raw updates not covered by the friendly enum above: read history
-        // changes (used to sync the unread badge), typing indicators and
-        // online presence.
         Update::Raw(raw) => match &*raw {
             grammers_client::tl::enums::Update::ReadHistoryInbox(u) => {
                 let id = grammers_session::types::PeerId::from(u.peer.clone()).bot_api_dialog_id();
@@ -660,12 +604,11 @@ fn handle_update(ui_tx: &mpsc::UnboundedSender<UiMessage>, update: Update) {
                 });
             }
             _ => {}
-        }
+        },
         _ => {}
     }
 }
 
-/// True when a raw typing update is the "stopped typing" cancel signal.
 fn action_is_cancel(action: &grammers_client::tl::enums::SendMessageAction) -> bool {
     matches!(
         action,
@@ -673,7 +616,6 @@ fn action_is_cancel(action: &grammers_client::tl::enums::SendMessageAction) -> b
     )
 }
 
-/// Handles a UI request.
 async fn handle_request(
     tg: &Telegram,
     ui_tx: &mpsc::UnboundedSender<UiMessage>,
@@ -681,11 +623,6 @@ async fn handle_request(
     peers: &HashMap<i64, (String, PeerRef)>,
 ) {
     match req {
-        Request::Typing { id, typing } => {
-            if let Some((_, peer_ref)) = peers.get(&id) {
-                let _ = tg.set_typing(peer_ref, typing).await;
-            }
-        }
         Request::MarkRead { id } => {
             if let Some((_, peer_ref)) = peers.get(&id) {
                 if tg.mark_read(peer_ref).await.is_ok() {
@@ -693,8 +630,7 @@ async fn handle_request(
                 }
             }
         }
-        Request::OpenChat { id } => {
-            match peers.get(&id) {
+        Request::OpenChat { id } => match peers.get(&id) {
             Some((title, peer_ref)) => match tg.get_messages(peer_ref, MESSAGE_LIMIT).await {
                 Ok(messages) => {
                     let rows: Vec<MsgRow> = messages
@@ -705,7 +641,9 @@ async fn handle_request(
                             date: m.date,
                             out: m.out,
                             photo: m.media.map(|k| match k {
-                                tg::model::MediaKind::Photo { width, height } => (width, height),
+                                tg::model::MediaKind::Photo { width, height } => {
+                                    (width, height)
+                                }
                             }),
                             photo_path: None,
                             read: false,
@@ -726,38 +664,6 @@ async fn handle_request(
             None => {
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
             }
-        }
-        // Opening reads the conversation (server + local badge).
-        if let Some((_, peer_ref)) = peers.get(&id) {
-            let _ = tg.mark_read(peer_ref).await;
-            let _ = ui_tx.send(UiMessage::ChatRead { id });
-        }
-        },
-        Request::DownloadPhoto { chat_id, msg_id } => match peers.get(&chat_id) {
-            Some((_, peer_ref)) => {
-                let dir = cache_dir().join("media").join(chat_id.to_string());
-                let path = match tg.download_photo(peer_ref, msg_id, &dir).await {
-                    Ok(p) => p.map(|p| p.to_string_lossy().into_owned()),
-                    Err(_) => None,
-                };
-                let _ = ui_tx.send(UiMessage::PhotoReady {
-                    chat_id,
-                    msg_id,
-                    path,
-                });
-            }
-            None => {}
-        },
-        Request::DownloadAvatar { chat_id } => match peers.get(&chat_id) {
-            Some((_, peer_ref)) => {
-                let dir = cache_dir().join("avatars");
-                let path = match tg.download_avatar(peer_ref, &dir).await {
-                    Ok(p) => p.map(|p| p.to_string_lossy().into_owned()),
-                    Err(_) => None,
-                };
-                let _ = ui_tx.send(UiMessage::AvatarReady { chat_id, path });
-            }
-            None => {}
         },
         Request::SendMessage { id, text } => match peers.get(&id) {
             Some((_, peer_ref)) => {
@@ -789,7 +695,9 @@ async fn handle_request(
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
             }
         },
-        // Sign-in requests are consumed by `serve_login`; nothing to do here.
         Request::LoginPhone { .. } | Request::LoginCode { .. } | Request::LoginPassword { .. } => {}
     }
 }
+
+/// Re-exported so `main.rs` can type the sender.
+pub type UnboundedSender<T> = mpsc::UnboundedSender<T>;
