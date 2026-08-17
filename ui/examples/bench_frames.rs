@@ -42,6 +42,7 @@ fn scene() -> (ChatList, MessageList) {
                 None
             },
             photo_path: None,
+            read: i % 6 == 0,
         });
     }
     (list, messages)
@@ -82,6 +83,9 @@ fn bench() {
             &photos,
             None,
             None,
+            false,
+            None,
+            None,
             1.6,
         );
         for _ in 0..60 {
@@ -96,6 +100,9 @@ fn bench() {
                 "",
                 None,
                 &photos,
+                None,
+                None,
+                false,
                 None,
                 None,
                 1.6,

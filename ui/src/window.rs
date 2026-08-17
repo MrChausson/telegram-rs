@@ -70,23 +70,19 @@ struct App {
     press: (f32, f32),
     /// System clipboard (created lazily; `None` when unavailable).
     clipboard: Option<arboard::Clipboard>,
-    /// Debug FPS meter: `fps.last_frame` = time of the previous draw,
-    /// `fps.ema_ms` = exponential average frame time (for the overlay/log).
+    /// Debug FPS meter: `fps.ema_ms` = exponential average frame time (for
+    /// the log line printed when `TG_FPS=1`).
     fps: FpsMeter,
 }
 
 /// Rolling frame-time meter (1-second window) used when `TG_FPS=1`.
 struct FpsMeter {
-    last_frame: std::time::Instant,
     ema_ms: f32,
 }
 
 impl FpsMeter {
     fn new() -> Self {
-        Self {
-            last_frame: std::time::Instant::now(),
-            ema_ms: 0.0,
-        }
+        Self { ema_ms: 0.0 }
     }
 
     /// Reports the ms taken by the frame that just ended, maintaining a
@@ -239,6 +235,9 @@ impl App {
             self.state.viewer.as_deref(),
             &self.photos,
             login,
+            self.state.typing,
+            self.state.editing.is_some(),
+            self.state.context_menu.as_ref(),
             self.state.selection(),
             scale,
         ) {
@@ -376,9 +375,11 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseInput {
                 state,
-                button: MouseButton::Left,
+                button,
                 ..
-            } => match state {
+            } => {
+                match button {
+                    MouseButton::Left => match state {
                 ElementState::Pressed => {
                     let scale = self.ui_scale.max(0.1);
                     let lx = self.cursor.x as f32 / scale;
@@ -397,7 +398,9 @@ impl ApplicationHandler for App {
                         self.request_redraw();
                         return;
                     }
-                    // Plain click: selection is cleared, existing actions run.
+                    // Plain click: selection is cleared, existing actions
+                    // run. `state.click` routes a click on an open context
+                    // menu to its item (edit/delete) and dismisses it.
                     let scale = self.ui_scale.max(0.1);
                     let (w, h) = self.logical_size();
                     let lx = self.cursor.x as f32 / scale;
@@ -413,11 +416,38 @@ impl ApplicationHandler for App {
                     }
                     if self.state.viewer.is_some() {
                         self.state.close_viewer();
-                    } else if let Some(path) = self.state.photo_at(lx, ly, w) {
-                        self.state.open_viewer(path);
+                    } else if self.state.context_menu.is_none() {
+                        if let Some(path) = self.state.photo_at(lx, ly, w) {
+                            self.state.open_viewer(path);
+                        }
                     }
                     self.state.clear_selection();
                     self.request_redraw();
+                }
+                    },
+                    MouseButton::Right => match state {
+                ElementState::Pressed => {
+                    // Right-click over an outgoing message opens the context menu
+                    // (edit/delete); clicking inside an open menu runs the action
+                    // or dismisses it.
+                    let scale = self.ui_scale.max(0.1);
+                    let (w, _h) = self.logical_size();
+                    let lx = self.cursor.x as f32 / scale;
+                    let ly = self.cursor.y as f32 / scale;
+                    // If a menu is already open, the click runs its item or
+                    // dismisses it; otherwise it opens a menu on the message.
+                    let (handled, req) = self.state.context_click(lx, ly);
+                    if !handled {
+                        self.state.open_context(lx, ly, w, &self.text);
+                    }
+                    if let Some(req) = req {
+                        let _ = self.tx.send(req);
+                    }
+                    self.request_redraw();
+                }
+                ElementState::Released => {}
+                    },
+                    _ => {}
                 }
             },
             WindowEvent::MouseWheel { delta, .. } => {
@@ -450,10 +480,19 @@ impl ApplicationHandler for App {
                                 _ => handled = false,
                             }
                         }
-                        Key::Character(c) if !c.is_empty() => self.state.push_text(c),
-                        Key::Named(NamedKey::Space) => self.state.push_text(" "),
+                        Key::Character(c) if !c.is_empty() => {
+                            if self.state.push_text(c) {
+                                self.send_typing(true);
+                            }
+                        }
+                        Key::Named(NamedKey::Space) => {
+                            if self.state.push_text(" ") {
+                                self.send_typing(true);
+                            }
+                        }
                         Key::Named(NamedKey::Backspace) => self.state.backspace(),
                         Key::Named(NamedKey::Enter) => {
+                            self.send_typing(false);
                             if let Some(req) = self.state.enter() {
                                 let _ = self.tx.send(req);
                                 let (w, h) = self.logical_size();
@@ -461,7 +500,7 @@ impl ApplicationHandler for App {
                                     .scroll_messages_to_bottom(&self.text, w, h);
                             }
                         }
-                        Key::Named(NamedKey::Escape) => self.state.clear_selection(),
+                        Key::Named(NamedKey::Escape) => self.state.clear_context(),
                         _ => handled = false,
                     }
                 } else {
@@ -475,7 +514,9 @@ impl ApplicationHandler for App {
                 // Ctrl shortcuts (e.g. Ctrl+V) arrive here as a committed
                 // character on some platforms; never type them.
                 if !self.mods.control_key() {
-                    self.state.push_text(&text);
+                    if self.state.push_text(&text) {
+                        self.send_typing(true);
+                    }
                     self.request_redraw();
                 }
             }
@@ -518,7 +559,18 @@ impl App {
             return;
         };
         if let Ok(text) = clip.get_text() {
-            self.state.push_text(&text);
+            if self.state.push_text(&text) {
+                self.send_typing(true);
+            }
         }
+    }
+
+    /// Notifies the server that the user started or stopped typing in the
+    /// currently open chat.
+    fn send_typing(&mut self, typing: bool) {
+        let Screen::Chat { id, .. } = self.state.screen else {
+            return;
+        };
+        let _ = self.tx.send(Request::Typing { id, typing });
     }
 }

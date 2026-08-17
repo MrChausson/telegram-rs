@@ -151,6 +151,10 @@ pub mod layout {
     pub const BADGE_SIZE: f32 = 20.0;
     /// Vertical gap between message rows.
     pub const BUBBLE_GAP: f32 = 18.0;
+    /// Width of the message context menu (right-click on an outgoing msg).
+    pub const CONTEXT_W: f32 = 160.0;
+    /// Height of a single context-menu item (edit / delete).
+    pub const CONTEXT_ITEM_H: f32 = 40.0;
 }
 
 /// Font sizes (logical px, scaled at draw time).

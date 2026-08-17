@@ -187,6 +187,76 @@ impl Telegram {
         Ok(Some(path))
     }
 
+    /// Marks all messages in a chat as read (server side).
+    ///
+    /// Channels use `channels.readHistory`; users and chats use
+    /// `messages.readHistory` (handled internally by grammers).
+    pub async fn mark_read(
+        &self,
+        peer_ref: &grammers_session::types::PeerRef,
+    ) -> Result<()> {
+        self.client
+            .mark_as_read(peer_ref.clone())
+            .await
+            .context("marking chat read")?;
+        Ok(())
+    }
+
+    /// Tells the server that the user is (or stopped) typing in a chat.
+    ///
+    /// `typing=true` sends `SendMessageTypingAction`; `false` cancels it.
+    /// Errors (flood wait, unknown peer) are ignored: typing is best-effort.
+    pub async fn set_typing(
+        &self,
+        peer_ref: &grammers_session::types::PeerRef,
+        typing: bool,
+    ) -> Result<()> {
+        let action = if typing {
+            grammers_client::tl::enums::SendMessageAction::SendMessageTypingAction
+        } else {
+            grammers_client::tl::enums::SendMessageAction::SendMessageCancelAction
+        };
+        self.client
+            .invoke(&grammers_client::tl::functions::messages::SetTyping {
+                peer: peer_ref.clone().into(),
+                top_msg_id: None,
+                action,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Edits the text of one of the user's outgoing messages.
+    pub async fn edit_message(
+        &self,
+        peer_ref: &grammers_session::types::PeerRef,
+        msg_id: i32,
+        text: &str,
+    ) -> Result<()> {
+        self.client
+            .edit_message(
+                peer_ref.clone(),
+                msg_id,
+                grammers_client::message::InputMessage::new().text(text),
+            )
+            .await
+            .context("editing message")?;
+        Ok(())
+    }
+
+    /// Deletes a message from both ends (all devices).
+    pub async fn delete_message(
+        &self,
+        peer_ref: &grammers_session::types::PeerRef,
+        msg_id: i32,
+    ) -> Result<()> {
+        self.client
+            .delete_messages(peer_ref.clone(), &[msg_id])
+            .await
+            .context("deleting message")?;
+        Ok(())
+    }
+
     /// Sends a text message to a chat.
     pub async fn send_message(
         &self,

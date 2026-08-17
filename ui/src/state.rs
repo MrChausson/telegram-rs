@@ -39,6 +39,14 @@ impl Default for LoginStep {
     }
 }
 
+/// A message the user right-clicked (context menu affordance) — its row
+/// index into the open chat's rows and its logical (pane-relative) position.
+#[derive(Debug, Clone, Copy)]
+pub struct ContextMenu {
+    pub row: usize,
+    pub y: f32,
+}
+
 /// Pure UI state, driven by window/network events.
 pub struct UiState {
     pub list: ChatList,
@@ -47,6 +55,14 @@ pub struct UiState {
     pub status: String,
     /// True once the account is signed in (chat UI active).
     pub authenticated: bool,
+    /// Chat id currently showing a "typing…" status (the open chat's peer
+    /// is typing), if any.
+    pub typing: Option<i64>,
+    /// Right-click context menu over the open chat's messages, if open.
+    pub context_menu: Option<ContextMenu>,
+    /// Message id being edited (its old text is in `input`); `None` when
+    /// typing fresh text.
+    pub editing: Option<i32>,
     /// Current step of the sign-in flow (only used while unauthenticated).
     pub login_step: LoginStep,
     /// Text typed in the sign-in field (phone / code / password).
@@ -77,6 +93,9 @@ impl UiState {
             screen: Screen::Idle,
             status: "Connecting…".to_string(),
             authenticated: false,
+            typing: None,
+            context_menu: None,
+            editing: None,
             login_step: LoginStep::Phone,
             login_input: String::new(),
             login_error: false,
@@ -176,6 +195,7 @@ impl UiState {
                                 out,
                                 photo,
                                 photo_path: None,
+                                read: false,
                             });
                             self.needs_scroll_bottom = true;
                         }
@@ -210,6 +230,40 @@ impl UiState {
             UiMessage::AvatarReady { chat_id, path } => {
                 if let Some(row) = self.list.rows.iter_mut().find(|r| r.id == chat_id) {
                     row.avatar_path = path;
+                }
+            }
+            UiMessage::ChatRead { id } => {
+                if let Some(row) = self.list.rows.iter_mut().find(|r| r.id == id) {
+                    row.unread = 0;
+                }
+            }
+            UiMessage::UnreadCount { chat_id, count } => {
+                // Only sync the count when it goes down or another device
+                // read the chat; a locally-received message already bumped it.
+                if let Some(row) = self.list.rows.iter_mut().find(|r| r.id == chat_id) {
+                    if count < row.unread {
+                        row.unread = count;
+                    }
+                }
+            }
+            UiMessage::PeerTyping { chat_id, typing } => {
+                // Track the open chat's peer typing status (header shows it).
+                if typing {
+                    self.typing = Some(chat_id);
+                } else if self.typing == Some(chat_id) {
+                    self.typing = None;
+                }
+            }
+            UiMessage::OutboxRead { chat_id, max_id } => {
+                // Only the open chat's bubbles show ticks; ignore others.
+                if let Screen::Chat { id: open, .. } = &self.screen {
+                    if *open == chat_id {
+                        for m in self.messages.rows.iter_mut() {
+                            if m.out && m.id <= max_id {
+                                m.read = true;
+                            }
+                        }
+                    }
                 }
             }
             UiMessage::PhotoReady { chat_id, msg_id, path } => {
@@ -271,6 +325,11 @@ impl UiState {
         if !self.authenticated {
             return self.on_login(x, y, width, height);
         }
+        // A context menu is open: a left-click runs its item (edit/delete)
+        // or dismisses it; it never falls through to the list/chat.
+        if self.context_menu.is_some() {
+            return self.context_click(x, y).1;
+        }
         if x < theme::layout::LIST_W {
             let row_y = (y - theme::layout::LIST_HEADER_H).max(0.0);
             let id = self.list.row_at(row_y)?;
@@ -281,6 +340,8 @@ impl UiState {
         if let Screen::Chat { .. } = &self.screen {
             if (x - theme::layout::LIST_W) < 96.0 && (y as f32) < theme::layout::CHAT_HEADER_H {
                 self.screen = Screen::Idle;
+                self.context_menu = None;
+                self.editing = None;
             }
         }
         None
@@ -344,11 +405,18 @@ impl UiState {
         self.status.clear();
     }
 
+    /// Closes the context menu and cancels any pending message edit.
+    pub fn clear_context(&mut self) {
+        self.context_menu = None;
+        self.editing = None;
+    }
+
     /// Opens a chat directly by id (programmed click / test).
     pub fn enter_chat(&mut self, id: i64) -> Option<Request> {
         self.screen = Screen::Chat { id, loading: true };
         self.messages.rows = Vec::new();
         self.status = "Loading…".to_string();
+        self.clear_context();
         Some(Request::OpenChat { id })
     }
 
@@ -391,6 +459,92 @@ impl UiState {
         self.viewer = None;
     }
 
+    /// Opens the right-click context menu for a message in the open chat.
+    /// Only outgoing messages offer edit/delete; incoming messages close any
+    /// open menu. `x`/`y` are logical window coordinates; returns `true`
+    /// when a menu is now shown.
+    pub fn open_context(&mut self, x: f32, y: f32, width: f32, text: &TextRenderer) -> bool {
+        if !matches!(self.screen, Screen::Chat { .. }) || x < theme::layout::LIST_W {
+            self.context_menu = None;
+            return false;
+        }
+        let pane_w = (width - theme::layout::LIST_W).max(0.0);
+        let py = y - theme::layout::CHAT_HEADER_H;
+        let Some(row) = self.messages.row_at(text, py, pane_w) else {
+            self.context_menu = None;
+            return false;
+        };
+        let out = self.messages.rows.get(row).map(|m| m.out).unwrap_or(false);
+        if !out {
+            self.context_menu = None;
+            return false;
+        }
+        self.context_menu = Some(ContextMenu { row, y: py });
+        self.clear_selection();
+        true
+    }
+
+    /// Logical size of the context menu, as drawn. Only used by the hit-test
+    /// and the renderer (which also scale by `ui_scale`).
+    pub fn context_menu_size(&self) -> (f32, f32, f32, f32) {
+        let w = theme::layout::CONTEXT_W;
+        let h = theme::layout::CONTEXT_ITEM_H;
+        let (x, y) = match &self.context_menu {
+            Some(m) => (
+                10.0,
+                (m.y - h - 6.0).max(4.0),
+            ),
+            None => (0.0, 0.0),
+        };
+        (x, y, w, h * 2.0)
+    }
+
+    /// Handles a click in the open-chat pane: routes to the context menu
+    /// when one is open (start editing / delete / dismiss), otherwise
+    /// nothing. Returns a network request to send, if any.
+    pub fn context_click(&mut self, x: f32, y: f32) -> (bool, Option<Request>) {
+        let Some(_) = self.context_menu else {
+            return (false, None);
+        };
+        let (mx, my, mw, mh) = self.context_menu_size();
+        let inside = x >= theme::layout::LIST_W + mx
+            && x <= theme::layout::LIST_W + mx + mw
+            && y >= my
+            && y <= my + mh;
+        if !inside {
+            self.context_menu = None;
+            return (true, None);
+        }
+        let item_h = theme::layout::CONTEXT_ITEM_H;
+        let edit_hit = y < my + item_h;
+        let chat_id = match &self.screen {
+            Screen::Chat { id, .. } => *id,
+            Screen::Idle => 0,
+        };
+        let msg_id = match &self.context_menu {
+            Some(m) => self.messages.rows.get(m.row).map(|r| r.id).unwrap_or(0),
+            None => 0,
+        };
+        let req = if edit_hit {
+            // Edit: prefill the composer with the message's current text.
+            if let Some(text) = self.messages.rows.iter().find(|r| r.id == msg_id) {
+                self.editing = Some(msg_id);
+                self.input = text.text.clone();
+            }
+            None
+        } else {
+            // Delete: remove the row locally right away (the server echoes
+            // a MessageDeleted update that is now a no-op).
+            self.messages.rows.retain(|r| r.id != msg_id);
+            Some(Request::DeleteMessage {
+                id: chat_id,
+                msg_id,
+            })
+        };
+        self.context_menu = None;
+        (true, req)
+    }
+
     /// Mouse wheel: the list scrolls when the cursor is over the left pane,
     /// the conversation otherwise (logical coordinates).
     pub fn scroll(&mut self, dy: f32, x: f32, w: f32, h: f32, text: &TextRenderer) {
@@ -407,12 +561,19 @@ impl UiState {
     }
 
     /// Appends typed text (login field while unauthenticated, composer in
-    /// the chat view).
-    pub fn push_text(&mut self, s: &str) {
+    /// the chat view). Returns `true` the first time text appears in the
+    /// composer, so the window can notify the server of typing.
+    pub fn push_text(&mut self, s: &str) -> bool {
         if !self.authenticated {
             self.login_input.push_str(s);
-        } else if matches!(self.screen, Screen::Chat { .. }) {
+            return false;
+        }
+        if matches!(self.screen, Screen::Chat { .. }) {
+            let was_empty = self.input.is_empty();
             self.input.push_str(s);
+            was_empty && s.chars().any(|c| !c.is_control())
+        } else {
+            false
         }
     }
 
@@ -440,6 +601,18 @@ impl UiState {
             return None;
         }
         self.input.clear();
+        if let Some(msg_id) = self.editing.take() {
+            // Editing an outgoing message: update it locally (the server
+            // echoes the edit back through an update), then request the edit.
+            if let Some(m) = self.messages.rows.iter_mut().find(|m| m.id == msg_id) {
+                m.text = text.clone();
+            }
+            return Some(Request::EditMessage {
+                id,
+                msg_id,
+                text,
+            });
+        }
         // Optimistic local send: the id and date are unknown (incoming
         // updates will provide them).
         self.messages
@@ -451,6 +624,7 @@ impl UiState {
                 out: true,
                 photo: None,
                 photo_path: None,
+                read: false,
             });
         Some(Request::SendMessage { id, text })
     }
@@ -745,6 +919,7 @@ mod tests {
                 out: false,
             photo: None,
             photo_path: None,
+            read: false,
             }],
         });
 
@@ -771,6 +946,7 @@ mod tests {
                 out: true,
             photo: None,
             photo_path: None,
+            read: false,
             }],
         });
 
@@ -869,6 +1045,7 @@ mod tests {
                 out: false,
             photo: None,
             photo_path: None,
+            read: false,
             }],
         });
     }
@@ -979,6 +1156,293 @@ mod tests {
         assert_eq!(gamma.unread, 1);
     }
 
+    #[test]
+    fn chat_read_clears_the_unread_badge() {
+        let mut state = ready_state();
+        state.on_message(UiMessage::Dialogs(rows()));
+        state.on_message(UiMessage::ChatRead { id: 2 });
+        assert_eq!(
+            state.list.rows.iter().find(|r| r.id == 2).unwrap().unread,
+            0
+        );
+    }
+
+    #[test]
+    fn context_edit_prefills_the_composer() {
+        let mut state = ready_state();
+        open_chat(&mut state); // opens id 2 with one incoming row (id 100)
+        state.messages.rows.clear();
+        state.messages.rows.push(MsgRow {
+            id: 77,
+            text: "ma phrase".into(),
+            date: 0,
+            out: true,
+            photo: None,
+            photo_path: None,
+            read: false,
+        });
+        state.take_scroll_bottom();
+
+        let text = text();
+        // Right-click anywhere in the (only) outgoing message pane row.
+        let ok = state.open_context(400.0, theme::layout::CHAT_HEADER_H + 25.0, 400.0, &text);
+        assert!(ok, "menu opens on outgoing message");
+        assert!(state.context_menu.is_some());
+
+        // Click the "Modifier" item (top half of the menu).
+        let (mx, my, mw, _) = state.context_menu_size();
+        let (handled, req) = state.context_click(
+            theme::layout::LIST_W + mx + mw / 2.0,
+            my + 10.0,
+        );
+        assert!(handled);
+        assert!(req.is_none());
+        assert_eq!(state.editing, Some(77));
+        assert_eq!(state.input, "ma phrase");
+
+        // Enter now issues an edit, not a send.
+        state.push_text(" !");
+        let req = state.enter().unwrap();
+        assert!(
+            matches!(
+                req,
+                Request::EditMessage { msg_id: 77, ref text, .. } if text == "ma phrase !"
+            ),
+            "expected EditMessage, got {req:?}"
+        );
+        assert_eq!(state.editing, None);
+        assert_eq!(
+            state.messages.rows.iter().find(|m| m.id == 77).unwrap().text,
+            "ma phrase !"
+        );
+    }
+
+    #[test]
+    fn context_delete_removes_the_row_and_requests_the_network() {
+        let mut state = ready_state();
+        open_chat(&mut state);
+        state.messages.rows.clear();
+        state.messages.rows.push(MsgRow {
+            id: 88,
+            text: "bye".into(),
+            date: 0,
+            out: true,
+            photo: None,
+            photo_path: None,
+            read: false,
+        });
+        state.take_scroll_bottom();
+
+        let text = text();
+        let ok = state.open_context(
+            theme::layout::LIST_W + 30.0,
+            theme::layout::CHAT_HEADER_H + 25.0,
+            400.0,
+            &text,
+        );
+        assert!(ok);
+
+        let (mx, my, mw, mh) = state.context_menu_size();
+        // Click "Supprimer" (bottom half).
+        let (handled, req) = state.context_click(
+            theme::layout::LIST_W + mx + mw / 2.0,
+            my + mh - 10.0,
+        );
+        assert!(handled);
+        assert!(
+            matches!(req, Some(Request::DeleteMessage { msg_id: 88, .. })),
+            "expected DeleteMessage, got {req:?}"
+        );
+        assert!(state.context_menu.is_none());
+        assert!(
+            !state.messages.rows.iter().any(|m| m.id == 88),
+            "deleted row should vanish locally"
+        );
+    }
+
+    #[test]
+    fn left_click_runs_the_open_context_menu_item() {
+        // Regression: a left-click on the open menu was handled by `click`
+        // (list/chat routing) instead of `context_click`, so "Modifier" and
+        // "Supprimer" did nothing.
+        let mut state = ready_state();
+        open_chat(&mut state);
+        state.messages.rows.clear();
+        state.messages.rows.push(MsgRow {
+            id: 90,
+            text: "edit me".into(),
+            date: 0,
+            out: true,
+            photo: None,
+            photo_path: None,
+            read: false,
+        });
+        state.take_scroll_bottom();
+
+        let text = text();
+        let ok = state.open_context(
+            theme::layout::LIST_W + 30.0,
+            theme::layout::CHAT_HEADER_H + 25.0,
+            400.0,
+            &text,
+        );
+        assert!(ok);
+
+        // Left-click the "Modifier" item (top half) through the plain click
+        // path the window uses on button release.
+        let (mx, my, mw, _) = state.context_menu_size();
+        let req = state.click(
+            theme::layout::LIST_W + mx + mw / 2.0,
+            my + 10.0,
+            400.0,
+            500.0,
+        );
+        assert!(req.is_none());
+        assert_eq!(state.editing, Some(90));
+        assert_eq!(state.input, "edit me");
+        assert!(state.context_menu.is_none());
+    }
+
+    #[test]
+    fn left_click_delete_removes_the_row_and_requests_the_network() {
+        let mut state = ready_state();
+        open_chat(&mut state);
+        state.messages.rows.clear();
+        state.messages.rows.push(MsgRow {
+            id: 91,
+            text: "gone".into(),
+            date: 0,
+            out: true,
+            photo: None,
+            photo_path: None,
+            read: false,
+        });
+        state.take_scroll_bottom();
+
+        let text = text();
+        assert!(state.open_context(
+            theme::layout::LIST_W + 30.0,
+            theme::layout::CHAT_HEADER_H + 25.0,
+            400.0,
+            &text,
+        ));
+
+        let (mx, my, mw, mh) = state.context_menu_size();
+        let req = state.click(
+            theme::layout::LIST_W + mx + mw / 2.0,
+            my + mh - 10.0,
+            400.0,
+            500.0,
+        );
+        assert!(
+            matches!(req, Some(Request::DeleteMessage { msg_id: 91, .. })),
+            "expected DeleteMessage, got {req:?}"
+        );
+        assert!(state.context_menu.is_none());
+        assert!(
+            !state.messages.rows.iter().any(|m| m.id == 91),
+            "deleted row should vanish locally"
+        );
+    }
+
+    #[test]
+    fn outbox_read_marks_only_the_open_chat_sent_messages() {
+        let mut state = ready_state();
+        open_chat(&mut state); // opens id 2, with one incoming row (id 100)
+        state.messages.rows.push(MsgRow {
+            id: 55,
+            text: "mine".into(),
+            date: 0,
+            out: true,
+            photo: None,
+            photo_path: None,
+            read: false,
+        });
+        state.messages.rows.push(MsgRow {
+            id: 56,
+            text: "mine too".into(),
+            date: 0,
+            out: true,
+            photo: None,
+            photo_path: None,
+            read: false,
+        });
+
+        // Read only up to id 55.
+        state.on_message(UiMessage::OutboxRead {
+            chat_id: 2,
+            max_id: 55,
+        });
+        let rows = &state.messages.rows;
+        let read55 = rows.iter().find(|m| m.id == 55).unwrap().read;
+        let read56 = rows.iter().find(|m| m.id == 56).unwrap().read;
+        assert!(read55);
+        assert!(!read56);
+
+        // A stop for a non-open chat must not touch the open chat's messages.
+        state.on_message(UiMessage::OutboxRead {
+            chat_id: 3,
+            max_id: i32::MAX,
+        });
+        let read56 = state.messages.rows.iter().find(|m| m.id == 56).unwrap().read;
+        assert!(!read56);
+    }
+
+    #[test]
+    fn typing_tracks_the_open_chat_peer() {
+        let mut state = ready_state();
+        state.on_message(UiMessage::Dialogs(rows()));
+        state.click(50.0, 150.0, 400.0, 720.0); // opens id 2
+
+        assert_eq!(state.typing, None);
+        state.on_message(UiMessage::PeerTyping {
+            chat_id: 2,
+            typing: true,
+        });
+        assert_eq!(state.typing, Some(2));
+
+        // A stop for a non-open chat must not clear the open chat's status.
+        state.on_message(UiMessage::PeerTyping {
+            chat_id: 3,
+            typing: false,
+        });
+        assert_eq!(state.typing, Some(2));
+
+        state.on_message(UiMessage::PeerTyping {
+            chat_id: 2,
+            typing: false,
+        });
+        assert_eq!(state.typing, None);
+    }
+
+    #[test]
+    fn unread_count_sync_only_lowers_the_badge() {
+        let mut state = ready_state();
+        state.on_message(UiMessage::Dialogs(rows()));
+        // Another device read chat 2 (badge 2 -> 0).
+        state.on_message(UiMessage::UnreadCount {
+            chat_id: 2,
+            count: 0,
+        });
+        assert_eq!(state.list.rows.iter().find(|r| r.id == 2).unwrap().unread, 0);
+        // A stale/larger count (e.g. a race) never raises the badge.
+        state.on_message(UiMessage::UnreadCount {
+            chat_id: 2,
+            count: 5,
+        });
+        assert_eq!(state.list.rows.iter().find(|r| r.id == 2).unwrap().unread, 0);
+        // Incoming messages still bump it locally afterwards.
+        state.on_message(UiMessage::NewMessage {
+            chat_id: 2,
+            id: 58,
+            text: "back".into(),
+            date: 0,
+            out: false,
+            photo: None,
+        });
+        assert_eq!(state.list.rows.iter().find(|r| r.id == 2).unwrap().unread, 1);
+    }
+
     fn text() -> crate::text::TextRenderer {
         crate::text::TextRenderer::new()
     }
@@ -996,6 +1460,7 @@ mod tests {
                 out: false,
                 photo: None,
                 photo_path: None,
+                read: false,
             });
         }
         state.on_message(UiMessage::Messages {
