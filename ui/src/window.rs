@@ -398,7 +398,9 @@ impl ApplicationHandler for App {
                         self.request_redraw();
                         return;
                     }
-                    // Plain click: selection is cleared, existing actions run.
+                    // Plain click: selection is cleared, existing actions
+                    // run. `state.click` routes a click on an open context
+                    // menu to its item (edit/delete) and dismisses it.
                     let scale = self.ui_scale.max(0.1);
                     let (w, h) = self.logical_size();
                     let lx = self.cursor.x as f32 / scale;
@@ -414,8 +416,10 @@ impl ApplicationHandler for App {
                     }
                     if self.state.viewer.is_some() {
                         self.state.close_viewer();
-                    } else if let Some(path) = self.state.photo_at(lx, ly, w) {
-                        self.state.open_viewer(path);
+                    } else if self.state.context_menu.is_none() {
+                        if let Some(path) = self.state.photo_at(lx, ly, w) {
+                            self.state.open_viewer(path);
+                        }
                     }
                     self.state.clear_selection();
                     self.request_redraw();

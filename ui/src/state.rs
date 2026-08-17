@@ -325,6 +325,11 @@ impl UiState {
         if !self.authenticated {
             return self.on_login(x, y, width, height);
         }
+        // A context menu is open: a left-click runs its item (edit/delete)
+        // or dismisses it; it never falls through to the list/chat.
+        if self.context_menu.is_some() {
+            return self.context_click(x, y).1;
+        }
         if x < theme::layout::LIST_W {
             let row_y = (y - theme::layout::LIST_HEADER_H).max(0.0);
             let id = self.list.row_at(row_y)?;
@@ -1251,6 +1256,91 @@ mod tests {
         assert!(state.context_menu.is_none());
         assert!(
             !state.messages.rows.iter().any(|m| m.id == 88),
+            "deleted row should vanish locally"
+        );
+    }
+
+    #[test]
+    fn left_click_runs_the_open_context_menu_item() {
+        // Regression: a left-click on the open menu was handled by `click`
+        // (list/chat routing) instead of `context_click`, so "Modifier" and
+        // "Supprimer" did nothing.
+        let mut state = ready_state();
+        open_chat(&mut state);
+        state.messages.rows.clear();
+        state.messages.rows.push(MsgRow {
+            id: 90,
+            text: "edit me".into(),
+            date: 0,
+            out: true,
+            photo: None,
+            photo_path: None,
+            read: false,
+        });
+        state.take_scroll_bottom();
+
+        let text = text();
+        let ok = state.open_context(
+            theme::layout::LIST_W + 30.0,
+            theme::layout::CHAT_HEADER_H + 25.0,
+            400.0,
+            &text,
+        );
+        assert!(ok);
+
+        // Left-click the "Modifier" item (top half) through the plain click
+        // path the window uses on button release.
+        let (mx, my, mw, _) = state.context_menu_size();
+        let req = state.click(
+            theme::layout::LIST_W + mx + mw / 2.0,
+            my + 10.0,
+            400.0,
+            500.0,
+        );
+        assert!(req.is_none());
+        assert_eq!(state.editing, Some(90));
+        assert_eq!(state.input, "edit me");
+        assert!(state.context_menu.is_none());
+    }
+
+    #[test]
+    fn left_click_delete_removes_the_row_and_requests_the_network() {
+        let mut state = ready_state();
+        open_chat(&mut state);
+        state.messages.rows.clear();
+        state.messages.rows.push(MsgRow {
+            id: 91,
+            text: "gone".into(),
+            date: 0,
+            out: true,
+            photo: None,
+            photo_path: None,
+            read: false,
+        });
+        state.take_scroll_bottom();
+
+        let text = text();
+        assert!(state.open_context(
+            theme::layout::LIST_W + 30.0,
+            theme::layout::CHAT_HEADER_H + 25.0,
+            400.0,
+            &text,
+        ));
+
+        let (mx, my, mw, mh) = state.context_menu_size();
+        let req = state.click(
+            theme::layout::LIST_W + mx + mw / 2.0,
+            my + mh - 10.0,
+            400.0,
+            500.0,
+        );
+        assert!(
+            matches!(req, Some(Request::DeleteMessage { msg_id: 91, .. })),
+            "expected DeleteMessage, got {req:?}"
+        );
+        assert!(state.context_menu.is_none());
+        assert!(
+            !state.messages.rows.iter().any(|m| m.id == 91),
             "deleted row should vanish locally"
         );
     }
