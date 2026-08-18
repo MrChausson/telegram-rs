@@ -4,7 +4,7 @@
 /// Background of the left panel (chat list).
 pub const LIST_BG: (u8, u8, u8) = (23, 33, 43);
 /// Conversation background (message area).
-pub const CHAT_BG: (u8, u8, u8) = (20, 28, 37);
+pub const CHAT_BG: (u8, u8, u8) = (14, 22, 33);
 /// Hovered chat row.
 pub const ROW_HOVER: (u8, u8, u8) = (31, 44, 57);
 /// Highlighted (selected) chat row.
@@ -27,8 +27,6 @@ pub const INPUT_BORDER: (u8, u8, u8) = (58, 74, 90);
 pub const ERROR: (u8, u8, u8) = (240, 114, 124);
 /// Composer field fill.
 pub const INPUT_FILL: (u8, u8, u8) = (26, 38, 52);
-/// Online presence / unread accent.
-pub const ONLINE: (u8, u8, u8) = (76, 175, 80);
 /// Subtle divider between panes / under headers.
 pub const DIVIDER: (u8, u8, u8) = (34, 47, 61);
 

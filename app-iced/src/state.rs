@@ -595,6 +595,94 @@ mod tests {
     }
 
     #[test]
+    fn outbox_read_marks_only_the_open_chat_sent_messages() {
+        let (mut state, _) = demo_state();
+        state.messages.push(MsgRow {
+            id: 55,
+            text: "mine".into(),
+            date: 0,
+            out: true,
+            photo: None,
+            photo_path: None,
+            read: false,
+        });
+        state.messages.push(MsgRow {
+            id: 56,
+            text: "mine too".into(),
+            date: 0,
+            out: true,
+            photo: None,
+            photo_path: None,
+            read: false,
+        });
+
+        // Read only up to id 55.
+        state.on_message(UiMessage::OutboxRead {
+            chat_id: 42,
+            max_id: 55,
+        });
+        assert!(state.messages.iter().find(|m| m.id == 55).unwrap().read);
+        assert!(!state.messages.iter().find(|m| m.id == 56).unwrap().read);
+
+        // A stop for a non-open chat must not touch the open chat's messages.
+        state.on_message(UiMessage::OutboxRead {
+            chat_id: 7,
+            max_id: i32::MAX,
+        });
+        assert!(!state.messages.iter().find(|m| m.id == 56).unwrap().read);
+    }
+
+    #[test]
+    fn unread_count_sync_only_lowers_the_badge() {
+        let (mut state, _) = demo_state();
+        state.dialogs = vec![ChatRow {
+            id: 42,
+            title: "Camille".into(),
+            subtitle: String::new(),
+            date: 0,
+            unread: 3,
+            avatar_path: None,
+        }];
+        // Higher count from another device is ignored (a local message already
+        // bumped it), but a lower one syncs down.
+        state.on_message(UiMessage::UnreadCount {
+            chat_id: 42,
+            count: 10,
+        });
+        assert_eq!(state.dialogs[0].unread, 3);
+        state.on_message(UiMessage::UnreadCount {
+            chat_id: 42,
+            count: 1,
+        });
+        assert_eq!(state.dialogs[0].unread, 1);
+    }
+
+    #[test]
+    fn new_message_in_list_view_updates_the_list() {
+        let (mut state, _) = demo_state();
+        state.open_chat = None;
+        state.dialogs = vec![ChatRow {
+            id: 7,
+            title: "Other".into(),
+            subtitle: String::new(),
+            date: 0,
+            unread: 0,
+            avatar_path: None,
+        }];
+        state.on_message(UiMessage::NewMessage {
+            chat_id: 7,
+            id: 9,
+            text: "ping".into(),
+            date: 400,
+            out: false,
+            photo: None,
+        });
+        assert_eq!(state.dialogs[0].subtitle, "ping");
+        assert_eq!(state.dialogs[0].unread, 1);
+        assert!(!state.scroll_to_bottom, "list view must not scroll messages");
+    }
+
+    #[test]
     fn escape_cancels_editing() {
         let (mut state, _) = demo_state();
         state.open_context(1);

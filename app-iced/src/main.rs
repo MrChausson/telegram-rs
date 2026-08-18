@@ -11,7 +11,7 @@ mod state;
 mod theme;
 
 use iced::widget::{
-    button, column, container, image, mouse_area, row, scrollable, stack, text, text_input,
+    button, column, container, image, mouse_area, row, scrollable, text, text_input,
 };
 use iced::{Alignment, Color, Length, Task};
 
@@ -147,6 +147,10 @@ fn scroll_to_end_task() -> Task<Message> {
 }
 
 fn submit_login(state: &mut State) {
+    // Empty fields don't submit (mirrors the winit client).
+    if state.login_input.trim().is_empty() {
+        return;
+    }
     let req = match state.login_step {
         LoginStep::Phone => Request::LoginPhone {
             phone: state.login_input.trim().to_string(),
@@ -259,16 +263,21 @@ fn login_view(state: &State) -> Element<'_> {
     .width(76)
     .height(76);
 
-    let mut card = column![
-        logo,
-        text(title).size(20),
-        text(subtitle).size(13).color(rgb(theme::TEXT_SECONDARY)),
-        text_input(field_placeholder, &state.login_input)
+    let mut input = text_input(field_placeholder, &state.login_input)
             .on_input(Message::LoginChanged)
             .on_submit(Message::LoginSubmit)
             .width(400)
             .padding(14)
-            .style(text_input_style),
+            .style(text_input_style);
+        if state.login_step == LoginStep::Password {
+            input = input.secure(true);
+        }
+
+        let mut card = column![
+            logo,
+            text(title).size(20),
+            text(subtitle).size(13).color(rgb(theme::TEXT_SECONDARY)),
+            input,
         button(
             text(button_label).size(15).color(Color::WHITE)
         )
@@ -360,23 +369,18 @@ fn chat_row_button(row: &ChatRow, selected: bool) -> Element<'_> {
     let avatar = avatar_circle(row.avatar_path.as_deref(), &row.title, theme::layout::AVATAR_LIST);
 
     let unread = row.unread > 0;
-    // Unread chats: bold name + brighter preview (like Telegram).
-    let name = text(&row.title)
+    // Matching the winit client: names and previews stay on one line (miss of
+    // a built-in ellipsis in iced is handled by `ellipsize` + no wrapping).
+    let name = text(ellipsize(&row.title, 15))
         .size(theme::font::NAME as f32)
         .color(Color::WHITE)
-        .font(if unread {
-            iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }
-        } else {
-            iced::Font::DEFAULT
-        });
-    let sub_color = if unread {
-        rgb(theme::TEXT_PRIMARY)
-    } else {
-        rgb(theme::TEXT_SECONDARY)
-    };
-    let sub = text(&row.subtitle)
+        .wrapping(iced::widget::text::Wrapping::None)
+        .width(Length::Fill);
+    let sub = text(ellipsize(&row.subtitle, 24))
         .size(theme::font::MESSAGE as f32)
-        .color(sub_color);
+        .color(rgb(theme::TEXT_SECONDARY))
+        .wrapping(iced::widget::text::Wrapping::None)
+        .width(Length::Fill);
 
     let ts: Element<'_> = if row.date > 0 {
         text(theme::fmt_time(row.date))
@@ -457,7 +461,12 @@ fn conversation_pane(state: &State) -> Element<'_> {
                     if i > 0 {
                         cols = cols.push(iced::widget::Space::new().height(gap));
                     }
-                    cols = cols.push(message_row(i, m));
+                    cols = cols.push(message_row(i, m, size.width));
+                    // The context menu floats right below the message that
+                    // raised it, right-aligned (editable messages are ours).
+                    if state.context_menu.map(|c| c.row) == Some(i) {
+                        cols = cols.push(context_menu_bar());
+                    }
                     prev_out = Some(m.out);
                 }
                 scrollable(
@@ -482,22 +491,14 @@ fn conversation_pane(state: &State) -> Element<'_> {
 
     let composer = composer_bar(state);
 
-    // Context menu overlay (floating over the composer area).
-    let menu = context_overlay(state);
-
-    stack![
-        column![
-            header,
-            container(iced::widget::Space::new())
-                .width(Length::Fill)
-                .height(1.0)
-                .style(divider),
-            body,
-            composer
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill),
-        menu
+    column![
+        header,
+        container(iced::widget::Space::new())
+            .width(Length::Fill)
+            .height(1.0)
+            .style(divider),
+        body,
+        composer
     ]
     .width(Length::Fill)
     .height(Length::Fill)
@@ -506,40 +507,27 @@ fn conversation_pane(state: &State) -> Element<'_> {
 
 /// Chat header: back, avatar, name + status, search/info icons.
 fn chat_header(title: &str, avatar_path: Option<&str>, typing: bool) -> Element<'static> {
-    let name = text(title.to_string())
+    let name = text(ellipsize(title, 40))
         .size(theme::font::NAME as f32)
         .color(Color::WHITE)
-        .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT });
+        .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT })
+        .wrapping(iced::widget::text::Wrapping::None)
+        .width(Length::Fill);
     let status: Element<'static> = if title.is_empty() {
         text(" ")
             .size(theme::font::TIMESTAMP as f32)
             .color(rgb(theme::TEXT_SECONDARY))
             .into()
-    } else if typing {
-        text("typing…")
-            .size(theme::font::TIMESTAMP as f32)
-            .color(rgb(theme::ACCENT))
-            .into()
     } else {
-        row![
-            container(iced::widget::Space::new())
-                .width(8)
-                .height(8)
-                .style(|_| container::Style {
-                    background: Some(iced::Background::Color(rgb(theme::ONLINE))),
-                    border: iced::Border {
-                        radius: 4.0.into(),
-                        ..iced::Border::default()
-                    },
-                    ..container::Style::default()
-                }),
-            text("online")
-                .size(theme::font::TIMESTAMP as f32)
-                .color(rgb(theme::ONLINE)),
-        ]
-        .spacing(5)
-        .align_y(Alignment::Center)
-        .into()
+        let (label, color) = if typing {
+            ("typing…", theme::ACCENT)
+        } else {
+            ("Chat", theme::TEXT_SECONDARY)
+        };
+        text(label)
+            .size(theme::font::TIMESTAMP as f32)
+            .color(rgb(color))
+            .into()
     };
 
     container(
@@ -609,11 +597,18 @@ fn composer_bar(state: &State) -> Element<'_> {
 // Message rows
 // ---------------------------------------------------------------------------
 
-fn message_row(idx: usize, m: &MsgRow) -> Element<'_> {
+/// A message row: bubble (sent at right, received at left) + timestamp.
+/// `pane_w` is the conversation pane width used to size the bubble (received:
+/// 70% of the pane, sent: 60%, matching the winit client).
+fn message_row(idx: usize, m: &MsgRow, pane_w: f32) -> Element<'_> {
+    // Bubble width (received: 70% of the pane, sent: 60%).
+    let bubble_w = if m.out { pane_w * 0.6 } else { pane_w * 0.7 };
+
     // Bubble content: photo or text.
     let body: Element<'_> = if let Some(path) = &m.photo_path {
         let photo_el: Element<'_> = image(image::Handle::from_path(path))
-            .width(240)
+            .width(Length::Fill)
+            .content_fit(iced::ContentFit::Contain)
             .border_radius(12.0)
             .into();
         column![
@@ -641,7 +636,7 @@ fn message_row(idx: usize, m: &MsgRow) -> Element<'_> {
 
     let bubble = container(body)
         .padding([8, 12])
-        .max_width(420)
+        .width(bubble_w)
         .style(move |_| container::Style {
             background: Some(iced::Background::Color(rgb(if m.out {
                 theme::BUBBLE_SENT
@@ -679,14 +674,19 @@ fn message_row(idx: usize, m: &MsgRow) -> Element<'_> {
             .into()
     };
 
-    // Left/right click handling via mouse_area.
-    let wrapped = mouse_area(row![bubble, meta].spacing(8).align_y(Alignment::Center))
-        .on_press(Message::RowClicked(idx))
-        .on_right_press(if m.out {
-            Message::RowContext(idx)
-        } else {
-            Message::RowClicked(idx)
-        });
+    // Left/right click handling via mouse_area. WinIt put the timestamp on
+    // the OUTER side of each bubble (left of outgoing, right of incoming).
+    let wrapped = mouse_area(if m.out {
+        row![meta, bubble].spacing(8).align_y(Alignment::Center)
+    } else {
+        row![bubble, meta].spacing(8).align_y(Alignment::Center)
+    })
+    .on_press(Message::RowClicked(idx))
+    .on_right_press(if m.out {
+        Message::RowContext(idx)
+    } else {
+        Message::RowClicked(idx)
+    });
 
     let row_el: Element<'_> = if m.out {
         row![horizontal_spacer(), wrapped].into()
@@ -703,13 +703,11 @@ fn message_row(idx: usize, m: &MsgRow) -> Element<'_> {
 // Context menu (Modifier / Supprimer)
 // ---------------------------------------------------------------------------
 
-fn context_overlay(state: &State) -> Element<'_> {
-    let Some(menu) = &state.context_menu else {
-        return container("").into();
-    };
-    if state.messages.get(menu.row).is_none() {
-        return container("").into();
-    };
+/// The right-click context menu (Modifier / Copier / Supprimer), rendered
+/// inline right under the message that raised it instead of an absolute
+/// overlay: floating a menu at the clicked coordinates isn't available in
+/// iced, so anchoring it to the row is the closest faithful behaviour.
+fn context_menu_bar() -> Element<'static> {
     let menu_el = container(
         column![
             button(
@@ -739,12 +737,9 @@ fn context_overlay(state: &State) -> Element<'_> {
     .width(theme::layout::CONTEXT_W)
     .style(menu_bg);
 
-    // Fixed, floating over the message area (bottom-right of the chat pane).
-    container(menu_el)
-        .align_x(Alignment::End)
-        .align_y(Alignment::End)
-        .width(Length::Fill)
-        .height(Length::Fill)
+    // Right-aligned under the message (editable messages are ours → right).
+    row![horizontal_spacer(), menu_el]
+        .padding([0.0, theme::layout::MSG_PAD_X])
         .into()
 }
 
@@ -754,6 +749,17 @@ fn context_overlay(state: &State) -> Element<'_> {
 
 fn horizontal_spacer() -> Element<'static> {
     iced::widget::Space::new().width(Length::Fill).into()
+}
+
+/// Truncates `s` to at most `max` chars, adding an ellipsis when clipped
+/// (matches the winit client's single-line chat rows).
+fn ellipsize(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 fn avatar_circle(photo: Option<&str>, title: &str, size: f32) -> Element<'static> {
@@ -817,7 +823,7 @@ fn divider(_theme: &iced::Theme) -> container::Style {
 
 fn header_bg(_theme: &iced::Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(rgb(theme::CHAT_BG))),
+        background: Some(iced::Background::Color(rgb(theme::LIST_BG))),
         ..container::Style::default()
     }
 }

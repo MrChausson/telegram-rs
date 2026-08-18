@@ -100,17 +100,23 @@ batches — each release moves the needle, not dribbles.
 - 📸 **Photos** — thumbnails + full-screen viewer
 - ✏️ **Live sync** — edits and deletions from any device
 - 🔑 **In-app sign-in** — phone → code → 2FA, session persisted
+- 🟢 **Presence** — typing indicator, read receipts, unread badges, mark-as-read
+- 📋 **Context menu** — edit, copy or delete your own messages
+
+> 📋 **Copy / paste note:** message text can be copied from the message's
+> context menu (right-click → “Copier”), and text pastes into the composer
+> with Ctrl/⌘-V. Drag-to-select inside message bubbles isn't supported by the
+> Iced text widget — a deliberate trade-off of the software-rendered UI.
 
 ### 🚧 Next up
 
 | Area | In V1 |
 |---|---|
 | 📤 Media | Send photos, videos, files, voice messages · stickers, GIFs, custom emoji |
-| 💬 Messaging | Replies, forwards, edit & delete your own messages, drafts, scheduling, polls |
+| 💬 Messaging | Replies, forwards, custom emoji in composer |
 | 🔍 Search | Global and in-chat search |
 | 👥 Groups | Create and manage groups/channels, members, admin tools, topics |
-| 🟢 Presence | Typing indicator, read receipts, online status, mark-as-read |
-| 🎨 Experience | Light theme, settings, keyboard shortcuts, notifications + tray |
+| 🎨 Experience | Light theme, settings, notifications + tray |
 | 👤 Accounts | QR login, logout, multiple accounts |
 | 🔐 Privacy | Secret (end-to-end) chats |
 | 📞 Calls | Voice and video calls |
