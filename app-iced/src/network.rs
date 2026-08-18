@@ -5,11 +5,14 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::Semaphore;
 
 use grammers_client::client::{LoginToken, PasswordToken, SignInError, UpdatesConfiguration};
 use grammers_client::update::Update;
 use grammers_session::types::PeerRef;
+use grammers_session::updates::UpdatesLike;
 use tg::client::Telegram;
 use tg::session::load_or_new;
 use tokio::sync::mpsc;
@@ -19,6 +22,9 @@ use crate::bridge::{ChatRow, MsgRow, Request, UiMessage};
 const ENV_FILE: &str = ".env";
 const SESSION_FILE: &str = ".tg.session";
 const MESSAGE_LIMIT: usize = 200;
+/// Max simultaneous MTProto transfers (avatars + photo thumbnails). Kept small
+/// so interactive requests share the connection without waiting on a backlog.
+const DOWNLOAD_CONCURRENCY: usize = 4;
 
 const DEFAULT_API_ID: Option<&str> = option_env!("TG_API_ID");
 const DEFAULT_API_HASH: Option<&str> = option_env!("TG_API_HASH");
@@ -156,7 +162,7 @@ pub fn spawn_network(demo: bool) -> UnboundedSender<Request> {
                 let env = load_env(&env_path());
                 let api_id = api_id(&env).expect("API_ID");
                 let api_hash = api_hash(&env);
-                let tg = match Telegram::connect(session.clone(), api_id).await {
+                let mut tg = match Telegram::connect(session.clone(), api_id).await {
                     Ok(tg) => tg,
                     Err(e) => {
                         let _ = ui_tx.send(UiMessage::Error(format!("Could not connect: {e}")));
@@ -171,6 +177,8 @@ pub fn spawn_network(demo: bool) -> UnboundedSender<Request> {
                 }
 
                 let _ = tg.client().get_me().await;
+                let updates_rx = tg.take_updates();
+                let tg = Arc::new(tg);
 
                 match tg.get_dialogs().await {
                     Ok(dialogs) => {
@@ -209,7 +217,7 @@ pub fn spawn_network(demo: bool) -> UnboundedSender<Request> {
                                 });
                             }
                         });
-                        serve(tg, &ui_tx, &mut req_rx, &peers).await;
+                        serve(tg, updates_rx, &ui_tx, &mut req_rx, &peers).await;
                     }
                     Err(e) => {
                         let _ = ui_tx.send(UiMessage::Error(format!(
@@ -632,14 +640,50 @@ async fn serve_login(
     }
 }
 
+/// Shared download state: on-disk photo paths (keyed by chat/message) and a
+/// concurrency cap for background MTProto transfers.
+struct Downloads {
+    photos: Mutex<HashMap<(i64, i32), String>>,
+    sem: Arc<Semaphore>,
+}
+
+impl Downloads {
+    fn new() -> Self {
+        Self {
+            photos: Mutex::new(HashMap::new()),
+            sem: Arc::new(Semaphore::new(DOWNLOAD_CONCURRENCY)),
+        }
+    }
+
+    fn path(&self, chat_id: i64, msg_id: i32) -> Option<String> {
+        self.photos.lock().unwrap().get(&(chat_id, msg_id)).cloned()
+    }
+
+    fn insert(&self, chat_id: i64, msg_id: i32, path: String) {
+        self.photos.lock().unwrap().insert((chat_id, msg_id), path);
+    }
+}
+
+/// Sort used by the network loop so `OpenChat` (history loading) is always
+/// handled before slower background work (avatar downloads) in the same batch.
+fn prioritize(pending: &mut Vec<Request>) {
+    pending.sort_by_key(|r| !matches!(r, Request::OpenChat { .. }));
+}
+
 /// Network loop: handles UI requests and real-time updates.
+///
+/// Interactive work (OpenChat, sends, edits…) is done inline with a priority
+/// sort, so it is never queued behind slow downloads. Avatar and photo
+/// thumbnails run in the background through [`Downloads`]' semaphore: awaiting
+/// them one-by-one in this loop made a click on a chat take up to a minute
+/// (every avatar of the dialog list downloaded first).
 async fn serve(
-    mut tg: Telegram,
+    tg: Arc<Telegram>,
+    updates_rx: tokio::sync::mpsc::UnboundedReceiver<UpdatesLike>,
     ui_tx: &mpsc::UnboundedSender<UiMessage>,
     req_rx: &mut mpsc::UnboundedReceiver<Request>,
     peers: &HashMap<i64, (String, PeerRef)>,
 ) {
-    let updates_rx = tg.take_updates();
     let mut updates = tg
         .client()
         .stream_updates(
@@ -651,13 +695,12 @@ async fn serve(
         )
         .await;
 
+    let downloads = Arc::new(Downloads::new());
+
     let refresh = std::time::Duration::from_secs(15);
     let mut last_refresh = std::time::Instant::now();
     let mut open_id: Option<i64> = None;
     let mut open_sig: Option<(usize, String)> = None;
-    // Downloaded photo paths keyed by (chat id, message id), so periodic
-    // refreshes keep showing them instead of resetting to None.
-    let mut photo_paths: HashMap<(i64, i32), String> = HashMap::new();
 
     let save_every = std::time::Duration::from_secs(30);
     let mut last_save = std::time::Instant::now();
@@ -669,13 +712,13 @@ async fn serve(
     loop {
         let mut pending: Vec<Request> =
             std::iter::from_fn(|| req_rx.try_recv().ok()).collect();
-        pending.sort_by_key(|r| !matches!(r, Request::OpenChat { .. }));
+        prioritize(&mut pending);
         for req in pending {
             if let Request::OpenChat { id } = req {
                 open_id = Some(id);
                 open_sig = None;
             }
-            handle_request(&tg, ui_tx, req, peers, &mut photo_paths).await;
+            handle_request(&tg, ui_tx, req, peers, &downloads).await;
         }
 
         if last_refresh.elapsed() >= refresh {
@@ -705,7 +748,7 @@ async fn serve(
                                         date: m.date,
                                         out: m.out,
                                         photo,
-                                        photo_path: photo_paths.get(&(open, m.id)).cloned(),
+                                        photo_path: downloads.path(open, m.id),
                                         read: false,
                                     }
                                 })
@@ -718,7 +761,14 @@ async fn serve(
                             // Warm photo thumbnails for any new photo messages.
                             for m in &msgs {
                                 if m.media.is_some() {
-                                    fetch_photo(&tg, ui_tx, peers, open, m.id, &mut photo_paths).await;
+                                    spawn_photo(
+                                        tg.clone(),
+                                        ui_tx.clone(),
+                                        downloads.clone(),
+                                        open,
+                                        *peer_ref,
+                                        m.id,
+                                    );
                                 }
                             }
                         }
@@ -827,11 +877,11 @@ fn action_is_cancel(action: &grammers_client::tl::enums::SendMessageAction) -> b
 }
 
 async fn handle_request(
-    tg: &Telegram,
+    tg: &Arc<Telegram>,
     ui_tx: &mpsc::UnboundedSender<UiMessage>,
     req: Request,
     peers: &HashMap<i64, (String, PeerRef)>,
-    photo_paths: &mut HashMap<(i64, i32), String>,
+    downloads: &Arc<Downloads>,
 ) {
     match req {
         Request::MarkRead { id } => {
@@ -849,7 +899,7 @@ async fn handle_request(
         Request::OpenChat { id } => match peers.get(&id) {
             Some((title, peer_ref)) => match tg.get_messages(peer_ref, MESSAGE_LIMIT).await {
                 Ok(messages) => {
-                    let rows: Vec<MsgRow> = messages
+                    let msgs: Vec<MsgRow> = messages
                         .into_iter()
                         .map(|m| {
                             let photo = m.media.map(|k| match k {
@@ -863,7 +913,7 @@ async fn handle_request(
                                 date: m.date,
                                 out: m.out,
                                 photo,
-                                photo_path: photo_paths.get(&(id, m.id)).cloned(),
+                                photo_path: downloads.path(id, m.id),
                                 read: false,
                             }
                         })
@@ -871,12 +921,20 @@ async fn handle_request(
                     let _ = ui_tx.send(UiMessage::Messages {
                         id,
                         title: title.clone(),
-                        rows: rows.clone(),
+                        rows: msgs.clone(),
                     });
-                    // Fetch photo thumbnails for any photo messages in the background.
-                    for m in rows {
+                    // Fetch photo thumbnails asynchronously: the conversation
+                    // is shown immediately, thumbnails stream in as they come.
+                    for m in &msgs {
                         if m.photo.is_some() {
-                            fetch_photo(tg, ui_tx, peers, id, m.id, photo_paths).await;
+                            spawn_photo(
+                                tg.clone(),
+                                ui_tx.clone(),
+                                downloads.clone(),
+                                id,
+                                *peer_ref,
+                                m.id,
+                            );
                         }
                     }
                 }
@@ -892,12 +950,13 @@ async fn handle_request(
         },
         Request::DownloadAvatar { chat_id } => match peers.get(&chat_id) {
             Some((_, peer_ref)) => {
-                let dir = cache_dir().join("avatars");
-                let path = match tg.download_avatar(peer_ref, &dir).await {
-                    Ok(p) => p.map(|p| p.to_string_lossy().into_owned()),
-                    Err(_) => None,
-                };
-                let _ = ui_tx.send(UiMessage::AvatarReady { chat_id, path });
+                spawn_avatar(
+                    tg.clone(),
+                    ui_tx.clone(),
+                    downloads.clone(),
+                    chat_id,
+                    *peer_ref,
+                );
             }
             None => {}
         },
@@ -935,34 +994,112 @@ async fn handle_request(
     }
 }
 
-/// Downloads a message's photo thumbnail (cached), records it in `photo_paths`
-/// and notifies the UI with the on-disk path.
-async fn fetch_photo(
-    tg: &Telegram,
-    ui_tx: &mpsc::UnboundedSender<UiMessage>,
-    peers: &HashMap<i64, (String, PeerRef)>,
+/// Spawns a background avatar download (capped by the semaphore) and reports
+/// the result to the UI.
+fn spawn_avatar(
+    tg: Arc<Telegram>,
+    ui_tx: mpsc::UnboundedSender<UiMessage>,
+    downloads: Arc<Downloads>,
     chat_id: i64,
-    msg_id: i32,
-    photo_paths: &mut HashMap<(i64, i32), String>,
+    peer_ref: PeerRef,
 ) {
-    if photo_paths.contains_key(&(chat_id, msg_id)) {
+    tokio::spawn(async move {
+        let _permit = downloads
+            .sem
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("download semaphore");
+        let dir = cache_dir().join("avatars");
+        let path = match tg.download_avatar(&peer_ref, &dir).await {
+            Ok(p) => p.map(|p| p.to_string_lossy().into_owned()),
+            Err(_) => None,
+        };
+        let _ = ui_tx.send(UiMessage::AvatarReady { chat_id, path });
+    });
+}
+
+/// Spawns a background download of a message's photo thumbnail (cached), and
+/// records the on-disk path so periodic refreshes keep showing it.
+fn spawn_photo(
+    tg: Arc<Telegram>,
+    ui_tx: mpsc::UnboundedSender<UiMessage>,
+    downloads: Arc<Downloads>,
+    chat_id: i64,
+    peer_ref: PeerRef,
+    msg_id: i32,
+) {
+    if downloads.photos.lock().unwrap().contains_key(&(chat_id, msg_id)) {
         return;
     }
-    let Some((_, peer_ref)) = peers.get(&chat_id) else { return };
-    let dir = cache_dir().join("media").join(chat_id.to_string());
-    let path = match tg.download_photo(peer_ref, msg_id, &dir).await {
-        Ok(Some(p)) => Some(p.to_string_lossy().into_owned()),
-        _ => None,
-    };
-    if let Some(p) = &path {
-        photo_paths.insert((chat_id, msg_id), p.clone());
-    }
-    let _ = ui_tx.send(UiMessage::PhotoReady {
-        chat_id,
-        msg_id,
-        path,
+    tokio::spawn(async move {
+        let _permit = downloads
+            .sem
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("download semaphore");
+        let dir = cache_dir().join("media").join(chat_id.to_string());
+        let path = match tg.download_photo(&peer_ref, msg_id, &dir).await {
+            Ok(Some(p)) => {
+                let p = p.to_string_lossy().into_owned();
+                downloads.insert(chat_id, msg_id, p.clone());
+                Some(p)
+            }
+            _ => None,
+        };
+        let _ = ui_tx.send(UiMessage::PhotoReady {
+            chat_id,
+            msg_id,
+            path,
+        });
     });
 }
 
 /// Re-exported so `main.rs` can type the sender.
 pub type UnboundedSender<T> = mpsc::UnboundedSender<T>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_chat_requests_are_handled_first() {
+        let mut pending = vec![
+            Request::MarkRead { id: 1 },
+            Request::OpenChat { id: 2 },
+            Request::DownloadAvatar { chat_id: 3 },
+            Request::OpenChat { id: 4 },
+        ];
+        prioritize(&mut pending);
+        let first_opens: Vec<i64> = pending
+            .iter()
+            .take_while(|r| matches!(r, Request::OpenChat { .. }))
+            .map(|r| match r {
+                Request::OpenChat { id } => *id,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert!(
+            first_opens.contains(&2) && first_opens.contains(&4),
+            "all OpenChat requests must be processed before slower work"
+        );
+        assert!(
+            pending
+                .iter()
+                .skip(first_opens.len())
+                .all(|r| !matches!(r, Request::OpenChat { .. })),
+            "no OpenChat must remain after the non-OpenChat work"
+        );
+    }
+
+    #[test]
+    fn prioritize_is_stable_with_a_single_open_chat() {
+        let mut pending = vec![
+            Request::DownloadAvatar { chat_id: 1 },
+            Request::OpenChat { id: 9 },
+        ];
+        prioritize(&mut pending);
+        assert!(matches!(pending[0], Request::OpenChat { id: 9 }));
+    }
+}

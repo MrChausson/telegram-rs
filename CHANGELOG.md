@@ -29,8 +29,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Live typing is now also sent to the server while the user types
   (`Request::Typing`), and the demo backend simulates typing + incoming
   messages in Camille's chat.
+- While a chat's history is being fetched the pane shows "Loading…" instead
+  of the misleading "No messages yet" (which now only means an actually empty
+  chat).
 
 ### Fixed
+- Opening a chat no longer takes ~a minute: avatar and photo-thumbnail
+  downloads now run in the background through a shared semaphore (4 concurrent
+  transfers) instead of being awaited one-by-one in the network loop, which
+  queued every click behind the whole startup avatar flood. `OpenChat` is also
+  explicitly prioritized over slower downloads. (fix regressions: tests
+  assert the open-chat → history flow and the priority ordering)
+- Profile avatars are rendered as circles again: the tiny-skia backend ignores
+  `border_radius` on image widgets, so avatars are now decoded, cover-cropped
+  and alpha-masked into a disc once per (path, size) and memoized (keyed by the
+  raster pipeline's handle id, so the decoded image stays cached across frames).
+- The list and conversation headers no longer hug the top edge: their content
+  is vertically centered (`.align_y(Center)`), matching the winit look.
 - Restarting with a valid session no longer shows the sign-in screen: the
   chat list arriving now marks the account as authenticated, so a persisted
   session opens straight into the chats.

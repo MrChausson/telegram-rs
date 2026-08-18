@@ -18,3 +18,4 @@ anyhow = "1"
 mimalloc.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "alloc"] }
 tiny-skia.workspace = true
+image-codec = { package = "image", version = "0.25", default-features = false, features = ["png", "jpeg"] }

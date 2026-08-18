@@ -10,6 +10,8 @@ mod network;
 mod state;
 mod theme;
 
+use std::collections::HashMap;
+
 use iced::widget::{
     button, column, container, image, mouse_area, row, scrollable, text, text_input,
 };
@@ -339,7 +341,9 @@ fn list_pane(state: &State) -> Element<'_> {
     let list = scrollable(rows).height(Length::Fill).width(Length::Fill);
 
     column![
-        // Header bar: "Chats" + search / compose / dots.
+        // Header bar: "Chats" + search / compose / dots. `align_y(Center)`
+        // keeps the row away from the top edge (the default is top-aligned,
+        // which made the left items hug the window border).
         container(
             row![
                 text("Chats").size(theme::font::TITLE as f32).color(Color::WHITE),
@@ -354,6 +358,7 @@ fn list_pane(state: &State) -> Element<'_> {
         .width(Length::Fill)
         .height(theme::layout::LIST_HEADER_H)
         .padding([0, 14])
+        .align_y(Alignment::Center)
         .style(list_bg),
         container(list)
             .width(theme::layout::LIST_W)
@@ -430,7 +435,9 @@ fn conversation_pane(state: &State) -> Element<'_> {
     let header = chat_header(&title, avatar_path.as_deref(), state.typing);
     let body: Element<'_> = if state.messages.is_empty() {
         let msg = if state.open_chat.is_some() {
-            if state.status.is_empty() {
+            if state.loading {
+                "Loading…".to_string()
+            } else if state.status.is_empty() {
                 "No messages yet".to_string()
             } else {
                 state.status.clone()
@@ -548,6 +555,7 @@ fn chat_header(title: &str, avatar_path: Option<&str>, typing: bool) -> Element<
     .width(Length::Fill)
     .height(theme::layout::CHAT_HEADER_H)
     .padding([0, 12])
+    .align_y(Alignment::Center)
     .style(header_bg)
     .into()
 }
@@ -764,17 +772,17 @@ fn ellipsize(s: &str, max: usize) -> String {
 
 fn avatar_circle(photo: Option<&str>, title: &str, size: f32) -> Element<'static> {
     if let Some(path) = photo {
-        let handle = image::Handle::from_path(path);
-        return container(
-            image(handle)
-                .width(Length::Fixed(size))
-                .height(Length::Fixed(size))
-                .content_fit(iced::ContentFit::Cover)
-                .border_radius(size / 2.0),
-        )
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .into();
+        if let Some(handle) = circular_avatar_handle(path, size) {
+            return container(
+                image(handle)
+                    .width(Length::Fixed(size))
+                    .height(Length::Fixed(size))
+                    .content_fit(iced::ContentFit::Cover),
+            )
+            .width(Length::Fixed(size))
+            .height(Length::Fixed(size))
+            .into();
+        }
     }
     let ch = title.chars().next().unwrap_or('?').to_string().to_uppercase();
     let c = theme::avatar_color(title);
@@ -794,6 +802,60 @@ fn avatar_circle(photo: Option<&str>, title: &str, size: f32) -> Element<'static
             }),
     )
     .into()
+}
+
+/// Renders an avatar as a circular, alpha-masked `Handle`.
+///
+/// The tiny-skia backend ignores `border_radius` on image widgets, so square
+/// images stay square. We decode the thumbnail once per (path, size), mask it
+/// with a circle and memoize the result — the raster pipeline keys its cache
+/// on `Handle::id()`, and `from_rgba` regenerates a fresh id on every call,
+/// so recomputing it per frame would defeat that cache.
+fn circular_avatar_handle(path: &str, size: f32) -> Option<image::Handle> {
+    use std::sync::Mutex;
+
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<(String, u32), image::Handle>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    // Render at 2x so the circle stays crisp on HiDPI displays.
+    let px = ((size * 2.0).round() as u32).max(8);
+    let key = (path.to_string(), px);
+    if let Some(h) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
+        return Some(h);
+    }
+
+    let handle = build_circular_avatar(path, px)?;
+    if let Ok(mut c) = cache.lock() {
+        c.insert(key, handle.clone());
+    }
+    Some(handle)
+}
+
+fn build_circular_avatar(path: &str, px: u32) -> Option<image::Handle> {
+    let img = ::image_codec::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+    // Cover-crop into a `px` square, then punch out a circle with an alpha
+    // mask (the areas outside the disc become transparent).
+    let mut rgba = img
+        .resize_to_fill(px, px, ::image_codec::imageops::FilterType::Triangle)
+        .to_rgba8();
+    let center = (px as f32 - 1.0) / 2.0;
+    let radius = px as f32 / 2.0;
+    for y in 0..px {
+        for x in 0..px {
+            let dx = x as f32 - center;
+            let dy = y as f32 - center;
+            if dx * dx + dy * dy > radius * radius {
+                rgba.get_pixel_mut(x, y)[3] = 0;
+            }
+        }
+    }
+    Some(image::Handle::from_rgba(px, px, rgba.into_raw()))
 }
 
 // ---------------------------------------------------------------------------

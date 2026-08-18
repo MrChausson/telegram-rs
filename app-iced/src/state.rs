@@ -32,6 +32,10 @@ pub struct State {
     pub status: String,
     pub login_error: bool,
 
+    /// True while the open chat's history hasn't arrived yet (avoids showing
+    /// "No messages yet" during the fetch).
+    pub loading: bool,
+
     /// True once the account is signed in (chat UI active).
     pub authenticated: bool,
     /// The peer of the open chat is typing.
@@ -65,6 +69,7 @@ impl State {
             chat_title: String::new(),
             status: String::new(),
             login_error: false,
+            loading: false,
             authenticated: false,
             typing: false,
             context_menu: None,
@@ -98,6 +103,7 @@ impl State {
                     let prev_len = self.messages.len();
                     self.chat_title = title;
                     self.messages = rows;
+                    self.loading = false;
                     self.editing = None;
                     self.context_menu = None;
                     // Scroll to the bottom on open, or when a new message
@@ -111,6 +117,7 @@ impl State {
                 // Open chat? Merge the message (dedupe the optimistic local
                 // send, which is tagged id=0).
                 if self.open_chat == Some(chat_id) {
+                    self.loading = false;
                     let rows = &mut self.messages;
                     if let Some(m) = rows.iter_mut().find(|m| m.id == id) {
                         m.text = text;
@@ -248,6 +255,7 @@ impl State {
                 };
             }
             UiMessage::Error(e) => {
+                self.loading = false;
                 if !self.authenticated {
                     self.login_error = true;
                 }
@@ -374,6 +382,7 @@ impl State {
     pub fn open_chat(&mut self, id: i64) {
         self.open_chat = Some(id);
         self.messages.clear();
+        self.loading = true;
         self.chat_title.clear();
         self.editing = None;
         self.context_menu = None;
@@ -708,5 +717,84 @@ mod tests {
             avatar_path: None,
         }]));
         assert!(state.authenticated, "existing session must skip the login screen");
+    }
+
+    #[test]
+    fn opening_a_chat_clears_messages_and_is_loading() {
+        let (mut state, mut req_rx) = demo_state();
+        state.open_chat(7);
+        // The good, so a regression like "click a chat → stuck on 'No
+        // messages yet'" is caught: the chat is flagged as loading.
+        assert_eq!(state.open_chat, Some(7));
+        assert!(state.messages.is_empty());
+        assert!(state.loading, "opening a chat must set the loading flag");
+        let reqs = drain(&mut req_rx);
+        assert_eq!(reqs.len(), 2, "open + mark-read are sent to the network");
+        assert!(matches!(reqs[0], Request::OpenChat { id: 7 }));
+        assert!(matches!(reqs[1], Request::MarkRead { id: 7 }));
+    }
+
+    #[test]
+    fn messages_reply_clears_loading_and_populates_rows() {
+        let (mut state, _) = demo_state();
+        state.open_chat(7);
+        assert!(state.loading);
+        state.on_message(UiMessage::Messages {
+            id: 7,
+            title: "Camille".into(),
+            rows: vec![MsgRow {
+                id: 1,
+                text: "hi".into(),
+                date: 5,
+                out: false,
+                photo: None,
+                photo_path: None,
+                read: false,
+            }],
+        });
+        assert!(!state.loading, "loading stops once history arrives");
+        assert_eq!(state.messages.len(), 1);
+        assert!(state.scroll_to_bottom, "first history loads scroll to bottom");
+        assert_eq!(state.chat_title, "Camille");
+    }
+
+    #[test]
+    fn messages_for_a_different_chat_do_not_clear_loading() {
+        let (mut state, _) = demo_state();
+        state.open_chat(7);
+        state.on_message(UiMessage::Messages {
+            id: 8,
+            title: "Other".into(),
+            rows: vec![],
+        });
+        assert!(state.loading, "a stale response must not clear loading");
+        assert!(state.messages.is_empty());
+    }
+
+    #[test]
+    fn loading_is_not_set_after_history_arrives() {
+        let (mut state, _) = demo_state();
+        state.open_chat(7);
+        state.on_message(UiMessage::Messages {
+            id: 7,
+            title: "Camille".into(),
+            rows: vec![MsgRow {
+                id: 1,
+                text: "hi".into(),
+                date: 5,
+                out: true,
+                photo: None,
+                photo_path: None,
+                read: false,
+            }],
+        });
+        // A refresh with a changed signature also clears loading (idempotent).
+        state.on_message(UiMessage::Messages {
+            id: 7,
+            title: "Camille".into(),
+            rows: vec![],
+        });
+        assert!(!state.loading);
+        assert!(state.messages.is_empty());
     }
 }

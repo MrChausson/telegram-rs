@@ -124,6 +124,7 @@ dependencies = [
  "grammers-client",
  "grammers-session",
  "iced",
+ "image",
  "mimalloc",
  "tg",
  "tiny-skia",
