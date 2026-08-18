@@ -45,6 +45,8 @@ pub enum Request {
     EditMessage { id: i64, msg_id: i32, text: String },
     /// Deletes one of the user's messages (from all devices).
     DeleteMessage { id: i64, msg_id: i32 },
+    /// Downloads a chat's profile photo thumbnail.
+    DownloadAvatar { chat_id: i64 },
     /// Login step 1: request the SMS/call verification code for a phone.
     LoginPhone { phone: String },
     /// Login step 2: submit the received code.

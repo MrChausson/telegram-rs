@@ -65,7 +65,8 @@ fn boot() -> (State, Task<Message>) {
     let demo = std::env::args().any(|a| a == "--demo");
     let open_first = std::env::args().any(|a| a == "--open-first");
     let req_tx = network::spawn_network(demo);
-    (State::new(req_tx).with_auto_open_first(open_first), Task::none())
+    let state = State::new(req_tx).with_auto_open_first(open_first || demo);
+    (state, Task::none())
 }
 
 fn update(state: &mut State, msg: Message) -> Task<Message> {
@@ -289,12 +290,12 @@ fn list_pane(state: &State) -> Element<'_> {
                 icon(Icon::Compose, theme::ICON, 20.0),
                 icon(Icon::Dots, theme::ICON, 20.0),
             ]
-            .spacing(16)
+            .spacing(14)
             .align_y(Alignment::Center)
         )
         .width(Length::Fill)
         .height(theme::layout::LIST_HEADER_H)
-        .padding([0, 16])
+        .padding([0, 14])
         .style(list_bg),
         container(list)
             .width(theme::layout::LIST_W)
@@ -307,12 +308,26 @@ fn list_pane(state: &State) -> Element<'_> {
 }
 
 fn chat_row_button(row: &ChatRow, selected: bool) -> Element<'_> {
-    let avatar = avatar_circle(&row.title, theme::layout::AVATAR_LIST);
+    let avatar = avatar_circle(row.avatar_path.as_deref(), &row.title, theme::layout::AVATAR_LIST);
 
-    let name = text(&row.title).size(theme::font::NAME as f32).color(Color::WHITE);
+    let unread = row.unread > 0;
+    // Unread chats: bold name + brighter preview (like Telegram).
+    let name = text(&row.title)
+        .size(theme::font::NAME as f32)
+        .color(Color::WHITE)
+        .font(if unread {
+            iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }
+        } else {
+            iced::Font::DEFAULT
+        });
+    let sub_color = if unread {
+        rgb(theme::TEXT_PRIMARY)
+    } else {
+        rgb(theme::TEXT_SECONDARY)
+    };
     let sub = text(&row.subtitle)
         .size(theme::font::MESSAGE as f32)
-        .color(rgb(theme::TEXT_SECONDARY));
+        .color(sub_color);
 
     let ts: Element<'_> = if row.date > 0 {
         text(theme::fmt_time(row.date))
@@ -323,7 +338,7 @@ fn chat_row_button(row: &ChatRow, selected: bool) -> Element<'_> {
         horizontal_spacer()
     };
 
-    let badge: Element<'_> = if row.unread > 0 {
+    let badge: Element<'_> = if unread {
         container(text(row.unread).size(theme::font::BADGE as f32).color(Color::WHITE))
             .padding([2, 6])
             .style(badge_circle)
@@ -343,8 +358,8 @@ fn chat_row_button(row: &ChatRow, selected: bool) -> Element<'_> {
     )
     .on_press(Message::OpenChat(row.id))
     .width(Length::Fill)
-    .padding(10)
-    .style(if selected { selected_row_style } else { row_style })
+    .padding([10, 14])
+    .style(move |theme, status| row_style(theme, status, selected))
     .into()
 }
 
@@ -352,12 +367,26 @@ fn chat_row_button(row: &ChatRow, selected: bool) -> Element<'_> {
 fn conversation_pane(state: &State) -> Element<'_> {
     let open = state.open_chat;
     let chat = state.dialogs.iter().find(|d| Some(d.id) == open);
-    let title = chat.map(|c| c.title.clone()).unwrap_or_default();
+    let title = if !state.chat_title.is_empty() {
+        state.chat_title.clone()
+    } else {
+        chat.map(|c| c.title.clone()).unwrap_or_default()
+    };
+    let avatar_path = chat.and_then(|c| c.avatar_path.clone());
 
-    let header = chat_header(&title, state.typing);
+    let header = chat_header(&title, avatar_path.as_deref(), state.typing);
     let body: Element<'_> = if state.messages.is_empty() {
+        let msg = if state.open_chat.is_some() {
+            if state.status.is_empty() {
+                "No messages yet".to_string()
+            } else {
+                state.status.clone()
+            }
+        } else {
+            "Select a chat to start messaging".to_string()
+        };
         container(
-            text(if state.status.is_empty() { "Loading…".to_string() } else { state.status.clone() })
+            text(msg)
                 .size(theme::font::MESSAGE as f32)
                 .color(rgb(theme::TEXT_SECONDARY)),
         )
@@ -368,13 +397,25 @@ fn conversation_pane(state: &State) -> Element<'_> {
         .into()
     } else {
         let mut cols = column![];
+        let mut prev_out: Option<bool> = None;
         for (i, m) in state.messages.iter().enumerate() {
+            // Group consecutive messages from the same author tightly.
+            let gap = if prev_out == Some(m.out) { 3.0 } else { 10.0 };
+            if i > 0 {
+                cols = cols.push(iced::widget::Space::new().height(gap));
+            }
             cols = cols.push(message_row(i, m));
+            prev_out = Some(m.out);
         }
-        scrollable(cols.push(iced::widget::Space::new().height(Length::Fill)))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        container(
+            scrollable(cols.push(iced::widget::Space::new().height(Length::Fill)))
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(chat_bg)
+        .into()
     };
 
     let composer = composer_bar(state);
@@ -382,23 +423,56 @@ fn conversation_pane(state: &State) -> Element<'_> {
     // Context menu overlay (floating over the composer area).
     let menu = context_overlay(state);
 
-    stack![column![header, body, composer].width(Length::Fill).height(Length::Fill), menu]
+    stack![
+        column![
+            header,
+            container(iced::widget::Space::new())
+                .width(Length::Fill)
+                .height(1.0)
+                .style(divider),
+            body,
+            composer
+        ]
         .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+        .height(Length::Fill),
+        menu
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 /// Chat header: back, avatar, name + status, search/info icons.
-fn chat_header(title: &str, typing: bool) -> Element<'static> {
-    let name = text(title.to_string()).size(theme::font::NAME as f32).color(Color::WHITE);
-    let status = if typing {
+fn chat_header(title: &str, avatar_path: Option<&str>, typing: bool) -> Element<'static> {
+    let name = text(title.to_string())
+        .size(theme::font::NAME as f32)
+        .color(Color::WHITE)
+        .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT });
+    let status: Element<'static> = if typing {
         text("typing…")
             .size(theme::font::TIMESTAMP as f32)
             .color(rgb(theme::ACCENT))
+            .into()
     } else {
-        text("Chat")
-            .size(theme::font::TIMESTAMP as f32)
-            .color(rgb(theme::TEXT_SECONDARY))
+        row![
+            container(iced::widget::Space::new())
+                .width(8)
+                .height(8)
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(rgb(theme::ONLINE))),
+                    border: iced::Border {
+                        radius: 4.0.into(),
+                        ..iced::Border::default()
+                    },
+                    ..container::Style::default()
+                }),
+            text("online")
+                .size(theme::font::TIMESTAMP as f32)
+                .color(rgb(theme::ONLINE)),
+        ]
+        .spacing(5)
+        .align_y(Alignment::Center)
+        .into()
     };
 
     container(
@@ -407,8 +481,8 @@ fn chat_header(title: &str, typing: bool) -> Element<'static> {
                 .on_press(Message::BackToChats)
                 .padding(8)
                 .style(flat_button),
-            avatar_circle(title, theme::layout::AVATAR_CHAT),
-            column![name, status].spacing(0),
+            avatar_circle(avatar_path, title, theme::layout::AVATAR_CHAT),
+            column![name, status].spacing(2),
             horizontal_spacer(),
             icon(Icon::Search, theme::ICON, 20.0),
             icon(Icon::Info, theme::ICON, 20.0),
@@ -419,7 +493,7 @@ fn chat_header(title: &str, typing: bool) -> Element<'static> {
     .width(Length::Fill)
     .height(theme::layout::CHAT_HEADER_H)
     .padding([0, 12])
-    .style(list_bg)
+    .style(header_bg)
     .into()
 }
 
@@ -471,8 +545,12 @@ fn composer_bar(state: &State) -> Element<'_> {
 fn message_row(idx: usize, m: &MsgRow) -> Element<'_> {
     // Bubble content: photo or text.
     let body: Element<'_> = if let Some(path) = &m.photo_path {
+        let photo_el: Element<'_> = image(image::Handle::from_path(path))
+            .width(240)
+            .border_radius(12.0)
+            .into();
         column![
-            image(image::Handle::from_path(path)).width(240),
+            photo_el,
             if m.text.is_empty() {
                 horizontal_spacer()
             } else {
@@ -485,6 +563,15 @@ fn message_row(idx: usize, m: &MsgRow) -> Element<'_> {
         text(&m.text).size(theme::font::MESSAGE as f32).color(Color::WHITE).into()
     };
 
+    // Tail corner smaller, opposite corner small — Telegram style.
+    let radius = theme::layout::BUBBLE_RADIUS;
+    let corner: f32 = if m.out { 4.0 } else { 4.0 };
+    let r = iced::border::Radius::new(radius)
+        .top_left(if m.out { radius } else { corner })
+        .top_right(if m.out { corner } else { radius })
+        .bottom_left(radius)
+        .bottom_right(radius);
+
     let bubble = container(body)
         .padding([8, 12])
         .max_width(420)
@@ -495,7 +582,7 @@ fn message_row(idx: usize, m: &MsgRow) -> Element<'_> {
                 theme::BUBBLE_RECV
             }))),
             border: iced::Border {
-                radius: theme::layout::BUBBLE_RADIUS.into(),
+                radius: r,
                 ..iced::Border::default()
             },
             ..container::Style::default()
@@ -534,12 +621,15 @@ fn message_row(idx: usize, m: &MsgRow) -> Element<'_> {
             Message::RowClicked(idx)
         });
 
-    let _ = m;
-    if m.out {
+    let row_el: Element<'_> = if m.out {
         row![horizontal_spacer(), wrapped].into()
     } else {
         row![wrapped, horizontal_spacer()].into()
-    }
+    };
+    container(row_el)
+        .padding([0.0, theme::layout::MSG_PAD_X])
+        .width(Length::Fill)
+        .into()
 }
 
 // ---------------------------------------------------------------------------
@@ -592,7 +682,20 @@ fn horizontal_spacer() -> Element<'static> {
     iced::widget::Space::new().width(Length::Fill).into()
 }
 
-fn avatar_circle(title: &str, size: f32) -> Element<'static> {
+fn avatar_circle(photo: Option<&str>, title: &str, size: f32) -> Element<'static> {
+    if let Some(path) = photo {
+        let handle = image::Handle::from_path(path);
+        return container(
+            image(handle)
+                .width(Length::Fixed(size))
+                .height(Length::Fixed(size))
+                .content_fit(iced::ContentFit::Cover)
+                .border_radius(size / 2.0),
+        )
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .into();
+    }
     let ch = title.chars().next().unwrap_or('?').to_string().to_uppercase();
     let c = theme::avatar_color(title);
     container(
@@ -624,19 +727,46 @@ fn list_bg(_theme: &iced::Theme) -> container::Style {
     }
 }
 
-fn row_style(_theme: &iced::Theme, _status: iced::widget::button::Status) -> iced::widget::button::Style {
-    iced::widget::button::Style {
-        background: Some(iced::Background::Color(rgb(theme::LIST_BG))),
-        ..iced::widget::button::Style::default()
+fn chat_bg(_theme: &iced::Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(rgb(theme::CHAT_BG))),
+        ..container::Style::default()
     }
 }
 
-fn selected_row_style(
+fn divider(_theme: &iced::Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(rgb(theme::DIVIDER))),
+        ..container::Style::default()
+    }
+}
+
+fn header_bg(_theme: &iced::Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(rgb(theme::CHAT_BG))),
+        ..container::Style::default()
+    }
+}
+
+fn row_style(
     _theme: &iced::Theme,
-    _status: iced::widget::button::Status,
+    status: iced::widget::button::Status,
+    selected: bool,
 ) -> iced::widget::button::Style {
+    let bg = if selected {
+        theme::ROW_SELECTED
+    } else {
+        match status {
+            iced::widget::button::Status::Hovered => theme::ROW_HOVER,
+            _ => theme::LIST_BG,
+        }
+    };
     iced::widget::button::Style {
-        background: Some(iced::Background::Color(rgb(theme::ROW_SELECTED))),
+        background: Some(iced::Background::Color(rgb(bg))),
+        border: iced::Border {
+            radius: 12.0.into(),
+            ..iced::Border::default()
+        },
         ..iced::widget::button::Style::default()
     }
 }

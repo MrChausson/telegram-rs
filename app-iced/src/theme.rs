@@ -3,6 +3,10 @@
 
 /// Background of the left panel (chat list).
 pub const LIST_BG: (u8, u8, u8) = (23, 33, 43);
+/// Conversation background (message area).
+pub const CHAT_BG: (u8, u8, u8) = (20, 28, 37);
+/// Hovered chat row.
+pub const ROW_HOVER: (u8, u8, u8) = (31, 44, 57);
 /// Highlighted (selected) chat row.
 pub const ROW_SELECTED: (u8, u8, u8) = (43, 58, 92);
 /// Received message bubble.
@@ -23,6 +27,10 @@ pub const INPUT_BORDER: (u8, u8, u8) = (58, 74, 90);
 pub const ERROR: (u8, u8, u8) = (240, 114, 124);
 /// Composer field fill.
 pub const INPUT_FILL: (u8, u8, u8) = (26, 38, 52);
+/// Online presence / unread accent.
+pub const ONLINE: (u8, u8, u8) = (76, 175, 80);
+/// Subtle divider between panes / under headers.
+pub const DIVIDER: (u8, u8, u8) = (34, 47, 61);
 
 /// Layout metrics (logical units).
 pub mod layout {
@@ -44,6 +52,8 @@ pub mod layout {
     pub const AVATAR_CHAT: f32 = 40.0;
     /// Width of the message context menu.
     pub const CONTEXT_W: f32 = 160.0;
+    /// Horizontal padding of the message area.
+    pub const MSG_PAD_X: f32 = 16.0;
 }
 
 /// Font sizes (logical px).

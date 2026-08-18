@@ -68,6 +68,28 @@ pub fn session_path() -> PathBuf {
     data_dir().join(SESSION_FILE)
 }
 
+pub fn cache_dir() -> PathBuf {
+    data_dir().join("data")
+}
+
+/// Maps chat ids to already-cached avatar files (no download needed).
+fn avatar_files() -> Vec<(i64, String)> {
+    let dir = cache_dir().join("avatars");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| {
+            let e = e.ok()?;
+            if e.path().extension().and_then(|x| x.to_str()) != Some("jpg") {
+                return None;
+            }
+            let id = e.file_name().to_string_lossy().trim_end_matches(".jpg").parse::<i64>().ok()?;
+            Some((id, e.path().to_string_lossy().into_owned()))
+        })
+        .collect()
+}
+
 fn load_env(path: &Path) -> HashMap<String, String> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
@@ -110,6 +132,7 @@ pub fn api_hash(env: &HashMap<String, String>) -> Option<String> {
 pub fn spawn_network(demo: bool) -> UnboundedSender<Request> {
     let (ui_tx, ui_rx) = mpsc::unbounded_channel::<UiMessage>();
     let (req_tx, mut req_rx) = mpsc::unbounded_channel::<Request>();
+    let net_tx = req_tx.clone();
     {
         let mut guard = UI_RX.lock().expect("UI_RX lock");
         *guard = Some(ui_rx);
@@ -170,6 +193,22 @@ pub fn spawn_network(demo: bool) -> UnboundedSender<Request> {
                             })
                             .collect();
                         let _ = ui_tx.send(UiMessage::Dialogs(rows));
+                        // Warm the avatar cache in the background.
+                        let net_tx = net_tx.clone();
+                        let ui_tx2 = ui_tx.clone();
+                        let peers2 = peers.clone();
+                        tokio::task::spawn(async move {
+                            for id in peers2.keys() {
+                                let _ = net_tx.send(Request::DownloadAvatar { chat_id: *id });
+                            }
+                            // Populate any already-downloaded avatars immediately.
+                            for (id, path) in avatar_files() {
+                                let _ = ui_tx2.send(UiMessage::AvatarReady {
+                                    chat_id: id,
+                                    path: Some(path),
+                                });
+                            }
+                        });
                         serve(tg, &ui_tx, &mut req_rx, &peers).await;
                     }
                     Err(e) => {
@@ -208,90 +247,188 @@ pub fn network_subscription() -> iced::Subscription<crate::Message> {
     iced::Subscription::run(stream)
 }
 
+/// A canned demo chat.
+struct DemoChat {
+    id: i64,
+    title: &'static str,
+    subtitle: &'static str,
+    /// Seconds ago of the last message.
+    last_ago: i32,
+    unread: i32,
+    hue: f32,
+}
+
+/// Generated demo assets: one avatar and one landscape photo per chat.
+struct DemoAssets {
+    avatars: HashMap<i64, String>,
+    photos: HashMap<i64, String>,
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h = (h % 1.0) * 6.0;
+    let x = c * (1.0 - ((h % 2.0) - 1.0).abs());
+    let (r, g, b) = if h < 1.0 {
+        (c, x, 0.0)
+    } else if h < 2.0 {
+        (x, c, 0.0)
+    } else if h < 3.0 {
+        (0.0, c, x)
+    } else if h < 4.0 {
+        (0.0, x, c)
+    } else if h < 5.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    let m = l - c / 2.0;
+    (
+        ((r + m) * 255.0).clamp(0.0, 255.0) as u8,
+        ((g + m) * 255.0).clamp(0.0, 255.0) as u8,
+        ((b + m) * 255.0).clamp(0.0, 255.0) as u8,
+    )
+}
+
+fn save_png(pixmap: &tiny_skia::Pixmap, path: &Path) {
+    let _ = std::fs::create_dir_all(path.parent().expect("parent dir"));
+    if let Ok(bytes) = pixmap.encode_png() {
+        let _ = std::fs::write(path, bytes);
+    }
+}
+
+/// Fills `pixmap` with a vertical gradient between two HSL colors.
+fn gradient_fill(pm: &mut tiny_skia::Pixmap, h1: f32, s1: f32, l1: f32, h2: f32, s2: f32, l2: f32) {
+    let (r1, g1, b1) = hsl_to_rgb(h1, s1, l1);
+    let (r2, g2, b2) = hsl_to_rgb(h2, s2, l2);
+    let (w, h) = (pm.width(), pm.height());
+    for y in 0..h {
+        let t = y as f32 / h as f32;
+        let r = (r1 as f32 + (r2 as f32 - r1 as f32) * t) as u8;
+        let g = (g1 as f32 + (g2 as f32 - g1 as f32) * t) as u8;
+        let b = (b1 as f32 + (b2 as f32 - b1 as f32) * t) as u8;
+        for x in 0..w {
+            let off = (y * w + x) as usize * 4;
+            pm.data_mut()[off..off + 4].copy_from_slice(&[r, g, b, 255]);
+        }
+    }
+}
+
+/// Generates demo avatars/photos with tiny-skia, written under `demo/`.
+fn ensure_demo_assets(chats: &[DemoChat]) -> DemoAssets {
+    use tiny_skia::{Color, Paint, Transform};
+
+    let base = cache_dir().join("demo");
+    let mut assets = DemoAssets {
+        avatars: HashMap::new(),
+        photos: HashMap::new(),
+    };
+
+    for chat in chats {
+        // Avatar: 160x160 two-tone gradient with a white "sun" circle.
+        let size = 160u32;
+        let mut p = tiny_skia::Pixmap::new(size, size).expect("avatar pixmap");
+        gradient_fill(&mut p, chat.hue, 0.6, 0.45, (chat.hue + 0.1) % 1.0, 0.6, 0.7);
+        let mut paint = Paint::default();
+        paint.set_color(Color::from_rgba8(255, 255, 255, 210));
+        let circle = tiny_skia::PathBuilder::from_circle(size as f32 / 2.0, size as f32 / 2.0 + 10.0, 34.0)
+            .expect("sun path");
+        p.fill_path(&circle, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
+        let path = base.join("avatars").join(format!("{}.png", chat.id));
+        save_png(&p, &path);
+        assets.avatars.insert(chat.id, path.to_string_lossy().into_owned());
+
+        // Landscape photo: 640x480 sky gradient + sun + water band.
+        let (w, h) = (640u32, 480u32);
+        let mut pm = tiny_skia::Pixmap::new(w, h).expect("photo pixmap");
+        gradient_fill(&mut pm, (chat.hue + 0.5) % 1.0, 0.7, 0.6, (chat.hue + 0.85) % 1.0, 0.7, 0.15);
+        let mut paint = Paint::default();
+        paint.set_color(Color::from_rgba8(255, 230, 160, 240));
+        let sun = tiny_skia::PathBuilder::from_circle(w as f32 * 0.75, h as f32 * 0.3, 60.0).expect("sun");
+        pm.fill_path(&sun, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
+        // Dark water band (bottom).
+        paint.set_color(Color::from_rgba8(20, 50, 100, 255));
+        let band = tiny_skia::PathBuilder::from_rect(
+            tiny_skia::Rect::from_xywh(0.0, h as f32 * 0.72, w as f32, h as f32 * 0.28).expect("band rect"),
+        );
+        pm.fill_path(&band, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
+        let path = base.join("media").join(format!("{}.png", chat.id));
+        save_png(&pm, &path);
+        assets.photos.insert(chat.id, path.to_string_lossy().into_owned());
+    }
+
+    assets
+}
+
 /// Offline "backend" for `--demo`: replays canned dialogs/messages, echoes
-/// edits/deletes, and includes one photo message so image rendering is tested.
+/// edits/deletes, and includes generated avatar/photo images so the full
+/// image pipeline is exercised.
 async fn serve_demo(
     ui_tx: &mpsc::UnboundedSender<UiMessage>,
     req_rx: &mut mpsc::UnboundedReceiver<Request>,
 ) {
-    const DEMO_CHAT: i64 = 42;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i32;
 
-    let rows = vec![
-        ChatRow {
-            id: DEMO_CHAT,
-            title: "Démo TG".to_string(),
-            subtitle: "dis bonjour 👋 aux coches".to_string(),
-            date: now - 30,
-            unread: 3,
-            avatar_path: None,
-        },
-        ChatRow {
-            id: 43,
-            title: "Liste de courses".to_string(),
-            subtitle: "Pense à acheter du lait".to_string(),
-            date: now - 7200,
-            unread: 1,
-            avatar_path: None,
-        },
-        ChatRow {
-            id: 44,
-            title: "Canal Photos".to_string(),
-            subtitle: "Les vacances d'été 🏖".to_string(),
-            date: now - 86400,
-            unread: 0,
-            avatar_path: None,
-        },
+    let chats = vec![
+        DemoChat { id: 1001, title: "Camille", subtitle: "Super ! à demain 👋", last_ago: 42, unread: 3, hue: 0.55 },
+        DemoChat { id: 1002, title: "Rust Groupe", subtitle: "Thomas: novelle review du PR ?", last_ago: 7200, unread: 0, hue: 0.1 },
+        DemoChat { id: 1003, title: "Canal Paysages", subtitle: "Coucher de soleil sur la mer 🏖", last_ago: 86400, unread: 0, hue: 0.95 },
+        DemoChat { id: 1004, title: "Groupe Famille", subtitle: "Maman : tu passes quand ?", last_ago: 172800, unread: 12, hue: 0.3 },
+        DemoChat { id: 1005, title: "Paris Bots", subtitle: "New version 2.4.0 released", last_ago: 604800, unread: 0, hue: 0.75 },
     ];
+
+    let assets = ensure_demo_assets(&chats);
+    let rows: Vec<ChatRow> = chats
+        .iter()
+        .map(|c| ChatRow {
+            id: c.id,
+            title: c.title.to_string(),
+            subtitle: c.subtitle.to_string(),
+            date: now - c.last_ago,
+            unread: c.unread,
+            avatar_path: assets.avatars.get(&c.id).cloned(),
+        })
+        .collect();
     let _ = ui_tx.send(UiMessage::Dialogs(rows));
     // Demo starts signed-in: the chat UI is the surface we want to exercise.
     let _ = ui_tx.send(UiMessage::LoginOk {
         name: "Demo".to_string(),
     });
 
-    // One message carries a photo (dimensions only; the demo never downloads),
-    // so the image widget path is exercised.
-    let messages = vec![
-        MsgRow {
-            id: 1,
-            text: "Hello, this is a longer incoming message designed to wrap across several lines".to_string(),
-            date: now - 3600,
-            out: false,
-            photo: None,
-            photo_path: None,
-            read: false,
-        },
-        MsgRow {
-            id: 2,
-            text: "First reply from me".to_string(),
-            date: now - 3000,
-            out: true,
-            photo: Some((640, 480)),
-            photo_path: None,
-            read: true,
-        },
-        MsgRow {
-            id: 3,
-            text: "Second one, shorter".to_string(),
-            date: now - 2000,
-            out: true,
-            photo: None,
-            photo_path: None,
-            read: false,
-        },
-        MsgRow {
-            id: 4,
-            text: "An incoming note".to_string(),
-            date: now - 1000,
-            out: false,
-            photo: None,
-            photo_path: None,
-            read: false,
-        },
-    ];
+    let photo_of = |chat: &DemoChat| assets.photos.get(&chat.id).cloned();
+    let msgs_for = |id: i64| -> Vec<MsgRow> {
+        let chat = chats.iter().find(|c| c.id == id);
+        let photo = chat.and_then(|c| photo_of(c));
+        match id {
+            1001 => vec![
+                MsgRow { id: 1, text: "Salut ! tu as vu ma nouvelle photo ?".to_string(), date: now - 700, out: false, photo: None, photo_path: None, read: false },
+                MsgRow { id: 2, text: "Trop jolie ! tu l'as prise où ?".to_string(), date: now - 650, out: false, photo: None, photo_path: None, read: false },
+                MsgRow { id: 3, text: "Sur la plage, au coucher du soleil.".to_string(), date: now - 600, out: true, photo: Some((640, 480)), photo_path: photo.clone(), read: true },
+                MsgRow { id: 4, text: "Génial, on y va samedi ? 😎".to_string(), date: now - 300, out: false, photo: None, photo_path: None, read: false },
+                MsgRow { id: 5, text: "Oui ! à demain 👋".to_string(), date: now - 42, out: true, photo: None, photo_path: None, read: true },
+            ],
+            1002 => vec![
+                MsgRow { id: 1, text: "Qui veut présenter son projet vendredi ?".to_string(), date: now - 14400, out: false, photo: None, photo_path: None, read: true },
+                MsgRow { id: 2, text: "Moi je peux, la CI passe enfin 🎉".to_string(), date: now - 10800, out: true, photo: None, photo_path: None, read: true },
+                MsgRow { id: 3, text: "Soumettez le lien de la v0.2 ?".to_string(), date: now - 7200, out: false, photo: None, photo_path: None, read: true },
+            ],
+            1003 => vec![
+                MsgRow { id: 1, text: "Photo du week-end dernier 🌄".to_string(), date: now - 90000, out: true, photo: Some((640, 480)), photo_path: photo, read: true },
+                MsgRow { id: 2, text: "Magnifique, on la met en couverture !".to_string(), date: now - 89000, out: false, photo: None, photo_path: None, read: false },
+            ],
+            1004 => vec![
+                MsgRow { id: 1, text: "Le repas de dimanche est déplacé".to_string(), date: now - 172800, out: false, photo: None, photo_path: None, read: true },
+                MsgRow { id: 2, text: "Ok, on ramène le dessert 🍰".to_string(), date: now - 160000, out: true, photo: None, photo_path: None, read: false },
+            ],
+            1005 => vec![
+                MsgRow { id: 1, text: "v2.4.0: nouvelle API de statut en ligne".to_string(), date: now - 604800, out: false, photo: None, photo_path: None, read: true },
+                MsgRow { id: 2, text: "Merci pour l'update !".to_string(), date: now - 600000, out: true, photo: None, photo_path: None, read: true },
+            ],
+            _ => vec![],
+        }
+    };
 
     let mut edits: HashMap<i32, String> = HashMap::new();
     loop {
@@ -300,20 +437,21 @@ async fn serve_demo(
         for req in pending.drain(..) {
             match req {
                 Request::OpenChat { id } => {
-                    let _ = ui_tx.send(UiMessage::Messages {
-                        id,
-                        title: "Démo TG".to_string(),
-                        rows: messages
-                            .iter()
-                            .map(|m| {
-                                let mut m = m.clone();
-                                if let Some(text) = edits.get(&m.id) {
-                                    m.text = text.clone();
-                                }
-                                m
-                            })
-                            .collect(),
-                    });
+                    let rows = msgs_for(id)
+                        .into_iter()
+                        .map(|mut m| {
+                            if let Some(text) = edits.get(&m.id) {
+                                m.text = text.clone();
+                            }
+                            m
+                        })
+                        .collect();
+                    let title = chats
+                        .iter()
+                        .find(|c| c.id == id)
+                        .map(|c| c.title.to_string())
+                        .unwrap_or_else(|| "Chat".to_string());
+                    let _ = ui_tx.send(UiMessage::Messages { id, title, rows });
                 }
                 Request::EditMessage { id, msg_id, text } => {
                     edits.insert(msg_id, text.clone());
@@ -457,6 +595,9 @@ async fn serve(
     let mut last_refresh = std::time::Instant::now();
     let mut open_id: Option<i64> = None;
     let mut open_sig: Option<(usize, String)> = None;
+    // Downloaded photo paths keyed by (chat id, message id), so periodic
+    // refreshes keep showing them instead of resetting to None.
+    let mut photo_paths: HashMap<(i64, i32), String> = HashMap::new();
 
     let save_every = std::time::Duration::from_secs(30);
     let mut last_save = std::time::Instant::now();
@@ -474,7 +615,7 @@ async fn serve(
                 open_id = Some(id);
                 open_sig = None;
             }
-            handle_request(&tg, ui_tx, req, peers).await;
+            handle_request(&tg, ui_tx, req, peers, &mut photo_paths).await;
         }
 
         if last_refresh.elapsed() >= refresh {
@@ -491,19 +632,22 @@ async fn serve(
                         if Some(&sig) != open_sig.as_ref() {
                             open_sig = Some(sig);
                             let rows = msgs
-                                .into_iter()
-                                .map(|m| MsgRow {
-                                    id: m.id,
-                                    text: m.text,
-                                    date: m.date,
-                                    out: m.out,
-                                    photo: m.media.map(|k| match k {
+                                .iter()
+                                .map(|m| {
+                                    let photo = m.media.map(|k| match k {
                                         tg::model::MediaKind::Photo { width, height } => {
                                             (width, height)
                                         }
-                                    }),
-                                    photo_path: None,
-                                    read: false,
+                                    });
+                                    MsgRow {
+                                        id: m.id,
+                                        text: m.text.clone(),
+                                        date: m.date,
+                                        out: m.out,
+                                        photo,
+                                        photo_path: photo_paths.get(&(open, m.id)).cloned(),
+                                        read: false,
+                                    }
                                 })
                                 .collect();
                             let _ = ui_tx.send(UiMessage::Messages {
@@ -511,6 +655,12 @@ async fn serve(
                                 title: title.clone(),
                                 rows,
                             });
+                            // Warm photo thumbnails for any new photo messages.
+                            for m in &msgs {
+                                if m.media.is_some() {
+                                    fetch_photo(&tg, ui_tx, peers, open, m.id, &mut photo_paths).await;
+                                }
+                            }
                         }
                     }
                 }
@@ -621,6 +771,7 @@ async fn handle_request(
     ui_tx: &mpsc::UnboundedSender<UiMessage>,
     req: Request,
     peers: &HashMap<i64, (String, PeerRef)>,
+    photo_paths: &mut HashMap<(i64, i32), String>,
 ) {
     match req {
         Request::MarkRead { id } => {
@@ -635,25 +786,34 @@ async fn handle_request(
                 Ok(messages) => {
                     let rows: Vec<MsgRow> = messages
                         .into_iter()
-                        .map(|m| MsgRow {
-                            id: m.id,
-                            text: m.text,
-                            date: m.date,
-                            out: m.out,
-                            photo: m.media.map(|k| match k {
+                        .map(|m| {
+                            let photo = m.media.map(|k| match k {
                                 tg::model::MediaKind::Photo { width, height } => {
                                     (width, height)
                                 }
-                            }),
-                            photo_path: None,
-                            read: false,
+                            });
+                            MsgRow {
+                                id: m.id,
+                                text: m.text,
+                                date: m.date,
+                                out: m.out,
+                                photo,
+                                photo_path: photo_paths.get(&(id, m.id)).cloned(),
+                                read: false,
+                            }
                         })
                         .collect();
                     let _ = ui_tx.send(UiMessage::Messages {
                         id,
                         title: title.clone(),
-                        rows,
+                        rows: rows.clone(),
                     });
+                    // Fetch photo thumbnails for any photo messages in the background.
+                    for m in rows {
+                        if m.photo.is_some() {
+                            fetch_photo(tg, ui_tx, peers, id, m.id, photo_paths).await;
+                        }
+                    }
                 }
                 Err(e) => {
                     let _ = ui_tx.send(UiMessage::Error(format!(
@@ -664,6 +824,17 @@ async fn handle_request(
             None => {
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
             }
+        },
+        Request::DownloadAvatar { chat_id } => match peers.get(&chat_id) {
+            Some((_, peer_ref)) => {
+                let dir = cache_dir().join("avatars");
+                let path = match tg.download_avatar(peer_ref, &dir).await {
+                    Ok(p) => p.map(|p| p.to_string_lossy().into_owned()),
+                    Err(_) => None,
+                };
+                let _ = ui_tx.send(UiMessage::AvatarReady { chat_id, path });
+            }
+            None => {}
         },
         Request::SendMessage { id, text } => match peers.get(&id) {
             Some((_, peer_ref)) => {
@@ -697,6 +868,35 @@ async fn handle_request(
         },
         Request::LoginPhone { .. } | Request::LoginCode { .. } | Request::LoginPassword { .. } => {}
     }
+}
+
+/// Downloads a message's photo thumbnail (cached), records it in `photo_paths`
+/// and notifies the UI with the on-disk path.
+async fn fetch_photo(
+    tg: &Telegram,
+    ui_tx: &mpsc::UnboundedSender<UiMessage>,
+    peers: &HashMap<i64, (String, PeerRef)>,
+    chat_id: i64,
+    msg_id: i32,
+    photo_paths: &mut HashMap<(i64, i32), String>,
+) {
+    if photo_paths.contains_key(&(chat_id, msg_id)) {
+        return;
+    }
+    let Some((_, peer_ref)) = peers.get(&chat_id) else { return };
+    let dir = cache_dir().join("media").join(chat_id.to_string());
+    let path = match tg.download_photo(peer_ref, msg_id, &dir).await {
+        Ok(Some(p)) => Some(p.to_string_lossy().into_owned()),
+        _ => None,
+    };
+    if let Some(p) = &path {
+        photo_paths.insert((chat_id, msg_id), p.clone());
+    }
+    let _ = ui_tx.send(UiMessage::PhotoReady {
+        chat_id,
+        msg_id,
+        path,
+    });
 }
 
 /// Re-exported so `main.rs` can type the sender.
