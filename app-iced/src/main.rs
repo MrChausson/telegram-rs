@@ -19,6 +19,9 @@ use bridge::{ChatRow, MsgRow, Request, UiMessage};
 use icons::{icon, Icon};
 use state::{LoginStep, State};
 
+/// Id of the open chat's message list, used to auto-scroll to the bottom.
+const MSG_LIST_ID: &str = "msg-list";
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -43,10 +46,14 @@ pub enum Message {
     RowContext(usize),
     /// "Modifier" pressed in the context menu.
     ContextEdit,
+    /// "Copier" pressed in the context menu.
+    ContextCopy,
     /// "Supprimer" pressed in the context menu.
     ContextDelete,
     /// The context menu was dismissed.
     DismissMenu,
+    /// Escape: close the context menu, cancel editing or close the viewer.
+    Escape,
     /// Composer text changed.
     ComposerChanged(String),
     /// Composer submitted (send / edit).
@@ -94,16 +101,49 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::RowClicked(row) => state.click(row),
         Message::RowContext(row) => state.open_context(row),
         Message::ContextEdit => state.context_edit(),
+        Message::ContextCopy => {
+            if let Some(text) = state.context_copy() {
+                return iced::clipboard::write::<Message>(text);
+            }
+        }
         Message::ContextDelete => state.context_delete(),
         Message::DismissMenu => state.dismiss_menu(),
-        Message::ComposerChanged(text) => state.composer = text,
-        Message::Submit => state.submit(),
+        Message::Escape => {
+            if state.viewer.is_some() {
+                state.back();
+            } else {
+                state.escape();
+            }
+        }
+        Message::ComposerChanged(text) => {
+            state.composer = text;
+            // Notify the server while the user types (best-effort).
+            if let Some(id) = state.open_chat {
+                let _ = state.req_tx.send(Request::Typing { id, typing: true });
+            }
+        }
+        Message::Submit => {
+            if let Some(id) = state.open_chat {
+                let _ = state.req_tx.send(Request::Typing { id, typing: false });
+            }
+            state.submit();
+        }
         Message::CloseViewer => state.back(),
         Message::LoginChanged(text) => state.login_input = text,
         Message::LoginSubmit => submit_login(state),
         Message::LoginBack => login_back(state),
     }
+    if state.scroll_to_bottom {
+        state.scroll_to_bottom = false;
+        return scroll_to_end_task();
+    }
     Task::none()
+}
+
+/// Returns a [`Task`] that snaps the message list to its end.
+fn scroll_to_end_task() -> Task<Message> {
+    use iced::widget::operation;
+    operation::snap_to_end::<Message>(MSG_LIST_ID)
 }
 
 fn submit_login(state: &mut State) {
@@ -147,16 +187,25 @@ fn view(state: &State) -> Element<'_> {
 
 fn viewer_view(state: &State) -> Element<'_> {
     let Some(path) = &state.viewer else { return container("").into() };
-    column![
-        row![
-            button("✕").on_press(Message::CloseViewer),
-        ]
+    let close = button(icon(Icon::Back, theme::ICON, 16.0))
+        .on_press(Message::CloseViewer)
         .padding(8)
-        .width(Length::Fill),
-        container(image(image::Handle::from_path(path)).width(Length::Fill))
-            .center_x(Length::Fill)
-            .width(Length::Fill)
-            .height(Length::Fill),
+        .style(flat_button);
+    column![
+        row![close]
+            .padding(8)
+            .width(Length::Fill),
+        container(
+            mouse_area(
+                image(image::Handle::from_path(path))
+                    .width(Length::Fill)
+                    .content_fit(iced::ContentFit::Contain),
+            )
+            .on_press(Message::CloseViewer),
+        )
+        .center_x(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill),
     ]
     .spacing(8)
     .padding(16)
@@ -396,21 +445,34 @@ fn conversation_pane(state: &State) -> Element<'_> {
         .center_y(Length::Fill)
         .into()
     } else {
-        let mut cols = column![];
-        let mut prev_out: Option<bool> = None;
-        for (i, m) in state.messages.iter().enumerate() {
-            // Group consecutive messages from the same author tightly.
-            let gap = if prev_out == Some(m.out) { 3.0 } else { 10.0 };
-            if i > 0 {
-                cols = cols.push(iced::widget::Space::new().height(gap));
-            }
-            cols = cols.push(message_row(i, m));
-            prev_out = Some(m.out);
-        }
         container(
-            scrollable(cols.push(iced::widget::Space::new().height(Length::Fill)))
+            iced::widget::responsive(move |size| {
+                // A full-height spacer above the messages pins the bubbles to
+                // the bottom when the history is shorter than the viewport.
+                let mut cols = column![];
+                let mut prev_out: Option<bool> = None;
+                for (i, m) in state.messages.iter().enumerate() {
+                    // Group consecutive messages from the same author tightly.
+                    let gap = if prev_out == Some(m.out) { 3.0 } else { 10.0 };
+                    if i > 0 {
+                        cols = cols.push(iced::widget::Space::new().height(gap));
+                    }
+                    cols = cols.push(message_row(i, m));
+                    prev_out = Some(m.out);
+                }
+                scrollable(
+                    column![
+                        iced::widget::Space::new().height(size.height),
+                        cols,
+                    ]
+                )
+                .id(MSG_LIST_ID)
                 .width(Length::Fill)
-                .height(Length::Fill),
+                .height(Length::Fill)
+                .into()
+            })
+            .width(Length::Fill)
+            .height(Length::Fill),
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -448,7 +510,12 @@ fn chat_header(title: &str, avatar_path: Option<&str>, typing: bool) -> Element<
         .size(theme::font::NAME as f32)
         .color(Color::WHITE)
         .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT });
-    let status: Element<'static> = if typing {
+    let status: Element<'static> = if title.is_empty() {
+        text(" ")
+            .size(theme::font::TIMESTAMP as f32)
+            .color(rgb(theme::TEXT_SECONDARY))
+            .into()
+    } else if typing {
         text("typing…")
             .size(theme::font::TIMESTAMP as f32)
             .color(rgb(theme::ACCENT))
@@ -649,6 +716,13 @@ fn context_overlay(state: &State) -> Element<'_> {
                 text("Modifier").size(theme::font::PLACEHOLDER as f32).color(rgb(theme::TEXT_PRIMARY))
             )
             .on_press(Message::ContextEdit)
+            .width(Length::Fill)
+            .padding(10)
+            .style(menu_item_style),
+            button(
+                text("Copier").size(theme::font::PLACEHOLDER as f32).color(rgb(theme::TEXT_PRIMARY))
+            )
+            .on_press(Message::ContextCopy)
             .width(Length::Fill)
             .padding(10)
             .style(menu_item_style),
@@ -875,9 +949,19 @@ fn text_input_style(
     }
 }
 
-/// Subscription: forwards network `UiMessage`s to the application.
+/// Subscription: forwards network `UiMessage`s to the application, plus
+/// keyboard shortcuts (Escape closes the context menu / cancels editing).
 fn subscription(_state: &State) -> iced::Subscription<Message> {
-    network::network_subscription()
+    let net = network::network_subscription();
+    let keys = iced::keyboard::listen().filter_map(|event| match event {
+        iced::keyboard::Event::KeyPressed { key, .. }
+            if key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) =>
+        {
+            Some(Message::Escape)
+        }
+        _ => None,
+    });
+    iced::Subscription::batch([net, keys])
 }
 
 fn main() -> iced::Result {

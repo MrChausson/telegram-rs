@@ -39,6 +39,8 @@ pub enum Request {
     OpenChat { id: i64 },
     /// Marks all messages in a chat as read (server side).
     MarkRead { id: i64 },
+    /// Notifies the server that the user is (or stopped) typing in a chat.
+    Typing { id: i64, typing: bool },
     /// Sends a text message to a chat.
     SendMessage { id: i64, text: String },
     /// Edits an outgoing message (text only).

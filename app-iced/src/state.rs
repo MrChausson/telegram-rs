@@ -50,6 +50,9 @@ pub struct State {
     pub viewer: Option<String>,
     /// Open the first chat once the list arrives (test/demo convenience).
     pub auto_open_first: bool,
+    /// True once the message list should be scrolled to the bottom (open chat,
+    /// new/outgoing message). Cleared by the view after use.
+    pub scroll_to_bottom: bool,
 }
 
 impl State {
@@ -71,6 +74,7 @@ impl State {
             composer: String::new(),
             viewer: None,
             auto_open_first: false,
+            scroll_to_bottom: false,
         }
     }
 
@@ -91,34 +95,70 @@ impl State {
             }
             UiMessage::Messages { id, title, rows } => {
                 if self.open_chat == Some(id) {
+                    let prev_len = self.messages.len();
                     self.chat_title = title;
                     self.messages = rows;
                     self.editing = None;
                     self.context_menu = None;
+                    // Scroll to the bottom on open, or when a new message
+                    // arrived (not for a plain edit/refresh).
+                    if prev_len == 0 || self.messages.len() > prev_len {
+                        self.scroll_to_bottom = true;
+                    }
                 }
             }
             UiMessage::NewMessage { chat_id, id, text, date, out, photo } => {
-                self.messages.push(MsgRow {
-                    id,
-                    text,
-                    date,
-                    out,
-                    photo,
-                    photo_path: None,
-                    read: false,
-                });
-                if !out && self.open_chat == Some(chat_id) {
-                    self.typing = false;
+                // Open chat? Merge the message (dedupe the optimistic local
+                // send, which is tagged id=0).
+                if self.open_chat == Some(chat_id) {
+                    let rows = &mut self.messages;
+                    if let Some(m) = rows.iter_mut().find(|m| m.id == id) {
+                        m.text = text;
+                        m.out = out;
+                    } else if let Some(i) =
+                        rows.iter().position(|m| m.id == 0 && m.text == text)
+                    {
+                        let m = &mut rows[i];
+                        m.id = id;
+                        m.out = out;
+                    } else {
+                        rows.push(MsgRow {
+                            id,
+                            text,
+                            date,
+                            out,
+                            photo,
+                            photo_path: None,
+                            read: false,
+                        });
+                    }
+                    self.scroll_to_bottom = true;
+                    if !out {
+                        self.typing = false;
+                    }
+                    return;
+                }
+                // Otherwise: update the list row (preview + unread only for
+                // incoming messages).
+                if let Some(row) = self.dialogs.iter_mut().find(|r| r.id == chat_id) {
+                    row.subtitle = text;
+                    row.date = date;
+                    if !out {
+                        row.unread += 1;
+                    }
                 }
             }
-            UiMessage::MessageEdited { chat_id, id, text, .. } => {
+            UiMessage::MessageEdited { chat_id, id, text, date } => {
                 if self.open_chat == Some(chat_id) {
                     for m in &mut self.messages {
                         if m.id == id {
                             m.text = text;
+                            m.date = date;
                             break;
                         }
                     }
+                } else if let Some(row) = self.dialogs.iter_mut().find(|r| r.id == chat_id) {
+                    row.subtitle = text;
                 }
             }
             UiMessage::MessageDeleted { ids } => {
@@ -139,6 +179,9 @@ impl State {
                 }
             }
             UiMessage::ChatRead { id } => {
+                if let Some(row) = self.dialogs.iter_mut().find(|r| r.id == id) {
+                    row.unread = 0;
+                }
                 if self.open_chat == Some(id) {
                     for m in &mut self.messages {
                         if m.out {
@@ -157,9 +200,11 @@ impl State {
                 }
             }
             UiMessage::UnreadCount { chat_id, count } => {
-                for d in &mut self.dialogs {
-                    if d.id == chat_id {
-                        d.unread = count;
+                // Only sync the count when it goes down or another device
+                // read the chat; a locally-received message already bumped it.
+                if let Some(row) = self.dialogs.iter_mut().find(|r| r.id == chat_id) {
+                    if count < row.unread {
+                        row.unread = count;
                     }
                 }
             }
@@ -176,20 +221,37 @@ impl State {
                     }
                 }
             }
-            UiMessage::LoginCodeRequired => self.login_step = LoginStep::Code,
+            UiMessage::LoginCodeRequired => {
+                self.login_step = LoginStep::Code;
+                self.login_input.clear();
+                self.login_error = false;
+                self.status = "Enter the code received by Telegram".to_string();
+            }
             UiMessage::LoginPasswordRequired { hint } => {
                 self.login_step = LoginStep::Password;
-                if !hint.is_empty() {
-                    self.status = format!("2FA password (hint: {hint})");
-                }
+                self.login_input.clear();
+                self.login_error = false;
+                self.status = if hint.is_empty() {
+                    "Enter your two-step verification password".to_string()
+                } else {
+                    format!("Two-step verification (hint: {hint})")
+                };
             }
             UiMessage::LoginOk { name } => {
                 self.authenticated = true;
-                self.status = format!("Welcome, {name}");
+                self.login_input.clear();
+                self.login_error = false;
+                self.status = if self.dialogs.is_empty() {
+                    format!("Signed in as {name}")
+                } else {
+                    format!("Signed in as {name} — {} chats", self.dialogs.len())
+                };
             }
             UiMessage::Error(e) => {
+                if !self.authenticated {
+                    self.login_error = true;
+                }
                 self.status = e;
-                self.login_error = true;
             }
         }
     }
@@ -216,8 +278,18 @@ impl State {
         self.context_menu = Some(ContextMenu { row });
     }
 
+    /// Dismisses the context menu (a click outside, or opening another one).
     pub fn dismiss_menu(&mut self) {
         self.context_menu = None;
+    }
+
+    /// Escape: closes the context menu and cancels editing.
+    pub fn escape(&mut self) {
+        self.context_menu = None;
+        if self.editing.is_some() {
+            self.editing = None;
+            self.composer.clear();
+        }
     }
 
     /// Click on the context menu's "Modifier" item.
@@ -228,6 +300,20 @@ impl State {
                 self.composer = m.text.clone();
             }
         }
+    }
+
+    /// Click on the context menu's "Copier" item: returns the copied text (or
+    /// `None`), which the caller writes to the system clipboard.
+    pub fn context_copy(&mut self) -> Option<String> {
+        let menu = self.context_menu.take()?;
+        let m = self.messages.get(menu.row)?;
+        let text = if m.text.is_empty() {
+            // Photo-only message: nothing meaningful to copy.
+            return None;
+        } else {
+            m.text.clone()
+        };
+        Some(text)
     }
 
     /// Click on the context menu's "Supprimer" item.
@@ -266,10 +352,22 @@ impl State {
                 }
             }
         } else if let Some(id) = self.open_chat {
+            // Optimistic local send: the id and date are unknown (incoming
+            // updates will provide them).
+            self.messages.push(MsgRow {
+                id: 0,
+                text: text.clone(),
+                date: 0,
+                out: true,
+                photo: None,
+                photo_path: None,
+                read: false,
+            });
             let _ = self.req_tx.send(Request::SendMessage { id, text });
         }
         self.composer.clear();
         self.typing = false;
+        self.scroll_to_bottom = true;
     }
 
     /// Open a chat.
@@ -429,6 +527,84 @@ mod tests {
         });
         assert_eq!(state.messages.len(), 3);
         assert!(!state.typing);
+        assert!(state.scroll_to_bottom, "new message must scroll to bottom");
+    }
+
+    #[test]
+    fn new_message_from_other_chat_updates_list_not_open_chat() {
+        let (mut state, _) = demo_state();
+        state.dialogs = vec![ChatRow {
+            id: 7,
+            title: "Other".into(),
+            subtitle: String::new(),
+            date: 0,
+            unread: 0,
+            avatar_path: None,
+        }];
+        state.on_message(UiMessage::NewMessage {
+            chat_id: 7,
+            id: 9,
+            text: "ping".into(),
+            date: 400,
+            out: false,
+            photo: None,
+        });
+        // The open chat's rows must be untouched.
+        assert_eq!(state.messages.len(), 2);
+        assert_eq!(state.dialogs[0].subtitle, "ping");
+        assert_eq!(state.dialogs[0].unread, 1);
+        assert!(!state.scroll_to_bottom, "other chat's message must not scroll");
+    }
+
+    #[test]
+    fn optimistic_send_is_deduplicated_by_the_update() {
+        let (mut state, _) = demo_state();
+        state.composer = "hello".into();
+        state.submit();
+        // Optimistic local row was added.
+        assert_eq!(state.messages.len(), 3);
+        assert_eq!(state.messages.last().unwrap().id, 0);
+
+        state.on_message(UiMessage::NewMessage {
+            chat_id: 42,
+            id: 777,
+            text: "hello".into(),
+            date: 0,
+            out: true,
+            photo: None,
+        });
+        // The update merged with the optimistic row: no duplicate.
+        assert_eq!(state.messages.len(), 3);
+        assert_eq!(state.messages.last().unwrap().id, 777);
+    }
+
+    #[test]
+    fn mark_read_clears_the_list_badge() {
+        let (mut state, _) = demo_state();
+        state.dialogs = vec![ChatRow {
+            id: 42,
+            title: "Camille".into(),
+            subtitle: String::new(),
+            date: 0,
+            unread: 5,
+            avatar_path: None,
+        }];
+        state.on_message(UiMessage::ChatRead { id: 42 });
+        assert_eq!(state.dialogs[0].unread, 0);
+        assert!(state.messages.iter().all(|m| !m.out || m.read));
+    }
+
+    #[test]
+    fn escape_cancels_editing() {
+        let (mut state, _) = demo_state();
+        state.open_context(1);
+        state.context_edit();
+        assert_eq!(state.editing, Some(2));
+        assert_eq!(state.composer, "mine");
+        state.escape();
+        assert!(state.editing.is_none());
+        assert!(state.composer.is_empty());
+        assert!(state.context_menu.is_none());
     }
 
     #[test]

@@ -431,6 +431,21 @@ async fn serve_demo(
     };
 
     let mut edits: HashMap<i32, String> = HashMap::new();
+    // Next message id handed to optimistic local sends (or the echo below).
+    let mut next_id = 10000i32;
+    // Simulate the peer replying in Camille's chat every ~12 s: a typing
+    // burst of ~3 s followed by the message.
+    let mut incoming_idx = 0usize;
+    let incoming = [
+        "Coucou !",
+        "T'as vu l'actu ce matin ?",
+        "Je suis en route, je passe te chercher dans 20 min.",
+        "Pense à prendre le colis au passage 😉",
+    ];
+    // Next time an incoming message is delivered; typing starts 3 s earlier.
+    let mut next_incoming = std::time::Instant::now() + std::time::Duration::from_secs(4);
+    let mut typing_sent = false;
+
     loop {
         let mut pending: Vec<Request> =
             std::iter::from_fn(|| req_rx.try_recv().ok()).collect();
@@ -453,6 +468,20 @@ async fn serve_demo(
                         .unwrap_or_else(|| "Chat".to_string());
                     let _ = ui_tx.send(UiMessage::Messages { id, title, rows });
                 }
+                Request::SendMessage { id, text } => {
+                    let nid = next_id;
+                    next_id += 1;
+                    // The server would echo the outgoing message back through
+                    // an update; reply with it so the optimistic flow works.
+                    let _ = ui_tx.send(UiMessage::NewMessage {
+                        chat_id: id,
+                        id: nid,
+                        text,
+                        date: now,
+                        out: true,
+                        photo: None,
+                    });
+                }
                 Request::EditMessage { id, msg_id, text } => {
                     edits.insert(msg_id, text.clone());
                     let _ = ui_tx.send(UiMessage::MessageEdited {
@@ -469,10 +498,41 @@ async fn serve_demo(
                 Request::MarkRead { id } => {
                     let _ = ui_tx.send(UiMessage::ChatRead { id });
                 }
+                Request::Typing { .. } => {}
                 _ => {}
             }
         }
-        tokio::task::yield_now().await;
+        // Simulated peer activity in Camille's chat: typing burst → message.
+        let now_inst = std::time::Instant::now();
+        let typing_on = now_inst + std::time::Duration::from_secs(3) >= next_incoming
+            && now_inst < next_incoming;
+        if typing_on != typing_sent {
+            typing_sent = typing_on;
+            let _ = ui_tx.send(UiMessage::PeerTyping {
+                chat_id: 1001,
+                typing: typing_on,
+            });
+        }
+        if now_inst >= next_incoming {
+            let text = incoming[incoming_idx % incoming.len()].to_string();
+            incoming_idx += 1;
+            let _ = ui_tx.send(UiMessage::PeerTyping {
+                chat_id: 1001,
+                typing: false,
+            });
+            typing_sent = false;
+            let _ = ui_tx.send(UiMessage::NewMessage {
+                chat_id: 1001,
+                id: next_id,
+                text,
+                date: now,
+                out: false,
+                photo: None,
+            });
+            next_id += 1;
+            next_incoming = now_inst + std::time::Duration::from_secs(12);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 
@@ -779,6 +839,11 @@ async fn handle_request(
                 if tg.mark_read(peer_ref).await.is_ok() {
                     let _ = ui_tx.send(UiMessage::ChatRead { id });
                 }
+            }
+        }
+        Request::Typing { id, typing } => {
+            if let Some((_, peer_ref)) = peers.get(&id) {
+                let _ = tg.set_typing(peer_ref, typing).await;
             }
         }
         Request::OpenChat { id } => match peers.get(&id) {
