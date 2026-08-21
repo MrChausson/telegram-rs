@@ -62,6 +62,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Demo mode now handles the full cycle: echo of sent messages, simulated
   typing + incoming messages with generated images for avatars and photos.
 
+### Performance
+- **Perf regression harness** (`cargo bench -p app-iced`): the app is now a
+  lib + thin bin so `benches/frame.rs` drives the *exact* per-frame view
+  headlessly and measures **build / layout / frame** (diff + layout + draw on a
+  tiny-skia software canvas) for 10 / 50 / 200 / 500 messages, publishing
+  estimated FPS. Criterion-change data pins regressions in CI.
+- **Message list virtualization**: only the rows intersecting the scrollable's
+  viewport (plus over-scan) are built and layed-out each frame; the rest is
+  height-matched spacers keeping the content height and bottom-anchoring
+  correct. A scroll tick used to rebuild + text-shape every row of the whole
+  history (the tiny-skia backend is software-rendered), which lagged badly on
+  chat open / long histories. Estimated heights (char-based, no shaping) for
+  the spacers, O(1) per row.
+- **Icon handles are now memoized** (keyed by kind/color/size): `Handle::from_rgba`
+  mints a fresh cache id per call, so without memoization every icon was
+  re-rasterized on every frame — scroll lag again.
+- `--perf` flag: draws a live FPS badge in the conversation header (sampled on
+  scroll + a 500 ms tick) to measure on the real display.
+
 ## [v0.2.2] - 2026-08-16
 
 ### Changed

@@ -29,6 +29,8 @@ pub const ERROR: (u8, u8, u8) = (240, 114, 124);
 pub const INPUT_FILL: (u8, u8, u8) = (26, 38, 52);
 /// Subtle divider between panes / under headers.
 pub const DIVIDER: (u8, u8, u8) = (34, 47, 61);
+/// Background of the `--perf` FPS badge.
+pub const PERF_BADGE_BG: (u8, u8, u8) = (18, 28, 38);
 
 /// Layout metrics (logical units).
 pub mod layout {
@@ -52,6 +54,10 @@ pub mod layout {
     pub const CONTEXT_W: f32 = 160.0;
     /// Horizontal padding of the message area.
     pub const MSG_PAD_X: f32 = 16.0;
+    /// Bubble inner horizontal padding (2× per side).
+    pub const BUBBLE_PAD_X: f32 = 12.0;
+    /// Bubble inner vertical padding (2× per side).
+    pub const BUBBLE_PAD_Y: f32 = 8.0;
 }
 
 /// Font sizes (logical px).

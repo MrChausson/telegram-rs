@@ -57,6 +57,18 @@ pub struct State {
     /// True once the message list should be scrolled to the bottom (open chat,
     /// new/outgoing message). Cleared by the view after use.
     pub scroll_to_bottom: bool,
+
+    /// Absolute Y offset of the message list's viewport (content coordinates),
+    /// fed by the scrollable's `on_scroll`. Drives virtualization: only the
+    /// rows overlapping `[offset, offset + viewport]` are built each frame.
+    pub scroll_offset: f32,
+
+    /// `--perf`: draw the FPS overlay in the top-right corner.
+    pub perf_show: bool,
+    /// Samples of recent frame times (ms) used by the overlay.
+    perf_frames: std::collections::VecDeque<f32>,
+    /// Instant of the previous cadence sample.
+    perf_last: std::time::Instant,
 }
 
 impl State {
@@ -80,6 +92,10 @@ impl State {
             viewer: None,
             auto_open_first: false,
             scroll_to_bottom: false,
+            scroll_offset: 0.0,
+            perf_show: false,
+            perf_frames: std::collections::VecDeque::new(),
+            perf_last: std::time::Instant::now(),
         }
     }
 
@@ -87,6 +103,47 @@ impl State {
     pub fn with_auto_open_first(mut self, on: bool) -> Self {
         self.auto_open_first = on;
         self
+    }
+
+    /// Enables the `--perf` FPS overlay.
+    pub fn with_perf(mut self, on: bool) -> Self {
+        self.perf_show = on;
+        self
+    }
+
+    /// Records the message list's absolute scroll offset (from `on_scroll`).
+    pub fn on_scrolled(&mut self, y: f32) {
+        self.scroll_offset = y;
+        self.sample_frame_time();
+    }
+
+    /// Periodic tick (only active under `--perf`): updates the FPS estimate.
+    pub fn on_perf_tick(&mut self) {
+        self.sample_frame_time();
+    }
+
+    /// Current FPS estimate from the recent frame-time samples (0 when idle).
+    pub fn fps(&self) -> u32 {
+        let n = self.perf_frames.len();
+        if n == 0 {
+            return 0;
+        }
+        let sum: f32 = self.perf_frames.iter().sum();
+        (1000.0 / (sum / n as f32)).round() as u32
+    }
+
+    fn sample_frame_time(&mut self) {
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.perf_last).as_secs_f32() * 1000.0;
+        self.perf_last = now;
+        // Ignore absurd gaps (idle between interactions) so the average
+        // reflects the render cadence while scrolling, not pauses.
+        if dt > 0.0 && dt < 500.0 {
+            self.perf_frames.push_back(dt);
+            if self.perf_frames.len() > 60 {
+                self.perf_frames.pop_front();
+            }
+        }
     }
 
     /// Applies an incoming network message.

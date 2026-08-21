@@ -8,10 +8,13 @@
 use iced::widget::image;
 use iced::Length;
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 /// Icon kinds, matching the custom client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Icon {
     Back,
     Search,
@@ -192,17 +195,41 @@ fn render(kind: Icon, color: (u8, u8, u8), px: u32) -> (Pixmap, u32) {
 ///
 /// The icon is rasterized at 2× the logical size so it stays crisp on HiDPI
 /// displays (the window uses a 1.6× scale factor).
+///
+/// Handles are **memoized**: `Handle::from_rgba` mints a fresh `Id` per call
+/// and the tiny-skia backend keys its raster cache on that `Id`. Without the
+/// cache below every icon would be re-rasterized on every frame (scroll lag);
+/// a stable handle keeps the entry warm.
 pub fn icon<'a, M>(kind: Icon, color: (u8, u8, u8), px: f32) -> iced::Element<'a, M>
 where
     M: 'a,
 {
     let physical = (px * 2.0).ceil() as u32;
-    let (pixmap, size) = render(kind, color, physical);
-    let handle = image::Handle::from_rgba(size, size, pixmap.data().to_vec());
+    let handle = cached_handle(kind, color, physical);
     image(handle)
         .width(Length::Fixed(px))
         .height(Length::Fixed(px))
         .into()
+}
+
+/// Memoized icon handles, keyed by (kind, color, physical size).
+type IconCache = std::sync::OnceLock<Mutex<HashMap<(Icon, (u8, u8, u8), u32), image::Handle>>>;
+
+fn cached_handle(kind: Icon, color: (u8, u8, u8), physical: u32) -> image::Handle {
+    static CACHE: IconCache = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    let key = (kind, color, physical);
+    if let Some(handle) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
+        return handle;
+    }
+
+    let (pixmap, size) = render(kind, color, physical);
+    let handle = image::Handle::from_rgba(size, size, pixmap.data().to_vec());
+    if let Ok(mut c) = cache.lock() {
+        c.insert(key, handle.clone());
+    }
+    handle
 }
 
 #[cfg(test)]
