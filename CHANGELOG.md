@@ -6,7 +6,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Switched the renderer to wgpu (GPU)** with the tiny-skia software renderer
+  kept as automatic fallback for machines without a usable GPU stack. The
+  software raster path was the source of the interaction lag: every frame re-
+  rasterized all rounded rects through tiny-skia's anti-aliased scan pipeline
+  on the CPU (66-250 ms/frame in debug, ~15 ms/frame in release), pinning a
+  core at 30-100% CPU. With wgpu: idle/hover/scroll all sit at ~1% CPU and
+  the big chat scroll rate goes from ~24 to ~380 rendered fps.
+- **RAM: the wgpu GL backend is the default** — measured on the reference
+  machine (NVIDIA, Wayland, demo mode, release): PSS 47 MB on EGL/GL vs
+  115 MB on Vulkan (-68 MB of resident proprietary-Vulkan driver pages) at
+  identical CPU cost and higher scroll throughput. For comparison, the
+  software tiny-skia path sits at 25-28 MB PSS. Override with `WGPU_BACKEND`
+  (`vulkan`, `gles`, …) if a machine has a broken GL stack — the tiny-skia
+  fallback still catches total GPU failure.
+- Rewrote the UI on **Iced (tiny-skia software backend)** — replaces the
+  custom winit/softbuffer renderer. Roughly half the RAM (~30 MB RSS), with
+  headless-tested application state.
+- Dropped the old `app/` and `ui/` crates; the workspace is now `tg` (MTProto
+  core) + `app-iced` (UI).
+- **Winit visual parity pass**: the iced UI now matches the winit client's
+  design tokens — same conversation background, chat header on the list
+  background, proportional 60/70% bubbles with outside timestamps (left of
+  sent, right of received), single-line ellipsized chat rows, "Chat" /
+  "typing…" header status and the 2FA password masked with bullets.
+- The message context menu now floats under the message that raised it
+  (right-aligned), instead of a fixed corner overlay.
+
+### Added
+- Auto-focus isn't feasible in iced's layout; the composer is a plain text
+  input (click to focus). Copy: message text can be copied from the context
+  menu ("Copier"); drag-to-select inside bubbles isn't supported by the iced
+  text widget and is a documented trade-off of the software renderer (see
+  README).
+- Live typing is now also sent to the server while the user types
+  (`Request::Typing`), and the demo backend simulates typing + incoming
+  messages in Camille's chat.
+- While a chat's history is being fetched the pane shows "Loading…" instead
+  of the misleading "No messages yet" (which now only means an actually empty
+  chat).
+
+### Fixed
+- Opening a chat no longer takes ~a minute: avatar and photo-thumbnail
+  downloads now run in the background through a shared semaphore (4 concurrent
+  transfers) instead of being awaited one-by-one in the network loop, which
+  queued every click behind the whole startup avatar flood. `OpenChat` is also
+  explicitly prioritized over slower downloads. (fix regressions: tests
+  assert the open-chat → history flow and the priority ordering)
+- Profile avatars are rendered as circles again: the tiny-skia backend ignores
+  `border_radius` on image widgets, so avatars are now decoded, cover-cropped
+  and alpha-masked into a disc once per (path, size) and memoized (keyed by the
+  raster pipeline's handle id, so the decoded image stays cached across frames).
+- The list and conversation headers no longer hug the top edge: their content
+  is vertically centered (`.align_y(Center)`), matching the winit look.
+- Restarting with a valid session no longer shows the sign-in screen: the
+  chat list arriving now marks the account as authenticated, so a persisted
+  session opens straight into the chats.
+- Nested icon rendering: icons are rasterized with tiny-skia and shown as
+  images, sidestepping an `iced_tiny_skia` canvas-translation bug that made
+  embedded icons invisible.
+- The sign-in screen is now centered in the window.
+- The open chat no longer leaks messages from other chats (filtered by id)
+  and receives live updates (incoming message, edit, delete, read state),
+  replacing the earlier renderer-loop simulation. Unread badges clear on
+  open (mark-as-read) and only sync down from other devices.
+- Optimistic sends are deduplicated when the server echoes them back, and
+  Escape closes the context menu / cancels editing / closes the viewer.
+- Demo mode now handles the full cycle: echo of sent messages, simulated
+  typing + incoming messages with generated images for avatars and photos.
+
+### Performance
+- **Message-list layout cache** (Phase 1): row heights / cumulative top
+  offsets are computed once and cached in `State`, invalidated only when the
+  messages or the context menu change (or on resize). Scroll frames now cost
+  O(visible rows) via binary search over the cached offsets instead of
+  re-estimating every row's height each tick — `messages_list` build is flat
+  ~15 µs whether the chat holds 50 or 5000 messages (was scaling linearly).
+- **Cheaper per-frame view** (Phase 2): memoized "HH:MM" timestamps (no more
+  chrono/timezone work per visible row per frame), pre-ellipsized chat-list
+  labels kept aligned with the dialog list (`State::dialog_short`, refreshed
+  only when a preview changes), and borrowed header title/avatar instead of
+  per-frame clones. Full-view build: 75.7 → 48.3 µs with 50 dialogs; message
+  list build at 200 messages: 19.9 → 11.9 µs.
+- **Dialog-list virtualization** (Phase 2bis): the left pane now builds only
+  the rows intersecting its viewport (uniform row height, O(1) windowing,
+  ±16 rows overscan), like the message list. Whole-view build drops from
+  48 µs to 2.3 µs; scrolling 800 chats costs about the same as scrolling 50.
+  New `dialog_list/scroll/{n}` criterion benches guard both.
+- **Perf regression harness** (`cargo bench -p app-iced`): the app is now a
+  lib + thin bin so `benches/frame.rs` drives the *exact* per-frame view
+  headlessly and measures **build / layout / frame** (diff + layout + draw on a
+  tiny-skia software canvas) for 10 / 50 / 200 / 500 messages, publishing
+  estimated FPS. Criterion-change data pins regressions in CI.
+- **Message list virtualization**: only the rows intersecting the scrollable's
+  viewport (plus over-scan) are built and layed-out each frame; the rest is
+  height-matched spacers keeping the content height and bottom-anchoring
+  correct. A scroll tick used to rebuild + text-shape every row of the whole
+  history (the tiny-skia backend is software-rendered), which lagged badly on
+  chat open / long histories. Estimated heights (char-based, no shaping) for
+  the spacers, O(1) per row.
+- **Icon handles are now memoized** (keyed by kind/color/size): `Handle::from_rgba`
+  mints a fresh cache id per call, so without memoization every icon was
+  re-rasterized on every frame — scroll lag again.
+- `--perf` flag: draws a live FPS badge in the conversation header (sampled on
+  scroll + a 500 ms tick) to measure on the real display.
+- **End-to-end scroll measurement** without input bindings: `--scroll-perf=SECS`
+  self-drives a synthetic fling through the real update → view → layout → draw
+  → present pipeline and logs per-frame ms / fps (`TG_PERF_LOG`), so scroll
+  performance is measurable on any machine. `tools/scroll-perf.sh` runs it
+  automatically. `--demo-big` (+`TG_BIG_N`) seeds a ~420-message chat to
+  exercise long histories, and `--win=WxH` shrinks the render buffer.
+  `TG_NO_VIRT=1` restores the pre-virtualization "build every row per frame"
+  behaviour for honest before/after numbers: at 1500 messages the virtualized
+  list sustains **79 fps vs 63 fps** unvirtualized on the reference machine,
+  with the per-frame cost staying flat as the history grows.
+- **FPS instrumentation now reports the TRUE presented frame rate** (`renders_s`,
+  counted in the redraw path), not the scroll-event cadence. Measured on the
+  reference host: headless per-frame is **3.1 ms under a real fling** (vs
+  **11–17 ms** for the winit client's whole-scene render at the same
+  resolution), and the live loop presents **~127 frames/s with a 5-message
+  chat** vs **~24–29 frames/s** with a 420+ history — i.e. the presented rate is
+  content-bound (per-frame software cost), not a fixed loop cap. Ships
+  `tools/scroll-perf.sh` comparing both cases and a `--continuous` redraw mode.
+  **Debug builds are ~8× slower (25.6 vs 3.1 ms/frame)**: always use the
+  release binary when checking scroll feel (`cargo run --release`).
+
 ## [v0.2.2] - 2026-08-16
+
+### Changed
+- README: added a V1 roadmap comparing current features with the full
+  Telegram Desktop feature set.
 
 ### Changed
 - README: added a V1 roadmap comparing current features with the full
