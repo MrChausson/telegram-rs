@@ -82,6 +82,31 @@ pub fn fmt_time(ts: i32) -> String {
     }
 }
 
+/// Memoized local-time `HH:MM` for a Unix timestamp.
+///
+/// `message_row`/`chat_row_button` call this once per visible row **per
+/// frame**; the chrono/`Local` formatting below is comparatively expensive and
+/// most rows keep the same date between frames (a burst of messages share the
+/// same minute). The first call per distinct date formats it, the rest clone a
+/// cached string — no timezone work on the hot path.
+pub fn cached_time(ts: i32) -> String {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static CACHE: OnceLock<Mutex<HashMap<i32, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Some(t) = cache.lock().ok().and_then(|c| c.get(&ts).cloned()) {
+        return t;
+    }
+    let formatted = fmt_time(ts);
+    cache
+        .lock()
+        .ok()
+        .and_then(|mut c| c.insert(ts, formatted.clone()));
+    formatted
+}
+
 /// Avatar palette (same as the custom `chatlist`).
 pub const AVATAR_PALETTE: [(u8, u8, u8); 6] = [
     (51, 144, 236),

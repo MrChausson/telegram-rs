@@ -64,7 +64,9 @@ fn main() {
     let mut s = state(n);
     let max_y = (n as f32) * 70.0;
 
-    let mut renderer = iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0));
+    // The app's Element is typed on the iced fallback enum (wgpu + tiny-skia);
+    // headless probes drive the tiny-skia variant through it.
+    let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0)));
     let mut tree = Tree::empty();
     let mut clip = tiny_skia::Mask::new(W, H).unwrap();
     let mut buf: Vec<u32> = vec![0; (W * H) as usize];
@@ -78,7 +80,9 @@ fn main() {
         Widget::draw(el.as_widget(), &tree, &mut renderer, &Theme::Dark, &style, layout, cursor, &bounds);
         renderer.reset(bounds);
         let mut pm = tiny_skia::PixmapMut::from_bytes(bytemuck::cast_slice_mut(&mut buf), W, H).unwrap();
-        renderer.draw(&mut pm, &mut clip, &viewport, &damage, bg);
+        if let iced::Renderer::Secondary(r) = &mut renderer {
+            r.draw(&mut pm, &mut clip, &viewport, &damage, bg);
+        }
     }
 
     const ITERS: u32 = 300;
@@ -97,7 +101,9 @@ fn main() {
         Widget::draw(el.as_widget(), &tree, &mut renderer, &Theme::Dark, &style, layout, cursor, &bounds);
         renderer.reset(bounds);
         let mut pm = tiny_skia::PixmapMut::from_bytes(bytemuck::cast_slice_mut(&mut buf), W, H).unwrap();
-        renderer.draw(&mut pm, &mut clip, &viewport, &damage, bg);
+        if let iced::Renderer::Secondary(r) = &mut renderer {
+            r.draw(&mut pm, &mut clip, &viewport, &damage, bg);
+        }
     }
     let full = t1.elapsed().as_secs_f64() / ITERS as f64;
 

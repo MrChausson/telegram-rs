@@ -25,6 +25,9 @@ use state::{LoginStep, State};
 
 /// Id of the open chat's message list, used to auto-scroll to the bottom.
 const MSG_LIST_ID: &str = "msg-list";
+/// Id of the dialog (chat) list, used to feed its scroll offset into the
+/// dialog-list virtualization.
+const DIALOG_LIST_ID: &str = "dialog-list";
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -74,6 +77,8 @@ pub enum Message {
     /// scrollable's viewport (content coordinates). Feeds message-list
     /// virtualization so only the visible rows are built/layed-out per frame.
     Scrolled(f32),
+    /// The dialog (chat) list was scrolled: feeds dialog-list virtualization.
+    DialogScrolled(f32),
     /// Periodic tick (only useful with `--perf`): samples the frame cadence.
     PerfTick,
     /// Continuous-redraw tick (see `--continuous`): only asks for a redraw.
@@ -119,6 +124,7 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             state.messages.clear();
             state.editing = None;
             state.context_menu = None;
+            state.invalidate_layout();
         }
         Message::RowClicked(row) => state.click(row),
         Message::RowContext(row) => state.open_context(row),
@@ -160,6 +166,7 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             state.on_perf_tick();
         }
         Message::Scrolled(y) => state.on_scrolled(y),
+        Message::DialogScrolled(y) => state.on_dialog_scrolled(y),
         Message::PerfTick => {
             if state.scroll_perf_dur > 0.0 {
                 state.advance_scroll_sim();
@@ -406,13 +413,17 @@ pub fn chat_view(state: &State) -> Element<'_> {
     row![list_pane(state), conversation_pane(state)].into()
 }
 
-/// Left pane: "Chats" header + scrollable list.
+/// Estimated dialog-row height (logical px): avatar diameter + the button's
+/// vertical padding (`[10, 14]` → 10 per side). All rows share this height, so
+/// the virtualized slice is exact for equal offsets — no drift, no height
+/// cache needed.
+const DIALOG_ROW_H: f32 = theme::layout::AVATAR_LIST + 20.0;
+
+/// Left pane: "Chats" header + scrollable, virtualized, dialog list.
 fn list_pane(state: &State) -> Element<'_> {
-    let mut rows = column![];
-    for row in &state.dialogs {
-        rows = rows.push(chat_row_button(row, state.open_chat == Some(row.id)));
-    }
-    let list = scrollable(rows).height(Length::Fill).width(Length::Fill);
+    // The scrollable only knows its own height at layout time; `responsive`
+    // hands it the viewport height used to pick the visible rows.
+    let list = iced::widget::responsive(move |size| dialog_list(state, size.height));
 
     column![
         // Header bar: "Chats" + search / compose / dots. `align_y(Center)`
@@ -444,25 +455,80 @@ fn list_pane(state: &State) -> Element<'_> {
     .into()
 }
 
-fn chat_row_button(row: &ChatRow, selected: bool) -> Element<'_> {
+/// Virtualized dialog list: only the rows intersecting the scrollable's
+/// viewport (plus [`LIST_OVERSCAN`] on each side) are built per frame. The
+/// rows have a uniform height ([`DIALOG_ROW_H`]), so the visible window is
+/// `[offset / H, (offset + viewport) / H]` — O(1) instead of building all N
+/// dialogs every frame (a 500-chat account used to rebuild every row on every
+/// redraw). `pub` for the `benches/` harness.
+pub fn dialog_list(state: &State, view_h: f32) -> Element<'_> {
+    let n = state.dialogs.len();
+    let no_virt = std::env::var("TG_NO_VIRT").is_ok();
+
+    let (start, end) = if no_virt || view_h <= 0.0 || n == 0 {
+        (0usize, n)
+    } else {
+        let offset = state.dialog_scroll_offset.max(0.0);
+        let first = (offset / DIALOG_ROW_H).floor() as usize;
+        let last = ((offset + view_h) / DIALOG_ROW_H).ceil() as usize + 1;
+        // Offsets can overshoot the content (scroll bounce / stale events):
+        // clamp so `end >= start` and `start <= n` always hold.
+        let start = first.saturating_sub(LIST_OVERSCAN).min(n);
+        let end = (last + LIST_OVERSCAN).min(n).max(start);
+        (start, end)
+    };
+
+    let top_pad = DIALOG_ROW_H * start as f32;
+    let bottom_pad = DIALOG_ROW_H * (n.saturating_sub(end)) as f32;
+
+    let mut rows = column![];
+    for (i, row) in state.dialogs.iter().enumerate().skip(start).take(end - start) {
+        // `state.dialog_short` holds the already-ellipsized labels (kept
+        // aligned with `dialogs`), so the rows borrow those strings instead of
+        // allocating new ones per frame. The mismatch fallback (freshly-built
+        // state, unit tests) borrows the full strings until the list arrives.
+        let (title, sub) = state
+            .dialog_short
+            .get(i)
+            .map(|(t, s)| (t.as_str(), s.as_str()))
+            .unwrap_or((&row.title, &row.subtitle));
+        rows = rows.push(chat_row_button(row, state.open_chat == Some(row.id), title, sub));
+    }
+
+    scrollable(column![
+        iced::widget::Space::new().height(top_pad),
+        rows,
+        iced::widget::Space::new().height(bottom_pad),
+    ])
+    .id(DIALOG_LIST_ID)
+    .on_scroll(|viewport: iced::widget::scrollable::Viewport| {
+        Message::DialogScrolled(viewport.absolute_offset().y)
+    })
+    .height(Length::Fill)
+    .width(Length::Fill)
+    .into()
+}
+
+fn chat_row_button<'a>(row: &'a ChatRow, selected: bool, title: &'a str, sub: &'a str) -> Element<'a> {
     let avatar = avatar_circle(row.avatar_path.as_deref(), &row.title, theme::layout::AVATAR_LIST);
 
     let unread = row.unread > 0;
     // Matching the winit client: names and previews stay on one line (miss of
     // a built-in ellipsis in iced is handled by `ellipsize` + no wrapping).
-    let name = text(ellipsize(&row.title, 15))
+    // `title`/`sub` are the pre-ellipsized strings from `State::dialog_short`.
+    let name = text(title)
         .size(theme::font::NAME as f32)
         .color(Color::WHITE)
         .wrapping(iced::widget::text::Wrapping::None)
         .width(Length::Fill);
-    let sub = text(ellipsize(&row.subtitle, 24))
+    let sub_text = text(sub)
         .size(theme::font::MESSAGE as f32)
         .color(rgb(theme::TEXT_SECONDARY))
         .wrapping(iced::widget::text::Wrapping::None)
         .width(Length::Fill);
 
     let ts: Element<'_> = if row.date > 0 {
-        text(theme::fmt_time(row.date))
+        text(theme::cached_time(row.date))
             .size(theme::font::TIMESTAMP as f32)
             .color(rgb(theme::TEXT_SECONDARY))
             .into()
@@ -482,7 +548,7 @@ fn chat_row_button(row: &ChatRow, selected: bool) -> Element<'_> {
     button(
         row![
             avatar,
-            column![name, sub].spacing(2).width(Length::Fill),
+            column![name, sub_text].spacing(2).width(Length::Fill),
             column![ts, badge].spacing(4).align_x(Alignment::End),
         ]
         .spacing(10)
@@ -499,16 +565,21 @@ fn chat_row_button(row: &ChatRow, selected: bool) -> Element<'_> {
 fn conversation_pane(state: &State) -> Element<'_> {
     let open = state.open_chat;
     let chat = state.dialogs.iter().find(|d| Some(d.id) == open);
-    let title = if !state.chat_title.is_empty() {
-        state.chat_title.clone()
+    // Borrow instead of cloning: these can be hundreds of bytes and the pane
+    // rebuilds every frame.
+    let title: std::borrow::Cow<'_, str> = if !state.chat_title.is_empty() {
+        std::borrow::Cow::Borrowed(&state.chat_title)
     } else {
-        chat.map(|c| c.title.clone()).unwrap_or_default()
+        match chat {
+            Some(c) => std::borrow::Cow::Borrowed(&c.title),
+            None => std::borrow::Cow::Borrowed(""),
+        }
     };
-    let avatar_path = chat.and_then(|c| c.avatar_path.clone());
+    let avatar_path = chat.and_then(|c| c.avatar_path.as_deref());
 
     let header = chat_header(
         &title,
-        avatar_path.as_deref(),
+        avatar_path,
         state.typing,
         if state.perf_show {
             Some(format!("{} FPS", rendered_per_second().round()))
@@ -743,8 +814,10 @@ fn message_row(idx: usize, m: &MsgRow, pane_w: f32) -> Element<'_> {
         });
 
     // Timestamp + status tick, OUTSIDE the bubble (like the custom client).
+    // `theme::cached_time` memoizes each date's "HH:MM", so a burst of messages
+    // sharing a minute pay one chrono/Local format and cheap cloned strings.
     let ts = if m.date > 0 {
-        theme::fmt_time(m.date)
+        theme::cached_time(m.date)
     } else {
         String::new()
     };
@@ -858,6 +931,7 @@ const CONTEXT_MENU_H: f32 = 3.0 * 37.0;
 /// `pub` for the `benches/` harness.
 pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
     let n = state.messages.len();
+
     let out_at = |i: usize| state.messages[i].out;
     let gap_between = |a: bool, b: bool| if a == b { 3.0 } else { 10.0 };
 
@@ -866,45 +940,72 @@ pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
     // quantify how much virtualization buys).
     let no_virt = std::env::var("TG_NO_VIRT").is_ok();
 
-    // Estimated row heights + cumulative top offsets (content coordinates).
-    let heights: Vec<f32> = state
-        .messages
-        .iter()
-        .map(|m| est_row_height(m, pane_w))
-        .collect();
-    let menu_h: Vec<f32> = (0..n)
-        .map(|i| {
-            if state.context_menu.map(|c| c.row) == Some(i) {
-                CONTEXT_MENU_H
-            } else {
-                0.0
-            }
-        })
-        .collect();
-
-    let mut tops = Vec::with_capacity(n);
-    let mut y = view_h; // pin spacer keeps bubbles at the bottom when short.
-    for i in 0..n {
-        tops.push(y);
-        y += heights[i] + menu_h[i];
-        if i + 1 < n {
-            y += gap_between(out_at(i), out_at(i + 1));
-        }
+    if n == 0 {
+        return scrollable(iced::widget::Space::new().height(view_h))
+            .id(MSG_LIST_ID)
+            .on_scroll(|viewport: iced::widget::scrollable::Viewport| {
+                Message::Scrolled(viewport.absolute_offset().y)
+            })
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
     }
-    let total = y;
+
+    // Row heights + cumulative tops only depend on the message rows, the open
+    // context menu and the pane size — none of which change while scrolling.
+    // They stay cached across frames; rebuilding them (O(all rows), with a
+    // `chars().count()` text scan per row) on every scroll tick is what made
+    // big chats lag. `no_virt` keeps the pre-cache path for the A/B harness.
+    let mut cache_guard = state
+        .layout_cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let hit = !no_virt
+        && cache_guard
+            .as_ref()
+            .is_some_and(|c| c.pane_w == pane_w && c.view_h == view_h && c.epoch == state.layout_epoch);
+    if !hit {
+        *cache_guard = Some(build_layout(state, pane_w, view_h));
+    }
+    let cache = cache_guard.as_ref().expect("rebuilt in the step above");
+    let heights = &cache.heights;
+    let menu_h = &cache.menu_h;
+    let tops = &cache.tops;
+    let total = cache.total;
 
     // Visible window from the last notified scroll offset.
     let mut start = 0usize;
     let mut end = n;
     if !no_virt {
         let offset = state.scroll_offset.max(0.0);
-        while start < n && tops[start] + heights[start] + menu_h[start] < offset {
-            start += 1;
+        // `tops` grows monotonically, so does `tops[i] + heights[i] + menu_h[i]`
+        // (`tops[i+1] = tops[i] + heights[i] + menu_h[i] + gap`): binary-search
+        // the first row whose bottom edge reaches the viewport instead of a
+        // linear scan from 0 (O(all rows) per frame on big chats).
+        let bottom_edge = |i: usize| tops[i] + heights[i] + menu_h[i];
+        let mut lo = 0usize;
+        let mut hi = n;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if bottom_edge(mid) < offset {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
         }
-        end = start;
-        while end < n && tops[end] < offset + view_h {
-            end += 1;
+        start = lo;
+        // First row whose top passes the bottom of the viewport.
+        let mut lo_bottom = start;
+        let mut hi = n;
+        while lo_bottom < hi {
+            let mid = (lo_bottom + hi) / 2;
+            if tops[mid] < offset + view_h {
+                lo_bottom = mid + 1;
+            } else {
+                hi = mid;
+            }
         }
+        end = lo_bottom;
         start = start.saturating_sub(LIST_OVERSCAN);
         end = (end + LIST_OVERSCAN).min(n);
     }
@@ -943,6 +1044,52 @@ pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
+}
+
+/// Computes and returns the per-row heights / top offsets / total height cache
+/// for the current message list. Called only when the cache is stale (message
+/// or context-menu change, or a pane resize).
+fn build_layout(state: &State, pane_w: f32, view_h: f32) -> crate::state::MsgLayoutCache {
+    let n = state.messages.len();
+    let out_at = |i: usize| state.messages[i].out;
+    let gap_between = |a: bool, b: bool| if a == b { 3.0 } else { 10.0 };
+
+    let heights: Vec<f32> = state
+        .messages
+        .iter()
+        .map(|m| est_row_height(m, pane_w))
+        .collect();
+    let menu_row = state.context_menu.map(|c| c.row);
+    let menu_h: Vec<f32> = (0..n)
+        .map(|i| {
+            if menu_row == Some(i) {
+                CONTEXT_MENU_H
+            } else {
+                0.0
+            }
+        })
+        .collect();
+
+    let mut tops = Vec::with_capacity(n);
+    let mut y = view_h; // pin spacer keeps bubbles at the bottom when short.
+    for i in 0..n {
+        tops.push(y);
+        y += heights[i] + menu_h[i];
+        if i + 1 < n {
+            y += gap_between(out_at(i), out_at(i + 1));
+        }
+    }
+    let total = y;
+
+    crate::state::MsgLayoutCache {
+        pane_w,
+        view_h,
+        epoch: state.layout_epoch,
+        heights,
+        menu_h,
+        tops,
+        total,
+    }
 }
 
 /// Cheap O(1) estimate of `message_row`'s layout height for a pane width.
@@ -987,7 +1134,7 @@ fn horizontal_spacer() -> Element<'static> {
 
 /// Truncates `s` to at most `max` chars, adding an ellipsis when clipped
 /// (matches the winit client's single-line chat rows).
-fn ellipsize(s: &str, max: usize) -> String {
+pub fn ellipsize(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
@@ -1274,6 +1421,14 @@ fn subscription(state: &State) -> iced::Subscription<Message> {
 
 /// Application entry point (called from the `main.rs` binary of this crate).
 pub fn run() -> iced::Result {
+    // Default the wgpu backend to Vulkan: the automatic backend probe loads
+    // Mesa's GL stack (libgallium + libLLVM, ~60 MB RSS) before settling on a
+    // device. Vulkan-only skips that entirely; machines without Vulkan fall
+    // back to the tiny-skia software renderer compiled in. `WGPU_BACKEND`
+    // still wins when the user sets it.
+    if std::env::var_os("WGPU_BACKEND").is_none() {
+        std::env::set_var("WGPU_BACKEND", "vulkan");
+    }
     let (w, h) = window_size_from_args();
     iced::application(boot, update, view)
         .subscription(subscription)
@@ -1328,5 +1483,36 @@ mod tests {
         let el = std::hint::black_box(messages_list(&state, 820.0, 610.0));
         let _ = el;
         assert_eq!(state.messages.len(), 300);
+    }
+
+    #[test]
+    fn dialog_list_virtualizes_without_panicking() {
+        use crate::bridge::UiMessage;
+
+        let (req_tx, _req_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::new(req_tx);
+        state.authenticated = true;
+        let dialogs: Vec<ChatRow> = (0..500)
+            .map(|i| ChatRow {
+                id: i,
+                title: format!("Chat {i}"),
+                subtitle: format!("preview {i}"),
+                date: 1_700_000_000,
+                unread: 0,
+                avatar_path: None,
+            })
+            .collect();
+        state.on_message(UiMessage::Dialogs(dialogs));
+        // Scroll deep into the list: the visible-window math must stay in
+        // bounds (overscan clamps to [0, n]) at every offset.
+        for y in [0.0f32, 17_000.0, 66.0 * 499.0, 1e6] {
+            state.on_dialog_scrolled(y);
+            let el = std::hint::black_box(dialog_list(&state, 610.0));
+            let _ = el;
+        }
+        // No-virt fallback path (the perf A/B switch) also must not panic.
+        state.dialog_scroll_offset = 17_000.0;
+        let el = std::hint::black_box(dialog_list(&state, 610.0));
+        let _ = el;
     }
 }

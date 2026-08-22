@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- **Switched the renderer to wgpu (GPU)** with the tiny-skia software renderer
+  kept as automatic fallback for machines without Vulkan. The software raster
+  path was the source of the interaction lag: every frame re-rasterized all
+  rounded rects through tiny-skia's anti-aliased scan pipeline on the CPU
+  (66-250 ms/frame in debug, ~15 ms/frame in release), pinning a core at
+  30-100% CPU. With wgpu: idle/hover/scroll all sit at ~1% CPU and the big
+  chat scroll rate goes from ~24 to ~312 rendered fps. The wgpu backend is
+  pinned to Vulkan by default (skips Mesa's GL probe, ~60 MB RSS); override
+  with `WGPU_BACKEND`.
+- RAM cost of the GPU path, measured on the reference machine (demo mode,
+  release): PSS ~117 MB with wgpu vs ~25-28 MB with tiny-skia (+90 MB, almost
+  entirely the proprietary NVIDIA driver stack — Private_Dirty delta is only
+  ~20 MB). On Mesa drivers (Intel/AMD) the footprint should be lower.
 - Rewrote the UI on **Iced (tiny-skia software backend)** — replaces the
   custom winit/softbuffer renderer. Roughly half the RAM (~30 MB RSS), with
   headless-tested application state.
@@ -63,6 +76,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   typing + incoming messages with generated images for avatars and photos.
 
 ### Performance
+- **Message-list layout cache** (Phase 1): row heights / cumulative top
+  offsets are computed once and cached in `State`, invalidated only when the
+  messages or the context menu change (or on resize). Scroll frames now cost
+  O(visible rows) via binary search over the cached offsets instead of
+  re-estimating every row's height each tick — `messages_list` build is flat
+  ~15 µs whether the chat holds 50 or 5000 messages (was scaling linearly).
+- **Cheaper per-frame view** (Phase 2): memoized "HH:MM" timestamps (no more
+  chrono/timezone work per visible row per frame), pre-ellipsized chat-list
+  labels kept aligned with the dialog list (`State::dialog_short`, refreshed
+  only when a preview changes), and borrowed header title/avatar instead of
+  per-frame clones. Full-view build: 75.7 → 48.3 µs with 50 dialogs; message
+  list build at 200 messages: 19.9 → 11.9 µs.
+- **Dialog-list virtualization** (Phase 2bis): the left pane now builds only
+  the rows intersecting its viewport (uniform row height, O(1) windowing,
+  ±16 rows overscan), like the message list. Whole-view build drops from
+  48 µs to 2.3 µs; scrolling 800 chats costs about the same as scrolling 50.
+  New `dialog_list/scroll/{n}` criterion benches guard both.
 - **Perf regression harness** (`cargo bench -p app-iced`): the app is now a
   lib + thin bin so `benches/frame.rs` drives the *exact* per-frame view
   headlessly and measures **build / layout / frame** (diff + layout + draw on a

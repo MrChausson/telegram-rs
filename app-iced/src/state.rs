@@ -5,6 +5,7 @@
 use crate::bridge::{ChatRow, MsgRow, Request, UiMessage};
 
 use std::io::Write;
+use std::sync::Mutex;
 
 /// Sign-in flow step (only used while unauthenticated).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +20,29 @@ pub enum LoginStep {
 pub struct ContextMenu {
     /// Index of the message row the menu is over.
     pub row: usize,
+}
+
+/// Cached virtualization metrics for the open chat's message list, so a scroll
+/// frame doesn't re-estimate row heights / rebuild offset tables for the whole
+/// history. Rebuilt by `messages_list` only when invalidated (see
+/// [`State::invalidate_layout`]) or when the pane size changes.
+#[derive(Debug)]
+pub(crate) struct MsgLayoutCache {
+    /// Pane width the metrics were computed for.
+    pub(crate) pane_w: f32,
+    /// Viewport height used for the pinned-to-bottom spacer.
+    pub(crate) view_h: f32,
+    /// `State::layout_epoch` this cache was built from.
+    pub(crate) epoch: u64,
+    /// Per-row estimated heights.
+    pub(crate) heights: Vec<f32>,
+    /// Per-row extra height for an open context menu.
+    pub(crate) menu_h: Vec<f32>,
+    /// Cumulative top offset of each row (content coordinates, starting at
+    /// `view_h` for the bottom-anchoring spacer).
+    pub(crate) tops: Vec<f32>,
+    /// Total content height.
+    pub(crate) total: f32,
 }
 
 /// Application state.
@@ -64,6 +88,27 @@ pub struct State {
     /// fed by the scrollable's `on_scroll`. Drives virtualization: only the
     /// rows overlapping `[offset, offset + viewport]` are built each frame.
     pub scroll_offset: f32,
+    /// Absolute Y offset of the dialog (chat) list's viewport, fed by its
+    /// `on_scroll`. Drives the dialog-list virtualization (the left pane).
+    pub dialog_scroll_offset: f32,
+
+    /// Virtualization metrics (`heights`/`tops`/…) for the open chat's message
+    /// list, cached across frames. `messages_list` recomputes it only when the
+    /// messages or the context menu changed ([`Self::invalidate_layout`]) or
+    /// the pane was resized — otherwise a scroll frame costs O(visible rows)
+    /// instead of O(all messages) (the 2k+ message chats that made scrolling
+    /// lag).
+    pub(crate) layout_cache: Mutex<Option<MsgLayoutCache>>,
+    /// Bumped on any change that affects row heights or offsets (`messages`
+    /// content, context menu). The view compares it to the cached one.
+    pub(crate) layout_epoch: u64,
+
+    /// Pre-ellipsized list-pane labels, aligned 1:1 with `dialogs`:
+    /// `(title_short, subtitle_short)`. `list_pane` borrows these as `&str`
+    /// each frame instead of re-running `ellipsize` (which allocates a new
+    /// String) on every dialog row on every redraw. Rebuilt when `dialogs` is
+    /// replaced, and the touched row re-ellipsized when a subtitle changes.
+    pub dialog_short: Vec<(String, String)>,
 
     /// `--perf`: draw the FPS overlay in the top-right corner.
     pub perf_show: bool,
@@ -110,6 +155,10 @@ impl State {
             auto_open_first: false,
             scroll_to_bottom: false,
             scroll_offset: 0.0,
+            dialog_scroll_offset: 0.0,
+            layout_cache: Mutex::new(None),
+            layout_epoch: 0,
+            dialog_short: Vec::new(),
             perf_show: false,
             continuous: false,
             perf_frames: std::collections::VecDeque::new(),
@@ -150,11 +199,38 @@ impl State {
         self
     }
 
+/// Marks the message-list layout cache as stale. Called on any mutation
+    /// that changes row heights/offsets (`messages` content or the context
+    /// menu); the view rebuilds the metrics lazily on the next frame.
+    pub fn invalidate_layout(&mut self) {
+        self.layout_epoch = self.layout_epoch.wrapping_add(1);
+    }
+
+    /// Re-ellipsizes the list-pane labels of one chat (after a preview text
+    /// changed). `dialog_short` keeps `(title_short, subtitle_short)` aligned
+    /// with `dialogs` so the view can borrow the strings each frame.
+    fn refresh_dialog_short(&mut self, chat_id: i64) {
+        let pos = self.dialogs.iter().position(|d| d.id == chat_id);
+        let Some(pos) = pos else { return };
+        let Some(d) = self.dialogs.get(pos) else { return };
+        let short = (crate::ellipsize(&d.title, 15), crate::ellipsize(&d.subtitle, 24));
+        if self.dialog_short.len() <= pos {
+            self.dialog_short.resize(pos + 1, (String::new(), String::new()));
+        }
+        self.dialog_short[pos] = short;
+    }
+
     /// Records the message list's absolute scroll offset (from `on_scroll`).
     pub fn on_scrolled(&mut self, y: f32) {
         self.scroll_offset = y;
         self.perf_scroll_events += 1;
         self.sample_frame_time();
+    }
+
+    /// Records the dialog list's absolute scroll offset (from `on_scroll`)
+    /// for the dialog-list virtualization.
+    pub fn on_dialog_scrolled(&mut self, y: f32) {
+        self.dialog_scroll_offset = y;
     }
 
     /// Periodic tick (only active under `--perf`): updates the FPS estimate.
@@ -272,6 +348,18 @@ impl State {
         match msg {
             UiMessage::Dialogs(rows) => {
                 self.dialogs = rows;
+                // Pre-ellipsize every list label once (see `dialog_short`), so
+                // the view can borrow them per frame instead of allocating.
+                self.dialog_short = self
+                    .dialogs
+                    .iter()
+                    .map(|d| {
+                        (
+                            crate::ellipsize(&d.title, 15),
+                            crate::ellipsize(&d.subtitle, 24),
+                        )
+                    })
+                    .collect();
                 // A valid session already existed (restart): the chat list is
                 // the sign that the account is authenticated.
                 self.authenticated = true;
@@ -289,6 +377,7 @@ impl State {
                     if prev_len == 0 || self.messages.len() > prev_len {
                         self.scroll_to_bottom = true;
                     }
+                    self.invalidate_layout();
                 }
             }
             UiMessage::NewMessage { chat_id, id, text, date, out, photo } => {
@@ -321,6 +410,7 @@ impl State {
                     if !out {
                         self.typing = false;
                     }
+                    self.invalidate_layout();
                     return;
                 }
                 // Otherwise: update the list row (preview + unread only for
@@ -331,6 +421,7 @@ impl State {
                     if !out {
                         row.unread += 1;
                     }
+                    self.refresh_dialog_short(chat_id);
                 }
             }
             UiMessage::MessageEdited { chat_id, id, text, date } => {
@@ -342,8 +433,10 @@ impl State {
                             break;
                         }
                     }
+                    self.invalidate_layout();
                 } else if let Some(row) = self.dialogs.iter_mut().find(|r| r.id == chat_id) {
                     row.subtitle = text;
+                    self.refresh_dialog_short(chat_id);
                 }
             }
             UiMessage::MessageDeleted { ids } => {
@@ -352,6 +445,7 @@ impl State {
                     self.editing = None;
                 }
                 self.context_menu = None;
+                self.invalidate_layout();
             }
             UiMessage::PhotoReady { chat_id, msg_id, path } => {
                 if self.open_chat == Some(chat_id) {
@@ -361,6 +455,7 @@ impl State {
                             break;
                         }
                     }
+                    self.invalidate_layout();
                 }
             }
             UiMessage::ChatRead { id } => {
@@ -462,11 +557,16 @@ impl State {
             return;
         }
         self.context_menu = Some(ContextMenu { row });
+        self.invalidate_layout();
     }
 
     /// Dismisses the context menu (a click outside, or opening another one).
     pub fn dismiss_menu(&mut self) {
+        if self.context_menu.is_none() {
+            return;
+        }
         self.context_menu = None;
+        self.invalidate_layout();
     }
 
     /// Escape: closes the context menu and cancels editing.
@@ -476,11 +576,13 @@ impl State {
             self.editing = None;
             self.composer.clear();
         }
+        self.invalidate_layout();
     }
 
     /// Click on the context menu's "Modifier" item.
     pub fn context_edit(&mut self) {
         if let Some(menu) = self.context_menu.take() {
+            self.invalidate_layout();
             if let Some(m) = self.messages.get(menu.row) {
                 self.editing = Some(m.id);
                 self.composer = m.text.clone();
@@ -492,6 +594,7 @@ impl State {
     /// `None`), which the caller writes to the system clipboard.
     pub fn context_copy(&mut self) -> Option<String> {
         let menu = self.context_menu.take()?;
+        self.invalidate_layout();
         let m = self.messages.get(menu.row)?;
         let text = if m.text.is_empty() {
             // Photo-only message: nothing meaningful to copy.
@@ -518,6 +621,7 @@ impl State {
         if self.editing == Some(m.id) {
             self.editing = None;
         }
+        self.invalidate_layout();
     }
 
     /// Submit the composer: send (or edit) the current text.
@@ -554,6 +658,7 @@ impl State {
         self.composer.clear();
         self.typing = false;
         self.scroll_to_bottom = true;
+        self.invalidate_layout();
     }
 
     /// Open a chat.
@@ -567,6 +672,7 @@ impl State {
         self.composer.clear();
         let _ = self.req_tx.send(Request::OpenChat { id });
         let _ = self.req_tx.send(Request::MarkRead { id });
+        self.invalidate_layout();
     }
 
     /// Path of the photo attached to row, if any and already downloaded.
@@ -581,7 +687,9 @@ impl State {
 
     pub fn back(&mut self) {
         self.viewer = None;
-        self.context_menu = None;
+        if self.context_menu.take().is_some() {
+            self.invalidate_layout();
+        }
         self.editing = None;
     }
 }
