@@ -1421,13 +1421,15 @@ fn subscription(state: &State) -> iced::Subscription<Message> {
 
 /// Application entry point (called from the `main.rs` binary of this crate).
 pub fn run() -> iced::Result {
-    // Default the wgpu backend to Vulkan: the automatic backend probe loads
-    // Mesa's GL stack (libgallium + libLLVM, ~60 MB RSS) before settling on a
-    // device. Vulkan-only skips that entirely; machines without Vulkan fall
-    // back to the tiny-skia software renderer compiled in. `WGPU_BACKEND`
-    // still wins when the user sets it.
+    // Default the wgpu backend to GL (EGL): measured on the reference
+    // machine (NVIDIA, Wayland) it costs ~47 MB PSS vs ~115 MB for Vulkan —
+    // the proprietary Vulkan stack alone accounts for ~68 MB of resident
+    // driver pages — at identical CPU cost and scroll throughput. Machines
+    // without a usable EGL/GL stack fall through to the tiny-skia software
+    // renderer compiled in. `WGPU_BACKEND` still wins when set (e.g.
+    // `WGPU_BACKEND=vulkan` restores the previous behaviour).
     if std::env::var_os("WGPU_BACKEND").is_none() {
-        std::env::set_var("WGPU_BACKEND", "vulkan");
+        std::env::set_var("WGPU_BACKEND", "gl");
     }
     let (w, h) = window_size_from_args();
     iced::application(boot, update, view)

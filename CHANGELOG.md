@@ -8,18 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 - **Switched the renderer to wgpu (GPU)** with the tiny-skia software renderer
-  kept as automatic fallback for machines without Vulkan. The software raster
-  path was the source of the interaction lag: every frame re-rasterized all
-  rounded rects through tiny-skia's anti-aliased scan pipeline on the CPU
-  (66-250 ms/frame in debug, ~15 ms/frame in release), pinning a core at
-  30-100% CPU. With wgpu: idle/hover/scroll all sit at ~1% CPU and the big
-  chat scroll rate goes from ~24 to ~312 rendered fps. The wgpu backend is
-  pinned to Vulkan by default (skips Mesa's GL probe, ~60 MB RSS); override
-  with `WGPU_BACKEND`.
-- RAM cost of the GPU path, measured on the reference machine (demo mode,
-  release): PSS ~117 MB with wgpu vs ~25-28 MB with tiny-skia (+90 MB, almost
-  entirely the proprietary NVIDIA driver stack — Private_Dirty delta is only
-  ~20 MB). On Mesa drivers (Intel/AMD) the footprint should be lower.
+  kept as automatic fallback for machines without a usable GPU stack. The
+  software raster path was the source of the interaction lag: every frame re-
+  rasterized all rounded rects through tiny-skia's anti-aliased scan pipeline
+  on the CPU (66-250 ms/frame in debug, ~15 ms/frame in release), pinning a
+  core at 30-100% CPU. With wgpu: idle/hover/scroll all sit at ~1% CPU and
+  the big chat scroll rate goes from ~24 to ~380 rendered fps.
+- **RAM: the wgpu GL backend is the default** — measured on the reference
+  machine (NVIDIA, Wayland, demo mode, release): PSS 47 MB on EGL/GL vs
+  115 MB on Vulkan (-68 MB of resident proprietary-Vulkan driver pages) at
+  identical CPU cost and higher scroll throughput. For comparison, the
+  software tiny-skia path sits at 25-28 MB PSS. Override with `WGPU_BACKEND`
+  (`vulkan`, `gles`, …) if a machine has a broken GL stack — the tiny-skia
+  fallback still catches total GPU failure.
 - Rewrote the UI on **Iced (tiny-skia software backend)** — replaces the
   custom winit/softbuffer renderer. Roughly half the RAM (~30 MB RSS), with
   headless-tested application state.
