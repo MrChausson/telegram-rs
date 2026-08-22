@@ -90,6 +90,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   behaviour for honest before/after numbers: at 1500 messages the virtualized
   list sustains **79 fps vs 63 fps** unvirtualized on the reference machine,
   with the per-frame cost staying flat as the history grows.
+- **FPS instrumentation now reports the TRUE presented frame rate** (`renders_s`,
+  counted in the redraw path), not the scroll-event cadence. Measured on the
+  reference host: headless per-frame is **3.1 ms under a real fling** (vs
+  **11–17 ms** for the winit client's whole-scene render at the same
+  resolution), and the live loop presents **~127 frames/s with a 5-message
+  chat** vs **~24–29 frames/s** with a 420+ history — i.e. the presented rate is
+  content-bound (per-frame software cost), not a fixed loop cap. Ships
+  `tools/scroll-perf.sh` comparing both cases and a `--continuous` redraw mode.
+  **Debug builds are ~8× slower (25.6 vs 3.1 ms/frame)**: always use the
+  release binary when checking scroll feel (`cargo run --release`).
 
 ## [v0.2.2] - 2026-08-16
 

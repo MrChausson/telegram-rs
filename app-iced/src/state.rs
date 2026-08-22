@@ -67,6 +67,8 @@ pub struct State {
 
     /// `--perf`: draw the FPS overlay in the top-right corner.
     pub perf_show: bool,
+    /// `--continuous`: request a redraw every 4 ms (constant render loop).
+    pub continuous: bool,
     /// Samples of recent frame times (ms) used by the overlay.
     perf_frames: std::collections::VecDeque<f32>,
     /// Instant of the previous cadence sample.
@@ -75,13 +77,12 @@ pub struct State {
     perf_scroll_events: u64,
     /// Wall-clock of the previous cadence tick (for renders/sec).
     perf_tick_last: std::time::Instant,
-    /// Unused perf bookkeeping (kept for the scroll simulation).
-    perf_renders_dt: f32,
-    perf_renders_delta: f32,
     /// `--scroll-perf=SECS`: simulate a self-driven fling (real update→view→
     /// present turns) for end-to-end scroll-rate measurement. Seconds left.
     pub scroll_perf_dur: f32,
     /// Elapsed simulated scroll time (ms).
+    /// Wall-clock start of the current scroll-perf run (for renders/sec).
+    perf_wall0: std::time::Instant,
     perf_sim_time: f32,
     /// Ping-pong phase for the synthetic scroll offset.
     perf_sim_phase: f32,
@@ -110,14 +111,14 @@ impl State {
             scroll_to_bottom: false,
             scroll_offset: 0.0,
             perf_show: false,
+            continuous: false,
             perf_frames: std::collections::VecDeque::new(),
             perf_last: std::time::Instant::now(),
             perf_scroll_events: 0,
-            perf_renders_dt: 0.0,
-            perf_renders_delta: 1.0,
             perf_tick_last: std::time::Instant::now(),
             scroll_perf_dur: 0.0,
             perf_sim_time: 0.0,
+            perf_wall0: std::time::Instant::now(),
             perf_sim_phase: 0.0,
         }
     }
@@ -139,6 +140,13 @@ impl State {
     pub fn with_scroll_perf(mut self, secs: f32) -> Self {
         self.scroll_perf_dur = secs;
         self.perf_show = true;
+        self
+    }
+
+    /// `--continuous`: redraw continuously (asks for a frame every 4 ms) so the
+    /// compositor always gets a fresh frame, defeating any event-only throttling.
+    pub fn with_continuous(mut self, on: bool) -> Self {
+        self.continuous = on;
         self
     }
 
@@ -239,7 +247,8 @@ impl State {
                 let sum: f32 = self.perf_frames.iter().sum();
                 let avg = sum / n as f32;
                 let renders = crate::rendered_since();
-                let span = self.perf_sim_time.max(1.0);
+                let span = self.perf_wall0.elapsed().as_secs_f32() * 1000.0;
+                let span = span.max(1.0);
                 let rps = renders as f32 * (1000.0 / span);
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .create(true)

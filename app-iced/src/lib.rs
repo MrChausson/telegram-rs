@@ -76,6 +76,8 @@ pub enum Message {
     Scrolled(f32),
     /// Periodic tick (only useful with `--perf`): samples the frame cadence.
     PerfTick,
+    /// Continuous-redraw tick (see `--continuous`): only asks for a redraw.
+    PerfTickC,
 }
 
 fn boot() -> (State, Task<Message>) {
@@ -83,6 +85,7 @@ fn boot() -> (State, Task<Message>) {
     let open_first = std::env::args().any(|a| a == "--open-first");
     let big = std::env::args().any(|a| a == "--demo-big");
     let perf = std::env::args().any(|a| a == "--perf");
+    let continuous = std::env::args().any(|a| a == "--continuous");
     let scroll_perf = std::env::args()
         .find_map(|a| a.strip_prefix("--scroll-perf=").and_then(|v| v.parse::<f32>().ok()))
         .unwrap_or(0.0);
@@ -90,6 +93,7 @@ fn boot() -> (State, Task<Message>) {
     let state = State::new(req_tx)
         .with_auto_open_first(open_first || demo)
         .with_perf(perf)
+        .with_continuous(continuous)
         .with_scroll_perf(scroll_perf);
     (state, Task::none())
 }
@@ -150,6 +154,11 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::LoginChanged(text) => state.login_input = text,
         Message::LoginSubmit => submit_login(state),
         Message::LoginBack => login_back(state),
+        Message::PerfTickC => {
+            // Continuous redraw loop: the message alone already scheduled a
+            // redraw; also keep the cadence log (renders/sec) honest.
+            state.on_perf_tick();
+        }
         Message::Scrolled(y) => state.on_scrolled(y),
         Message::PerfTick => {
             if state.scroll_perf_dur > 0.0 {
@@ -1248,8 +1257,13 @@ fn subscription(state: &State) -> iced::Subscription<Message> {
         _ => None,
     });
     let timer = if state.scroll_perf_dur > 0.0 {
-        // 60 Hz synthetic fling for end-to-end scroll-rate measurement.
-        iced::time::every(std::time::Duration::from_millis(16)).map(|_| Message::PerfTick)
+        // ~200 Hz synthetic fling for end-to-end scroll-rate measurement.
+        iced::time::every(std::time::Duration::from_millis(5)).map(|_| Message::PerfTick)
+    } else if state.continuous {
+        // Continuous redraw loop (mirrors the winit client's always-render
+        // behaviour): burns CPU but guarantees the compositor always gets a
+        // new frame, defeating any event-triggered-only throttling.
+        iced::time::every(std::time::Duration::from_millis(4)).map(|_| Message::PerfTickC)
     } else if state.perf_show {
         iced::time::every(std::time::Duration::from_millis(500)).map(|_| Message::PerfTick)
     } else {
