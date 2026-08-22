@@ -201,7 +201,46 @@ fn login_back(state: &mut State) {
     }
 }
 
+/// Plain counter of `view()` invocations (== redraws the runtime started).
+/// The runtime redraws once per `RedrawRequested`, so this tracks the ACTUAL
+/// frame-presentation rate, as opposed to the scroll-event cadence the FPS
+/// badge averages. Exposed to `state` for the `--perf` log.
+static RENDERED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Bump + read the redraw counter (see [`RENDERED`]).
+pub fn rendered_since() -> u64 {
+    use std::sync::atomic::Ordering;
+    RENDERED.swap(0, Ordering::SeqCst)
+}
+
+/// Rolling frames-per-second measured from ACTUAL `view()` calls (== presents
+/// the runtime performed), so the `--perf` badge shows the real display rate —
+/// not the scroll-event cadence, which over-states it during floods.
+pub fn rendered_per_second() -> f32 {
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    static TIMES: std::sync::OnceLock<Mutex<std::collections::VecDeque<Instant>>> =
+        std::sync::OnceLock::new();
+    let times = TIMES.get_or_init(|| Mutex::new(std::collections::VecDeque::new()));
+
+    let now = Instant::now();
+    if let Ok(mut t) = times.lock() {
+        t.push_back(now);
+        while t.front().is_some_and(|x| now.duration_since(*x).as_secs_f32() > 1.0) {
+            t.pop_front();
+        }
+        t.len() as f32
+    } else {
+        0.0
+    }
+}
+
 fn view(state: &State) -> Element<'_> {
+    use std::sync::atomic::Ordering;
+    RENDERED.fetch_add(1, Ordering::SeqCst);
+    // Entry into the redraw path: bump the display-fps rolling window.
+    let _ = rendered_per_second();
     if state.viewer.is_some() {
         return viewer_view(state);
     }
@@ -463,7 +502,7 @@ fn conversation_pane(state: &State) -> Element<'_> {
         avatar_path.as_deref(),
         state.typing,
         if state.perf_show {
-            Some(format!("{} FPS", state.fps()))
+            Some(format!("{} FPS", rendered_per_second().round()))
         } else {
             None
         },

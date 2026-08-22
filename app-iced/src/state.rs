@@ -73,6 +73,11 @@ pub struct State {
     perf_last: std::time::Instant,
     /// Scroll events since the last `TG_PERF_LOG` sample (event-delivery probe).
     perf_scroll_events: u64,
+    /// Wall-clock of the previous cadence tick (for renders/sec).
+    perf_tick_last: std::time::Instant,
+    /// Unused perf bookkeeping (kept for the scroll simulation).
+    perf_renders_dt: f32,
+    perf_renders_delta: f32,
     /// `--scroll-perf=SECS`: simulate a self-driven fling (real update→view→
     /// present turns) for end-to-end scroll-rate measurement. Seconds left.
     pub scroll_perf_dur: f32,
@@ -108,6 +113,9 @@ impl State {
             perf_frames: std::collections::VecDeque::new(),
             perf_last: std::time::Instant::now(),
             perf_scroll_events: 0,
+            perf_renders_dt: 0.0,
+            perf_renders_delta: 1.0,
+            perf_tick_last: std::time::Instant::now(),
             scroll_perf_dur: 0.0,
             perf_sim_time: 0.0,
             perf_sim_phase: 0.0,
@@ -145,15 +153,26 @@ impl State {
     pub fn on_perf_tick(&mut self) {
         self.sample_frame_time();
         // Persistent cadence log (undocumented, used by the perf harness):
-        // `--perf` with `TG_PERF_LOG` writes "fps=<n> ms=<avg>" every ~500 ms.
+        // `--perf` with `TG_PERF_LOG` writes "fps=<n> ms=<avg> renders=/s"
+        // every ~500 ms. `fps` is the scroll-event update rate; `renders`
+        // is the ACTUAL redraw/present rate (this is what you see).
         if let Ok(path) = std::env::var("TG_PERF_LOG") {
             let n = self.perf_frames.len();
             let events = self.perf_scroll_events;
             self.perf_scroll_events = 0;
+            let renders = crate::rendered_since();
+            let now = std::time::Instant::now();
+            let span = now.duration_since(self.perf_tick_last).as_secs_f32() * 1000.0;
+            self.perf_tick_last = now;
+            let span = span.max(1.0);
             if n >= 2 {
                 let sum: f32 = self.perf_frames.iter().sum();
                 let avg = sum / n as f32;
-                let line = format!("fps={:.0} ms={avg:.2} events={events}\n", 1000.0 / avg);
+                let rps = renders as f32 * (1000.0 / span);
+                let line = format!(
+                    "fps={:.0} ms={avg:.2} events={events} renders={renders} renders_s={rps:.0}\n",
+                    1000.0 / avg
+                );
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -219,14 +238,20 @@ impl State {
             if n >= 4 {
                 let sum: f32 = self.perf_frames.iter().sum();
                 let avg = sum / n as f32;
+                let renders = crate::rendered_since();
+                let span = self.perf_sim_time.max(1.0);
+                let rps = renders as f32 * (1000.0 / span);
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(path)
                 {
                     let _ = f.write_all(
-                        format!("FINAL fps={:.0} ms={avg:.2} n={n}\n", 1000.0 / avg)
-                            .as_bytes(),
+                        format!(
+                            "FINAL fps={:.0} ms={avg:.2} renders={renders} renders_s={rps:.0} n={n}\n",
+                            1000.0 / avg
+                        )
+                        .as_bytes(),
                     );
                 }
             }

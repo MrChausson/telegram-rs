@@ -30,5 +30,6 @@ export TG_PERF_LOG="$LOG"
 timeout "$((RUN + 40))s" "$BIN" --demo --demo-big --scroll-perf="$RUN" >/dev/null 2>&1
 
 echo "== $TAG =="
+# FINAL writes: fps (event-update cadence) and renders_s (TRUE presented fps).
 grep FINAL "$LOG" || echo "pas de mesure (fenetre Rate croisee?)"
 rm -f "$LOG"
