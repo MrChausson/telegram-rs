@@ -81,11 +81,16 @@ pub enum Message {
 fn boot() -> (State, Task<Message>) {
     let demo = std::env::args().any(|a| a == "--demo");
     let open_first = std::env::args().any(|a| a == "--open-first");
+    let big = std::env::args().any(|a| a == "--demo-big");
     let perf = std::env::args().any(|a| a == "--perf");
-    let req_tx = network::spawn_network(demo);
+    let scroll_perf = std::env::args()
+        .find_map(|a| a.strip_prefix("--scroll-perf=").and_then(|v| v.parse::<f32>().ok()))
+        .unwrap_or(0.0);
+    let req_tx = network::spawn_network(demo, big);
     let state = State::new(req_tx)
         .with_auto_open_first(open_first || demo)
-        .with_perf(perf);
+        .with_perf(perf)
+        .with_scroll_perf(scroll_perf);
     (state, Task::none())
 }
 
@@ -146,7 +151,13 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::LoginSubmit => submit_login(state),
         Message::LoginBack => login_back(state),
         Message::Scrolled(y) => state.on_scrolled(y),
-        Message::PerfTick => state.on_perf_tick(),
+        Message::PerfTick => {
+            if state.scroll_perf_dur > 0.0 {
+                state.advance_scroll_sim();
+            } else {
+                state.on_perf_tick();
+            }
+        }
     }
     if state.scroll_to_bottom {
         state.scroll_to_bottom = false;
@@ -802,6 +813,11 @@ pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
     let out_at = |i: usize| state.messages[i].out;
     let gap_between = |a: bool, b: bool| if a == b { 3.0 } else { 10.0 };
 
+    // Undocumented perf-comparison switch: force the pre-virtualization,
+    // build-every-row-per-frame behaviour (used by `tools/scroll-perf.sh` to
+    // quantify how much virtualization buys).
+    let no_virt = std::env::var("TG_NO_VIRT").is_ok();
+
     // Estimated row heights + cumulative top offsets (content coordinates).
     let heights: Vec<f32> = state
         .messages
@@ -830,17 +846,20 @@ pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
     let total = y;
 
     // Visible window from the last notified scroll offset.
-    let offset = state.scroll_offset.max(0.0);
     let mut start = 0usize;
-    while start < n && tops[start] + heights[start] + menu_h[start] < offset {
-        start += 1;
+    let mut end = n;
+    if !no_virt {
+        let offset = state.scroll_offset.max(0.0);
+        while start < n && tops[start] + heights[start] + menu_h[start] < offset {
+            start += 1;
+        }
+        end = start;
+        while end < n && tops[end] < offset + view_h {
+            end += 1;
+        }
+        start = start.saturating_sub(LIST_OVERSCAN);
+        end = (end + LIST_OVERSCAN).min(n);
     }
-    let mut end = start;
-    while end < n && tops[end] < offset + view_h {
-        end += 1;
-    }
-    start = start.saturating_sub(LIST_OVERSCAN);
-    end = (end + LIST_OVERSCAN).min(n);
 
     let top_pad = tops[start];
     let bottom_pad = total - tops.get(end).copied().unwrap_or(total);
@@ -1189,7 +1208,10 @@ fn subscription(state: &State) -> iced::Subscription<Message> {
         }
         _ => None,
     });
-    let timer = if state.perf_show {
+    let timer = if state.scroll_perf_dur > 0.0 {
+        // 60 Hz synthetic fling for end-to-end scroll-rate measurement.
+        iced::time::every(std::time::Duration::from_millis(16)).map(|_| Message::PerfTick)
+    } else if state.perf_show {
         iced::time::every(std::time::Duration::from_millis(500)).map(|_| Message::PerfTick)
     } else {
         iced::Subscription::none()
@@ -1199,12 +1221,31 @@ fn subscription(state: &State) -> iced::Subscription<Message> {
 
 /// Application entry point (called from the `main.rs` binary of this crate).
 pub fn run() -> iced::Result {
+    let (w, h) = window_size_from_args();
     iced::application(boot, update, view)
         .subscription(subscription)
-        .window_size((1100.0, 700.0))
+        .window_size((w, h))
         .title("tg — Iced prototype")
         .theme(iced::Theme::Dark)
         .run()
+}
+
+/// Parses an optional `--win=WxH` (logical px) to shrink the software-rendered
+/// buffer for perf measurement (`--win=700x450` isolates compositor present
+/// cost from our per-frame view cost).
+fn window_size_from_args() -> (f32, f32) {
+    for arg in std::env::args() {
+        if let Some(rest) = arg.strip_prefix("--win=") {
+            if let Some((w, h)) = rest.split_once('x') {
+                if let (Ok(w), Ok(h)) = (w.parse::<f32>(), h.parse::<f32>()) {
+                    if w >= 200.0 && h >= 150.0 {
+                        return (w, h);
+                    }
+                }
+            }
+        }
+    }
+    (1100.0, 700.0)
 }
 
 #[cfg(test)]

@@ -134,8 +134,11 @@ pub fn api_hash(env: &HashMap<String, String>) -> Option<String> {
 /// Spawns the network thread and returns the request sender for the UI.
 ///
 /// `demo=true` runs the canned offline backend (with a photo message so image
-/// rendering can be tested too); `false` connects to the real account.
-pub fn spawn_network(demo: bool) -> UnboundedSender<Request> {
+/// rendering can be tested too); `big=true` seeds the first demo chat with a
+/// ~400-message history so scroll performance can be exercised (the 5-message
+/// demo chat never reproduces the lag of a real history). `false` connects to
+/// the real account.
+pub fn spawn_network(demo: bool, big: bool) -> UnboundedSender<Request> {
     let (ui_tx, ui_rx) = mpsc::unbounded_channel::<UiMessage>();
     let (req_tx, mut req_rx) = mpsc::unbounded_channel::<Request>();
     let net_tx = req_tx.clone();
@@ -154,7 +157,7 @@ pub fn spawn_network(demo: bool) -> UnboundedSender<Request> {
                 .expect("tokio runtime");
             rt.block_on(async move {
                 if demo {
-                    serve_demo(&ui_tx, &mut req_rx).await;
+                    serve_demo(&ui_tx, &mut req_rx, big).await;
                     std::future::pending::<()>().await;
                 }
                 let session_path = session_path();
@@ -369,10 +372,12 @@ fn ensure_demo_assets(chats: &[DemoChat]) -> DemoAssets {
 
 /// Offline "backend" for `--demo`: replays canned dialogs/messages, echoes
 /// edits/deletes, and includes generated avatar/photo images so the full
-/// image pipeline is exercised.
+/// image pipeline is exercised. `big=true` extends the first chat (Camille)
+/// to a ~400-message generated history for scroll-performance measurement.
 async fn serve_demo(
     ui_tx: &mpsc::UnboundedSender<UiMessage>,
     req_rx: &mut mpsc::UnboundedReceiver<Request>,
+    big: bool,
 ) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -410,6 +415,33 @@ async fn serve_demo(
         let chat = chats.iter().find(|c| c.id == id);
         let photo = chat.and_then(|c| photo_of(c));
         match id {
+            1001 if big => {
+                let count: usize = std::env::var("TG_BIG_N")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(420);
+                (0..count)
+                    .map(|i| {
+                    let id = i as i32;
+                    let body = if i % 7 == 0 {
+                        "Un message plus long pour forcer le retour à la ligne et tester le calcul de hauteur des bulles sur plusieurs lignes, avec quelques emojis 🎉 et un peu de texte, encore un peu plus de texte pour mesurer le wrap.".to_string()
+                    } else {
+                        format!(
+                            "Message {id} de la grande conversation de test — le lent fox saute par-dessus le chien paresseux {id}"
+                        )
+                    };
+                    MsgRow {
+                        id,
+                        text: body,
+                        date: now - (i as i32) * 10,
+                        out: i % 2 == 0,
+                        photo: if i % 40 == 7 { Some((640, 480)) } else { None },
+                        photo_path: if i % 40 == 7 { photo.clone() } else { None },
+                        read: i % 2 == 0,
+                    }
+                })
+                .collect()
+            },
             1001 => vec![
                 MsgRow { id: 1, text: "Salut ! tu as vu ma nouvelle photo ?".to_string(), date: now - 700, out: false, photo: None, photo_path: None, read: false },
                 MsgRow { id: 2, text: "Trop jolie ! tu l'as prise où ?".to_string(), date: now - 650, out: false, photo: None, photo_path: None, read: false },

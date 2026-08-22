@@ -4,6 +4,8 @@
 
 use crate::bridge::{ChatRow, MsgRow, Request, UiMessage};
 
+use std::io::Write;
+
 /// Sign-in flow step (only used while unauthenticated).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginStep {
@@ -69,6 +71,15 @@ pub struct State {
     perf_frames: std::collections::VecDeque<f32>,
     /// Instant of the previous cadence sample.
     perf_last: std::time::Instant,
+    /// Scroll events since the last `TG_PERF_LOG` sample (event-delivery probe).
+    perf_scroll_events: u64,
+    /// `--scroll-perf=SECS`: simulate a self-driven fling (real update→view→
+    /// present turns) for end-to-end scroll-rate measurement. Seconds left.
+    pub scroll_perf_dur: f32,
+    /// Elapsed simulated scroll time (ms).
+    perf_sim_time: f32,
+    /// Ping-pong phase for the synthetic scroll offset.
+    perf_sim_phase: f32,
 }
 
 impl State {
@@ -96,6 +107,10 @@ impl State {
             perf_show: false,
             perf_frames: std::collections::VecDeque::new(),
             perf_last: std::time::Instant::now(),
+            perf_scroll_events: 0,
+            scroll_perf_dur: 0.0,
+            perf_sim_time: 0.0,
+            perf_sim_phase: 0.0,
         }
     }
 
@@ -111,15 +126,43 @@ impl State {
         self
     }
 
+    /// `--scroll-perf=SECS`: self-drive a synthetic fling for end-to-end
+    /// scroll-rate measurement (see [`Self::advance_scroll_sim`]).
+    pub fn with_scroll_perf(mut self, secs: f32) -> Self {
+        self.scroll_perf_dur = secs;
+        self.perf_show = true;
+        self
+    }
+
     /// Records the message list's absolute scroll offset (from `on_scroll`).
     pub fn on_scrolled(&mut self, y: f32) {
         self.scroll_offset = y;
+        self.perf_scroll_events += 1;
         self.sample_frame_time();
     }
 
     /// Periodic tick (only active under `--perf`): updates the FPS estimate.
     pub fn on_perf_tick(&mut self) {
         self.sample_frame_time();
+        // Persistent cadence log (undocumented, used by the perf harness):
+        // `--perf` with `TG_PERF_LOG` writes "fps=<n> ms=<avg>" every ~500 ms.
+        if let Ok(path) = std::env::var("TG_PERF_LOG") {
+            let n = self.perf_frames.len();
+            let events = self.perf_scroll_events;
+            self.perf_scroll_events = 0;
+            if n >= 2 {
+                let sum: f32 = self.perf_frames.iter().sum();
+                let avg = sum / n as f32;
+                let line = format!("fps={:.0} ms={avg:.2} events={events}\n", 1000.0 / avg);
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    let _ = f.write_all(line.as_bytes());
+                }
+            }
+        }
     }
 
     /// Current FPS estimate from the recent frame-time samples (0 when idle).
@@ -136,12 +179,56 @@ impl State {
         let now = std::time::Instant::now();
         let dt = now.duration_since(self.perf_last).as_secs_f32() * 1000.0;
         self.perf_last = now;
-        // Ignore absurd gaps (idle between interactions) so the average
-        // reflects the render cadence while scrolling, not pauses.
-        if dt > 0.0 && dt < 500.0 {
+        // Ignore gaps that are idle pauses (the 500 ms PerfTick fires when
+        // there is no input), so the average reflects the render cadence while
+        // scrolling, not pauses — but still catch genuinely slow frames.
+        if dt > 0.0 && dt < 400.0 {
             self.perf_frames.push_back(dt);
-            if self.perf_frames.len() > 60 {
+            if self.perf_frames.len() > 120 {
                 self.perf_frames.pop_front();
+            }
+        }
+    }
+
+    /// One synthetic fling step (only under `--scroll-perf`): brings up the
+    /// virtual window like a real scroll tick and, when the time budget runs
+    /// out, exits so the caller can read `TG_PERF_LOG`.
+    pub fn advance_scroll_sim(&mut self) {
+        const STEP_MS: f32 = 16.0;
+        let max = (self.messages.len() * 70) as f32;
+        let cycle = max * 2.0;
+        self.perf_sim_phase = (self.perf_sim_phase + 46.0) % cycle;
+        let y = if self.perf_sim_phase <= max {
+            self.perf_sim_phase
+        } else {
+            cycle - self.perf_sim_phase
+        };
+        self.on_scrolled(y);
+        self.perf_sim_time += STEP_MS;
+        if self.perf_sim_time >= self.scroll_perf_dur * 1000.0 {
+            // Write a final line via the cadence log, then exit cleanly.
+            self.write_perf_log();
+            std::process::exit(0);
+        }
+    }
+
+    fn write_perf_log(&self) {
+        use std::io::Write;
+        if let Ok(path) = std::env::var("TG_PERF_LOG") {
+            let n = self.perf_frames.len();
+            if n >= 4 {
+                let sum: f32 = self.perf_frames.iter().sum();
+                let avg = sum / n as f32;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    let _ = f.write_all(
+                        format!("FINAL fps={:.0} ms={avg:.2} n={n}\n", 1000.0 / avg)
+                            .as_bytes(),
+                    );
+                }
             }
         }
     }

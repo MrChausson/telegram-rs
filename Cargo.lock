@@ -132,6 +132,7 @@ name = "app-iced"
 version = "0.2.2"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "chrono",
  "criterion",
  "grammers-client",

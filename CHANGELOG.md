@@ -80,6 +80,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   re-rasterized on every frame — scroll lag again.
 - `--perf` flag: draws a live FPS badge in the conversation header (sampled on
   scroll + a 500 ms tick) to measure on the real display.
+- **End-to-end scroll measurement** without input bindings: `--scroll-perf=SECS`
+  self-drives a synthetic fling through the real update → view → layout → draw
+  → present pipeline and logs per-frame ms / fps (`TG_PERF_LOG`), so scroll
+  performance is measurable on any machine. `tools/scroll-perf.sh` runs it
+  automatically. `--demo-big` (+`TG_BIG_N`) seeds a ~420-message chat to
+  exercise long histories, and `--win=WxH` shrinks the render buffer.
+  `TG_NO_VIRT=1` restores the pre-virtualization "build every row per frame"
+  behaviour for honest before/after numbers: at 1500 messages the virtualized
+  list sustains **79 fps vs 63 fps** unvirtualized on the reference machine,
+  with the per-frame cost staying flat as the history grows.
 
 ## [v0.2.2] - 2026-08-16
 
