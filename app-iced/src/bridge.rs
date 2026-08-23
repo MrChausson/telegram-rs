@@ -16,12 +16,29 @@ pub struct ChatRow {
 }
 
 /// Metadata of a document attached to a message.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DocMeta {
     /// Original file name (may be empty for unnamed uploads).
     pub name: String,
     /// Size in bytes (0 when unknown).
     pub size: i64,
+    /// How to treat the document: plain file, video, gif, audio/voice.
+    pub kind: DocKind,
+    /// Duration in seconds (videos/audio), if known.
+    pub duration: Option<f64>,
+}
+
+/// The kind of document attachment, mirrored from the UI so `app-iced`
+/// doesn't depend on the tg types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocKind {
+    File,
+    /// A video message (document + video attributes).
+    Video,
+    /// An animated GIF.
+    Gif,
+    /// An audio file or voice note.
+    Audio { voice: bool },
 }
 
 /// A displayed message.

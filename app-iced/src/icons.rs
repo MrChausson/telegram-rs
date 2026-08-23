@@ -28,6 +28,9 @@ pub enum Icon {
     Forward,
     FileDoc,
     Close,
+    Video,
+    Audio,
+    Gif,
 }
 
 fn rgb(c: (u8, u8, u8)) -> Color {
@@ -269,6 +272,66 @@ fn draw_icon(pixmap: &mut Pixmap, kind: Icon, cx: f32, cy: f32, size: f32, color
             polyline(pixmap, &[(cx - d, cy - d), (cx + d, cy + d)], color, w);
             polyline(pixmap, &[(cx - d, cy + d), (cx + d, cy - d)], color, w);
         }
+        Icon::Video => {
+            // Film strip: rounded frame + a play triangle in the middle.
+            let w = size * 0.07;
+            let x0 = cx - half * 0.72;
+            let y0 = cy - half * 0.55;
+            let x1 = cx + half * 0.72;
+            let y1 = cy + half * 0.55;
+            polyline(
+                pixmap,
+                &[(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)],
+                color,
+                w,
+            );
+            // Play triangle.
+            polyline(
+                pixmap,
+                &[
+                    (cx - half * 0.2, cy - half * 0.28),
+                    (cx + half * 0.35, cy),
+                    (cx - half * 0.2, cy + half * 0.28),
+                ],
+                color,
+                w * 1.3,
+            );
+        }
+        Icon::Audio => {
+            // Musical note: stem + filled head + a beam.
+            let w = size * 0.09;
+            let x0 = cx - half * 0.5;
+            let y0 = cy - half * 0.05;
+            let head_r = size * 0.11;
+            fill_circle(pixmap, x0, y0 + head_r, head_r, color);
+            polyline(pixmap, &[(x0, y0 + head_r), (x0, y0 - size * 0.42)], color, w);
+            // Beam curving to the right.
+            polyline(
+                pixmap,
+                &[
+                    (x0, y0 - size * 0.42),
+                    (x0 + size * 0.42, y0 - size * 0.2),
+                ],
+                color,
+                w,
+            );
+        }
+        Icon::Gif => {
+            // Three vertical bars of decreasing height, like a mini 'GIF'.
+            let w = size * 0.12;
+            let x0 = cx - half * 0.6;
+            let y0 = cy;
+            let heights = [size * 0.6, size * 0.42, size * 0.72];
+            for (i, h) in heights.iter().enumerate() {
+                let px = x0 + i as f32 * size * 0.3;
+                polyline(
+                    pixmap,
+                    &[(px, y0 + h * 0.5), (px, y0 - h * 0.5)],
+                    color,
+                    w,
+                );
+            }
+        }
         Icon::Tick { read } => {
             let w = size * 0.09;
             let x0 = cx - half;
@@ -382,6 +445,9 @@ mod tests {
             Icon::Forward,
             Icon::FileDoc,
             Icon::Close,
+            Icon::Video,
+            Icon::Audio,
+            Icon::Gif,
         ] {
             let mut c = canvas();
             draw_icon(&mut c, kind, 40.0, 40.0, 24.0, (255, 255, 255));

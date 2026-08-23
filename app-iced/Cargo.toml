@@ -25,6 +25,13 @@ tiny-skia.workspace = true
 image-codec = { package = "image", version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # Native file picker for the attach 📎 button (xdg-desktop-portal on Linux).
 rfd = "0.15"
+# In-app voice-note playback (rodio decodes the downloaded audio files).
+rodio = { version = "0.19", default-features = false, features = ["flac", "vorbis", "wav", "mp3", "symphonia-all"] }
+# Desktop notifications for incoming messages in non-open chats (Wayland-safe
+# via libdbus / xdg-desktop-portal).
+notify-rust = "4"
+# System tray (StatusNotifier on Wayland/X11, no GTK): open/quit from the icon.
+ksni = { version = "0.3", default-features = false, features = ["tokio"] }
 
 # Perf regression harness: `cargo bench -p app-iced` builds the real view
 # headlessly (lib target) and measures build/layout/raster time vs message count.

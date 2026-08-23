@@ -7,12 +7,15 @@
 //! A library target (`app_iced`) is exposed so the `benches/frame.rs`
 //! performance harness can drive the exact same view code headlessly.
 
+pub mod audio;
 pub mod bridge;
+pub mod tray;
 pub mod icons;
 pub mod network;
 pub mod state;
 pub mod theme;
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 use iced::widget::{
     button, column, container, image, mouse_area, row, scrollable, text, text_input,
@@ -88,6 +91,10 @@ pub enum Message {
     SearchChanged(String),
     /// A search result row was clicked.
     SearchHitClicked(usize),
+    /// A voice note was clicked: play / pause / stop it.
+    VoiceClicked { chat_id: i64, msg_id: i32, path: String },
+    /// Periodic tick while a voice note is playing (progress + completion).
+    VoiceTick,
     /// Composer text changed.
     ComposerChanged(String),
     /// Composer submitted (send / edit).
@@ -113,8 +120,7 @@ pub enum Message {
 }
 
 fn boot() -> (State, Task<Message>) {
-    let demo = std::env::args().any(|a| a == "--demo");
-    let open_first = std::env::args().any(|a| a == "--open-first");
+    let demo = std::env::args().any(|a| a == "--demo");    let open_first = std::env::args().any(|a| a == "--open-first");
     let big = std::env::args().any(|a| a == "--demo-big");
     let perf = std::env::args().any(|a| a == "--perf");
     let continuous = std::env::args().any(|a| a == "--continuous");
@@ -122,7 +128,12 @@ fn boot() -> (State, Task<Message>) {
         .find_map(|a| a.strip_prefix("--scroll-perf=").and_then(|v| v.parse::<f32>().ok()))
         .unwrap_or(0.0);
     let req_tx = network::spawn_network(demo, big);
-    let state = State::new(req_tx)
+    // System tray: best-effort (silent no-op without a StatusNotifier host).
+    let tray_actions = std::sync::Arc::new(tray::TrayActions::default());
+    tray::start(tray_actions.clone());
+    let mut state = State::new(req_tx);
+    state.tray_actions = tray_actions;
+    let state = state
         .with_auto_open_first(open_first || demo)
         .with_perf(perf)
         .with_continuous(continuous)
@@ -203,6 +214,23 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::CloseSearch => state.close_search(),
         Message::SearchChanged(text) => state.search_changed(text),
         Message::SearchHitClicked(idx) => state.click_search_hit(idx),
+        Message::VoiceClicked { chat_id, msg_id, path } => {
+            let cached = state
+                .messages
+                .iter()
+                .find(|m| m.id == msg_id)
+                .is_some_and(|m| m.doc_path.is_some());
+            if cached {
+                state.voice_click(chat_id, msg_id, &path);
+            } else {
+                // Not downloaded yet: fetch it, then DocReady auto-plays.
+                let _ = state.req_tx.send(Request::DownloadDoc {
+                    chat_id,
+                    msg_id,
+                });
+            }
+        }
+        Message::VoiceTick => state.on_voice_tick(),
         Message::ComposerChanged(text) => {
             state.composer = text;
             // Notify the server while the user types (best-effort).
@@ -247,6 +275,13 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         if let Some(y) = state.take_scroll_target() {
             return scroll_to::<Message>(MSG_LIST_ID, AbsoluteOffset { x: 0.0, y });
         }
+    }
+    // Tray: consume the open/quit requests from the tray thread.
+    if state.tray_actions.open.swap(false, Ordering::SeqCst) {
+        // Save the window to show (dealt with by the shell; unsaved is fine).
+    }
+    if state.tray_actions.quit.swap(false, Ordering::SeqCst) {
+        std::process::exit(0);
     }
     if state.scroll_to_bottom {
         state.scroll_to_bottom = false;
@@ -1107,41 +1142,162 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
             .map(|from| quote_block("Transféré", from.clone()))
     };
 
-    // Bubble content: document card, photo or text.
+    // Bubble content: media card (video / gif / audio / voice / file), photo
+    // or plain text.
     let body: Element<'a> = if let Some(doc) = &m.doc {
-        let doc_name = if doc.name.is_empty() { "Fichier" } else { doc.name.as_str() };
+        let doc_name = if doc.name.is_empty() {
+            match doc.kind {
+                bridge::DocKind::Video => "Vidéo",
+                bridge::DocKind::Gif => "GIF",
+                bridge::DocKind::Audio { .. } => "Audio",
+                bridge::DocKind::File => "Fichier",
+            }
+            .to_string()
+        } else {
+            doc.name.clone()
+        };
+        // Metadata line: duration (audio/video) + size + action status.
+        let dur = doc.duration.map(duration_fmt);
+        let mut meta = match (doc.kind, dur) {
+            (bridge::DocKind::Video, Some(d)) => format!("{d} · "),
+            (bridge::DocKind::Audio { .. }, Some(d)) => format!("{d} · "),
+            _ => String::new(),
+        };
+        if doc.size > 0 {
+            meta.push_str(&fmt_size(doc.size));
+            meta.push_str(" · ");
+        }
         let status = if m.uploading.is_some() {
             "Envoi…".to_string()
         } else if m.doc_path.is_some() {
-            "Ouvrir".to_string()
+            match doc.kind {
+                bridge::DocKind::Audio { voice: true } => "Lire".to_string(),
+                _ => "Ouvrir".to_string(),
+            }
         } else {
-            "Télécharger".to_string()
+            match doc.kind {
+                bridge::DocKind::Audio { voice: true } => "Écouter".to_string(),
+                _ => "Télécharger".to_string(),
+            }
         };
-        column![
-            row![
-                icon(Icon::FileDoc, theme::ACCENT, 30.0),
+        meta.push_str(&status);
+        let media_icon = match doc.kind {
+            bridge::DocKind::Video => Icon::Video,
+            bridge::DocKind::Gif => Icon::Gif,
+            bridge::DocKind::Audio { .. } => Icon::Audio,
+            bridge::DocKind::File => Icon::FileDoc,
+        };
+
+        // Voice notes get an inline player: play/pause + progress bar driven
+        // by the audio engine's `state` (no click routing through `click`).
+        let media_card: Element<'a> = match doc.kind {
+            bridge::DocKind::Audio { voice: true } => {
+                let is_this = state
+                    .playing_voice
+                    .as_ref()
+                    .map(|(_, mid, _)| *mid)
+                    == Some(m.id);
+                let pct = if is_this {
+                    let total = doc.duration.unwrap_or(0.0).max(0.1);
+                    (state.voice_elapsed / total as f32).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let bar = container(
+                    container(iced::widget::Space::new())
+                        .width(Length::FillPortion((pct * 100.0).max(1.0) as u16))
+                        .height(Length::Fill)
+                        .style(|_| container::Style {
+                            background: Some(iced::Background::Color(rgb(theme::ACCENT))),
+                            border: iced::Border {
+                                radius: 2.0.into(),
+                                ..iced::Border::default()
+                            },
+                            ..container::Style::default()
+                        }),
+                )
+                .width(Length::Fill)
+                .height(4.0)
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(rgb(theme::DIVIDER))),
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..iced::Border::default()
+                    },
+                    ..container::Style::default()
+                });
+                let play_state = if is_this && state.voice_playing {
+                    // Draw a pause glyph (two bars) with an existing icon-less
+                    // approach: use a Stop-like text label colored accent.
+                    "⏸︎"
+                } else {
+                    "▶"
+                };
+                let voice_path = m.doc_path.clone().unwrap_or_default();
+                let click = button(
+                    row![
+                        text(play_state).size(18.0).color(rgb(theme::ACCENT)),
+                        bar,
+                        text(duration_fmt(doc.duration.unwrap_or(0.0)))
+                            .size(theme::font::TIMESTAMP)
+                            .color(rgb(theme::TEXT_SECONDARY)),
+                    ]
+                    .spacing(10)
+                    .align_y(Alignment::Center)
+                    .width(Length::Fill),
+                )
+                .on_press(Message::VoiceClicked {
+                    chat_id: state.open_chat.unwrap_or(0),
+                    msg_id: m.id,
+                    path: voice_path,
+                })
+                .padding(0)
+                .style(flat_button)
+                .width(Length::Fill);
                 column![
-                    text(doc_name.to_string())
+                    click,
+                    if m.text.is_empty() {
+                        horizontal_spacer()
+                    } else {
+                        text(&m.text)
+                            .size(theme::font::MESSAGE)
+                            .color(Color::WHITE)
+                            .into()
+                    },
+                ]
+                .spacing(6)
+                .into()
+            }
+            _ => column![
+                row![
+                    icon(media_icon, theme::ACCENT, 30.0),
+                    column![
+                        text(doc_name)
+                            .size(theme::font::MESSAGE)
+                            .color(Color::WHITE)
+                            .wrapping(iced::widget::text::Wrapping::None),
+                        text(meta)
+                            .size(theme::font::TIMESTAMP)
+                            .color(rgb(theme::TEXT_SECONDARY)),
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+                if m.text.is_empty() {
+                    horizontal_spacer()
+                } else {
+                    text(&m.text)
                         .size(theme::font::MESSAGE)
                         .color(Color::WHITE)
-                        .wrapping(iced::widget::text::Wrapping::None),
-                    text(format!("{} · {}", fmt_size(doc.size), status))
-                        .size(theme::font::TIMESTAMP)
-                        .color(rgb(theme::TEXT_SECONDARY)),
-                ]
-                .spacing(2)
-                .width(Length::Fill),
+                        .into()
+                },
             ]
-            .spacing(10)
-            .align_y(Alignment::Center),
-            if m.text.is_empty() {
-                horizontal_spacer()
-            } else {
-                text(&m.text).size(theme::font::MESSAGE).color(Color::WHITE).into()
-            },
-        ]
-        .spacing(6)
-        .into()
+            .spacing(6)
+            .into(),
+        }; // `media_card`
+        media_card
     } else if let Some((w, h)) = m.photo {
         if w == 0 || h == 0 {
             // Optimistic media upload before the echo: live progress bar.
@@ -1352,6 +1508,16 @@ fn fmt_size(bytes: i64) -> String {
         format!("{:.0} Ko", b / KB)
     } else {
         format!("{bytes} o")
+    }
+}
+
+/// Formats a media duration in seconds as `m:ss` (or `s`).
+fn duration_fmt(secs: f64) -> String {
+    let secs = secs.max(0.0).round() as i64;
+    if secs >= 60 {
+        format!("{}:{:02}", secs / 60, secs % 60)
+    } else {
+        format!("{}s", secs)
     }
 }
 
@@ -1976,7 +2142,12 @@ fn subscription(state: &State) -> iced::Subscription<Message> {
     } else {
         iced::Subscription::none()
     };
-    iced::Subscription::batch([net, keys, timer])
+    let voice_tick = if state.playing_voice.is_some() {
+        iced::time::every(std::time::Duration::from_millis(250)).map(|_| Message::VoiceTick)
+    } else {
+        iced::Subscription::none()
+    };
+    iced::Subscription::batch([net, keys, timer, voice_tick])
 }
 
 /// Application entry point (called from the `main.rs` binary of this crate).

@@ -21,7 +21,7 @@ pub fn preview_text(text: &str, photo: &Option<(u32, u32)>, doc: &Option<DocMeta
 }
 
 use std::io::Write;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Sign-in flow step (only used while unauthenticated).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,9 +127,21 @@ pub struct State {
     /// search hit already lives in the loaded history).
     pending_jump_id: Option<i32>,
 
+    /// Voice note currently playing (or paused): (chat_id, msg_id, path).
+    pub playing_voice: Option<(i64, i32, String)>,
+    /// True while the voice note is actively playing (not paused).
+    pub voice_playing: bool,
+    /// Seconds elapsed on the current voice note (drives the progress bar).
+    pub voice_elapsed: f32,
+    /// The voice note we just stopped (so a paused→resume doesn't restart).
+    pub voice_paused_path: Option<String>,
+
     /// Monotonic token source for optimistic media sends (ties upload
     /// progress events back to their row).
     next_media_token: u64,
+
+    /// Shared tray flags (open/quit) polled by the shell.
+    pub tray_actions: Arc<crate::tray::TrayActions>,
 
     pub login_step: LoginStep,
     pub login_input: String,
@@ -216,7 +228,12 @@ impl State {
             search_pending: false,
             scroll_target: None,
             pending_jump_id: None,
+            playing_voice: None,
+            voice_playing: false,
+            voice_elapsed: 0.0,
+            voice_paused_path: None,
             next_media_token: 1,
+            tray_actions: Arc::new(crate::tray::TrayActions::default()),
             login_step: LoginStep::Phone,
             login_input: String::new(),
             composer: String::new(),
@@ -548,11 +565,15 @@ impl State {
             }
             UiMessage::DocReady { chat_id, msg_id, path } => {
                 if self.open_chat == Some(chat_id) {
+                    let downloaded = path.clone();
                     for m in &mut self.messages {
                         if m.id == msg_id {
-                            m.doc_path = path;
+                            m.doc_path = downloaded.clone();
                             break;
                         }
+                    }
+                    if let Some(p) = path {
+                        self.doc_downloaded(chat_id, msg_id, &p);
                     }
                     self.invalidate_layout();
                 }
@@ -680,24 +701,100 @@ impl State {
             self.dismiss_menu();
             return;
         }
-        if let Some(m) = self.messages.get(row) {
-            // Document: download on first click, open once cached.
-            if m.doc.is_some() {
-                match &m.doc_path {
-                    Some(path) => self.open_file = Some(path.clone()),
-                    None => {
-                        let _ = self.req_tx.send(Request::DownloadDoc {
-                            chat_id: self.open_chat.unwrap_or(0),
-                            msg_id: m.id,
-                        });
+        let Some(m) = self.messages.get(row) else {
+            return;
+        };
+        let msg: Option<(i32, Option<crate::bridge::DocKind>, Option<String>)> = Some((
+            m.id,
+            m.doc.as_ref().map(|d| d.kind),
+            m.doc_path.clone(),
+        ));
+        let photo_viewer = m.photo_path.clone();
+        // Voice note: toggling playback needs the path; the doc is downloaded
+        // on first click (see the doc branch below).
+        if let Some((msg_id, Some(crate::bridge::DocKind::Audio { voice: true }), Some(path))) = msg
+        {
+            let chat_id = self.open_chat.unwrap_or(0);
+            self.voice_click(chat_id, msg_id, &path);
+            return;
+        }
+        if let Some((msg_id, Some(kind), path)) = msg {
+            match path {
+                Some(path) => {
+                    // Non-voice documents open with the system opener.
+                    if !matches!(kind, crate::bridge::DocKind::Audio { voice: true }) {
+                        self.open_file = Some(path);
                     }
                 }
-                return;
+                None => {
+                    let _ = self.req_tx.send(Request::DownloadDoc {
+                        chat_id: self.open_chat.unwrap_or(0),
+                        msg_id,
+                    });
+                }
             }
-            if let Some(path) = &m.photo_path {
-                self.viewer = Some(path.clone());
+            return;
+        }
+        // Photo attached, and the row isn't a doc.
+        if let Some(path) = photo_viewer {
+            if self
+                .messages
+                .get(row)
+                .is_some_and(|m| m.doc.is_none())
+            {
+                self.viewer = Some(path);
             }
         }
+    }
+
+    /// A voice-note bubble was clicked: play (download handled earlier),
+    /// pause, resume or stop the currently-playing note. Returns the path to
+    /// play as a shell-side action only when playback should start fresh
+    /// (the click on a non-cached voice note triggers a download instead).
+    pub fn voice_click(&mut self, chat_id: i64, msg_id: i32, path: &str) {
+        if self.playing_voice.as_ref() == Some(&(chat_id, msg_id, path.to_string())) {
+            // Same note: toggle pause/play.
+            if crate::audio::is_active() {
+                if self.voice_playing {
+                    crate::audio::pause();
+                } else {
+                    crate::audio::resume();
+                }
+                self.voice_playing = !self.voice_playing;
+            } else {
+                // Finished on its own; restart.
+                self.playing_voice = Some((chat_id, msg_id, path.to_string()));
+                self.voice_elapsed = 0.0;
+                self.voice_playing = crate::audio::play(path);
+            }
+            return;
+        }
+        // Different note (or none): switch.
+        self.playing_voice = Some((chat_id, msg_id, path.to_string()));
+        self.voice_elapsed = 0.0;
+        self.voice_playing = crate::audio::play(path);
+    }
+
+    /// Resolves a `DocReady` for a voice note into playable state (and starts
+    /// playback automatically, matching Telegram: click a voice note → it
+    /// downloads + plays).
+    fn doc_downloaded(&mut self, chat_id: i64, msg_id: i32, path: &str) {
+        let is_voice = self
+            .messages
+            .iter()
+            .find(|m| m.id == msg_id)
+            .is_some_and(|m| {
+                m.doc
+                    .as_ref()
+                    .is_some_and(|d| matches!(d.kind, crate::bridge::DocKind::Audio { voice: true }))
+            });
+        if !is_voice {
+            return;
+        }
+        // The voice note was just downloaded: start playing it immediately.
+        self.playing_voice = Some((chat_id, msg_id, path.to_string()));
+        self.voice_elapsed = 0.0;
+        self.voice_playing = crate::audio::play(path);
     }
 
     /// Right-click over a message row: open the context menu (any message;
@@ -888,7 +985,12 @@ impl State {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         self.messages.push(MsgRow {
-            doc: (!is_photo).then_some(crate::bridge::DocMeta { name, size: 0 }),
+            doc: (!is_photo).then_some(crate::bridge::DocMeta {
+                name: name.clone(),
+                size: 0,
+                kind: crate::bridge::DocKind::Audio { voice: false },
+                duration: None,
+            }),
             photo: is_photo.then_some((0, 0)),
             uploading: Some(0.0),
             upload_token: Some(token),
@@ -907,8 +1009,34 @@ impl State {
         self.invalidate_layout();
     }
 
+/// Periodic tick (500 ms) while a voice note plays: advance the progress bar
+    /// and clear the state once the audio thread reports the file finished.
+    pub fn on_voice_tick(&mut self) {
+        if self.playing_voice.is_none() {
+            return;
+        }
+        // If we're the active note, poll the audio engine for completion.
+        if crate::audio::is_active() {
+            if self.voice_playing {
+                self.voice_elapsed = crate::audio::elapsed_secs();
+            }
+            if crate::audio::finished() {
+                self.playing_voice = None;
+                self.voice_playing = false;
+                self.voice_elapsed = 0.0;
+                crate::audio::stop();
+            }
+        } else if !self.voice_playing {
+            // Paused: keep the bar where it is.
+        }
+    }
+
     /// Open a chat.
     pub fn open_chat(&mut self, id: i64) {
+        crate::audio::stop();
+        self.playing_voice = None;
+        self.voice_playing = false;
+        self.voice_elapsed = 0.0;
         self.open_chat = Some(id);
         self.messages.clear();
         self.loading = true;
