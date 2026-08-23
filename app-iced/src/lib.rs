@@ -328,9 +328,9 @@ fn login_view(state: &State) -> Element<'_> {
     let status = if state.status.is_empty() {
         None
     } else if state.login_error {
-        Some(text(&state.status).size(theme::font::TIMESTAMP as f32).color(rgb(theme::ERROR)))
+        Some(text(&state.status).size(theme::font::TIMESTAMP).color(rgb(theme::ERROR)))
     } else {
-        Some(text(&state.status).size(theme::font::TIMESTAMP as f32).color(rgb(theme::TEXT_SECONDARY)))
+        Some(text(&state.status).size(theme::font::TIMESTAMP).color(rgb(theme::TEXT_SECONDARY)))
     };
 
     let logo = container(
@@ -431,7 +431,7 @@ fn list_pane(state: &State) -> Element<'_> {
         // which made the left items hug the window border).
         container(
             row![
-                text("Chats").size(theme::font::TITLE as f32).color(Color::WHITE),
+                text("Chats").size(theme::font::TITLE).color(Color::WHITE),
                 horizontal_spacer(),
                 icon(Icon::Search, theme::ICON, 20.0),
                 icon(Icon::Compose, theme::ICON, 20.0),
@@ -517,19 +517,19 @@ fn chat_row_button<'a>(row: &'a ChatRow, selected: bool, title: &'a str, sub: &'
     // a built-in ellipsis in iced is handled by `ellipsize` + no wrapping).
     // `title`/`sub` are the pre-ellipsized strings from `State::dialog_short`.
     let name = text(title)
-        .size(theme::font::NAME as f32)
+        .size(theme::font::NAME)
         .color(Color::WHITE)
         .wrapping(iced::widget::text::Wrapping::None)
         .width(Length::Fill);
     let sub_text = text(sub)
-        .size(theme::font::MESSAGE as f32)
+        .size(theme::font::MESSAGE)
         .color(rgb(theme::TEXT_SECONDARY))
         .wrapping(iced::widget::text::Wrapping::None)
         .width(Length::Fill);
 
     let ts: Element<'_> = if row.date > 0 {
         text(theme::cached_time(row.date))
-            .size(theme::font::TIMESTAMP as f32)
+            .size(theme::font::TIMESTAMP)
             .color(rgb(theme::TEXT_SECONDARY))
             .into()
     } else {
@@ -537,7 +537,7 @@ fn chat_row_button<'a>(row: &'a ChatRow, selected: bool, title: &'a str, sub: &'
     };
 
     let badge: Element<'_> = if unread {
-        container(text(row.unread).size(theme::font::BADGE as f32).color(Color::WHITE))
+        container(text(row.unread).size(theme::font::BADGE).color(Color::WHITE))
             .padding([2, 6])
             .style(badge_circle)
             .into()
@@ -601,7 +601,7 @@ fn conversation_pane(state: &State) -> Element<'_> {
         };
         container(
             text(msg)
-                .size(theme::font::MESSAGE as f32)
+                .size(theme::font::MESSAGE)
                 .color(rgb(theme::TEXT_SECONDARY)),
         )
         .width(Length::Fill)
@@ -647,14 +647,14 @@ fn chat_header(
     perf: Option<String>,
 ) -> Element<'static> {
     let name = text(ellipsize(title, 40))
-        .size(theme::font::NAME as f32)
+        .size(theme::font::NAME)
         .color(Color::WHITE)
         .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT })
         .wrapping(iced::widget::text::Wrapping::None)
         .width(Length::Fill);
     let status: Element<'static> = if title.is_empty() {
         text(" ")
-            .size(theme::font::TIMESTAMP as f32)
+            .size(theme::font::TIMESTAMP)
             .color(rgb(theme::TEXT_SECONDARY))
             .into()
     } else {
@@ -664,7 +664,7 @@ fn chat_header(
             ("Chat", theme::TEXT_SECONDARY)
         };
         text(label)
-            .size(theme::font::TIMESTAMP as f32)
+            .size(theme::font::TIMESTAMP)
             .color(rgb(color))
             .into()
     };
@@ -672,7 +672,7 @@ fn chat_header(
     let perf_badge: Element<'static> = match perf {
         Some(fps) => container(
             text(fps)
-                .size(theme::font::TIMESTAMP as f32)
+                .size(theme::font::TIMESTAMP)
                 .color(rgb(theme::ACCENT)),
         )
         .padding([2, 6])
@@ -776,18 +776,18 @@ fn message_row(idx: usize, m: &MsgRow, pane_w: f32) -> Element<'_> {
             if m.text.is_empty() {
                 horizontal_spacer()
             } else {
-                text(&m.text).size(theme::font::MESSAGE as f32).color(Color::WHITE).into()
+                text(&m.text).size(theme::font::MESSAGE).color(Color::WHITE).into()
             },
         ]
         .spacing(6)
         .into()
     } else {
-        text(&m.text).size(theme::font::MESSAGE as f32).color(Color::WHITE).into()
+        text(&m.text).size(theme::font::MESSAGE).color(Color::WHITE).into()
     };
 
     // Tail corner smaller, opposite corner small — Telegram style.
     let radius = theme::layout::BUBBLE_RADIUS;
-    let corner: f32 = if m.out { 4.0 } else { 4.0 };
+    let corner: f32 = 4.0;
     let r = iced::border::Radius::new(radius)
         .top_left(if m.out { radius } else { corner })
         .top_right(if m.out { corner } else { radius })
@@ -823,7 +823,7 @@ fn message_row(idx: usize, m: &MsgRow, pane_w: f32) -> Element<'_> {
     };
     let meta: Element<'_> = if m.out {
         let ts_text: Element<'_> = text(ts.clone())
-            .size(theme::font::TIMESTAMP as f32)
+            .size(theme::font::TIMESTAMP)
             .color(rgb(theme::TEXT_SECONDARY))
             .into();
         let tick: Element<'_> = if m.read {
@@ -834,7 +834,7 @@ fn message_row(idx: usize, m: &MsgRow, pane_w: f32) -> Element<'_> {
         row![tick, ts_text].spacing(6).into()
     } else {
         text(ts)
-            .size(theme::font::TIMESTAMP as f32)
+            .size(theme::font::TIMESTAMP)
             .color(rgb(theme::TEXT_SECONDARY))
             .into()
     };
@@ -876,21 +876,21 @@ fn context_menu_bar() -> Element<'static> {
     let menu_el = container(
         column![
             button(
-                text("Modifier").size(theme::font::PLACEHOLDER as f32).color(rgb(theme::TEXT_PRIMARY))
+                text("Modifier").size(theme::font::PLACEHOLDER).color(rgb(theme::TEXT_PRIMARY))
             )
             .on_press(Message::ContextEdit)
             .width(Length::Fill)
             .padding(10)
             .style(menu_item_style),
             button(
-                text("Copier").size(theme::font::PLACEHOLDER as f32).color(rgb(theme::TEXT_PRIMARY))
+                text("Copier").size(theme::font::PLACEHOLDER).color(rgb(theme::TEXT_PRIMARY))
             )
             .on_press(Message::ContextCopy)
             .width(Length::Fill)
             .padding(10)
             .style(menu_item_style),
             button(
-                text("Supprimer").size(theme::font::PLACEHOLDER as f32).color(rgb(theme::ERROR))
+                text("Supprimer").size(theme::font::PLACEHOLDER).color(rgb(theme::ERROR))
             )
             .on_press(Message::ContextDelete)
             .width(Length::Fill)
@@ -1102,7 +1102,7 @@ fn build_layout(state: &State, pane_w: f32, view_h: f32) -> crate::state::MsgLay
 fn est_row_height(m: &MsgRow, pane_w: f32) -> f32 {
     let bubble_w = if m.out { pane_w * 0.6 } else { pane_w * 0.7 };
     let inner = (bubble_w - 2.0 * theme::layout::BUBBLE_PAD_X).max(1.0);
-    let font_h = theme::font::MESSAGE as f32;
+    let font_h = theme::font::MESSAGE;
 
     let photo_h = match m.photo {
         Some((w, h)) if w > 0 && h > 0 => inner * (h as f32 / w as f32),
@@ -1160,7 +1160,7 @@ fn avatar_circle(photo: Option<&str>, title: &str, size: f32) -> Element<'static
     let ch = title.chars().next().unwrap_or('?').to_string().to_uppercase();
     let c = theme::avatar_color(title);
     container(
-        container(text(ch).size(theme::font::NAME as f32).color(Color::WHITE))
+        container(text(ch).size(theme::font::NAME).color(Color::WHITE))
             .width(size)
             .height(size)
             .align_x(Alignment::Center)
@@ -1396,11 +1396,10 @@ fn text_input_style(
 fn subscription(state: &State) -> iced::Subscription<Message> {
     let net = network::network_subscription();
     let keys = iced::keyboard::listen().filter_map(|event| match event {
-        iced::keyboard::Event::KeyPressed { key, .. }
-            if key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) =>
-        {
-            Some(Message::Escape)
-        }
+        iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+            ..
+        } => Some(Message::Escape),
         _ => None,
     });
     let timer = if state.scroll_perf_dur > 0.0 {
@@ -1471,9 +1470,9 @@ mod tests {
         state.chat_title = "Test".into();
         state.messages = (0..300)
             .map(|i| MsgRow {
-                id: i as i32,
+                id: i,
                 text: format!("message {i} with some text that wraps a bit"),
-                date: 1_700_000_000 - i as i32,
+                date: 1_700_000_000 - i,
                 out: i % 2 == 0,
                 photo: None,
                 photo_path: None,

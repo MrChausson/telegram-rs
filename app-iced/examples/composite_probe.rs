@@ -4,8 +4,10 @@
 //!   - PROBE_SCROLL=1: REAL fling (scroll offset advances every frame, so each
 //!     frame lays-out + shapes different rows) — this is the honest number for
 //!     "is scrolling slow because of our per-frame work?"
-//! Usage: cargo run --release -p app-iced --example composite_probe [N]
-//!        PROBE_SCROLL=1 cargo run ...
+//!
+//! Usage:
+//! - `cargo run --release -p app-iced --example composite_probe [N]`
+//! - `PROBE_SCROLL=1 cargo run --release -p app-iced --example composite_probe [N]`
 
 use app_iced::bridge::MsgRow;
 use app_iced::state::State;
@@ -75,7 +77,7 @@ fn main() {
     for _ in 0..10 {
         let mut el = chat_view(&s);
         Widget::diff(el.as_widget(), &mut tree);
-        let node = Widget::layout(el.as_widget_mut(), &mut tree, &mut renderer, &limits);
+        let node = Widget::layout(el.as_widget_mut(), &mut tree, &renderer, &limits);
         let layout = Layout::new(&node);
         Widget::draw(el.as_widget(), &tree, &mut renderer, &Theme::Dark, &style, layout, cursor, &bounds);
         renderer.reset(bounds);
@@ -96,7 +98,7 @@ fn main() {
         }
         let mut el = chat_view(&s);
         Widget::diff(el.as_widget(), &mut tree);
-        let node = Widget::layout(el.as_widget_mut(), &mut tree, &mut renderer, &limits);
+        let node = Widget::layout(el.as_widget_mut(), &mut tree, &renderer, &limits);
         let layout = Layout::new(&node);
         Widget::draw(el.as_widget(), &tree, &mut renderer, &Theme::Dark, &style, layout, cursor, &bounds);
         renderer.reset(bounds);

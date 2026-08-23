@@ -132,7 +132,7 @@ impl Telegram {
         peer: &grammers_session::types::PeerRef,
         limit: usize,
     ) -> Result<Vec<MessageInfo>> {
-        let mut it = self.client.iter_messages(peer.clone()).limit(limit);
+        let mut it = self.client.iter_messages(*peer).limit(limit);
         let mut out = Vec::new();
         while let Some(msg) = it.next().await? {
             out.push(MessageInfo {
@@ -163,7 +163,7 @@ impl Telegram {
         }
         let msgs = self
             .client
-            .get_messages_by_id(peer_ref.clone(), &[msg_id])
+            .get_messages_by_id(*peer_ref, &[msg_id])
             .await
             .context("fetching message")?;
         let Some(Some(msg)) = msgs.into_iter().next() else {
@@ -196,7 +196,7 @@ impl Telegram {
         peer_ref: &grammers_session::types::PeerRef,
     ) -> Result<()> {
         self.client
-            .mark_as_read(peer_ref.clone())
+            .mark_as_read(*peer_ref)
             .await
             .context("marking chat read")?;
         Ok(())
@@ -218,7 +218,7 @@ impl Telegram {
         };
         self.client
             .invoke(&grammers_client::tl::functions::messages::SetTyping {
-                peer: peer_ref.clone().into(),
+                peer: (*peer_ref).into(),
                 top_msg_id: None,
                 action,
             })
@@ -235,7 +235,7 @@ impl Telegram {
     ) -> Result<()> {
         self.client
             .edit_message(
-                peer_ref.clone(),
+                *peer_ref,
                 msg_id,
                 grammers_client::message::InputMessage::new().text(text),
             )
@@ -251,7 +251,7 @@ impl Telegram {
         msg_id: i32,
     ) -> Result<()> {
         self.client
-            .delete_messages(peer_ref.clone(), &[msg_id])
+            .delete_messages(*peer_ref, &[msg_id])
             .await
             .context("deleting message")?;
         Ok(())
@@ -265,7 +265,7 @@ impl Telegram {
     ) -> Result<()> {
         self.client
             .send_message(
-                peer.clone(),
+                *peer,
                 grammers_client::message::InputMessage::new().text(text),
             )
             .await

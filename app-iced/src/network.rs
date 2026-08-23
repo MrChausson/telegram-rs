@@ -413,7 +413,7 @@ async fn serve_demo(
     let photo_of = |chat: &DemoChat| assets.photos.get(&chat.id).cloned();
     let msgs_for = |id: i64| -> Vec<MsgRow> {
         let chat = chats.iter().find(|c| c.id == id);
-        let photo = chat.and_then(|c| photo_of(c));
+        let photo = chat.and_then(&photo_of);
         match id {
             1001 if big => {
                 let count: usize = std::env::var("TG_BIG_N")
@@ -698,7 +698,7 @@ impl Downloads {
 
 /// Sort used by the network loop so `OpenChat` (history loading) is always
 /// handled before slower background work (avatar downloads) in the same batch.
-fn prioritize(pending: &mut Vec<Request>) {
+fn prioritize(pending: &mut [Request]) {
     pending.sort_by_key(|r| !matches!(r, Request::OpenChat { .. }));
 }
 
@@ -839,8 +839,8 @@ fn handle_update(ui_tx: &mpsc::UnboundedSender<UiMessage>, update: Update) {
                     text: msg.text().to_string(),
                     date: msg.date().timestamp() as i32,
                     out: msg.outgoing(),
-                    photo: tg::client::media_kind(msg.media().as_ref()).and_then(|k| match k {
-                        tg::model::MediaKind::Photo { width, height } => Some((width, height)),
+                    photo: tg::client::media_kind(msg.media().as_ref()).map(|k| match k {
+                        tg::model::MediaKind::Photo { width, height } => (width, height),
                     }),
                 });
             }
@@ -980,17 +980,14 @@ async fn handle_request(
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
             }
         },
-        Request::DownloadAvatar { chat_id } => match peers.get(&chat_id) {
-            Some((_, peer_ref)) => {
-                spawn_avatar(
-                    tg.clone(),
-                    ui_tx.clone(),
-                    downloads.clone(),
-                    chat_id,
-                    *peer_ref,
-                );
-            }
-            None => {}
+        Request::DownloadAvatar { chat_id } => if let Some((_, peer_ref)) = peers.get(&chat_id) {
+            spawn_avatar(
+                tg.clone(),
+                ui_tx.clone(),
+                downloads.clone(),
+                chat_id,
+                *peer_ref,
+            );
         },
         Request::SendMessage { id, text } => match peers.get(&id) {
             Some((_, peer_ref)) => {
