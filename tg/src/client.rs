@@ -305,9 +305,10 @@ impl Telegram {
             .map(|_| ())
     }
 
-    /// Uploads and sends a file to a chat: images (jpeg/png/webp/gif/bmp)
-    /// go out as compressed photos, everything else as a document. Returns
-    /// the id of the sent message.
+    /// Uploads and sends a file to a chat, classified by its extension:
+    /// photos go out compressed, videos/GIFs/audio as documents with the
+    /// proper attributes (so the receivers render them as such). Returns the
+    /// id of the sent message.
     ///
     /// `on_progress(bytes_sent, total)` fires during the upload (at least
     /// every [`UPLOAD_PROGRESS_STEP`] bytes) so callers can surface progress.
@@ -320,16 +321,32 @@ impl Telegram {
         on_progress: impl FnMut(u64, u64) + Send + 'static,
     ) -> Result<i32> {
         let uploaded = self.upload_with_progress(path, on_progress).await?;
-        // `document()` derives the file-name attribute from the upload's
-        // name, which `upload_with_progress` sets from the path.
         let mut input = grammers_client::message::InputMessage::new()
             .text(caption)
             .reply_to(reply_to);
-        input = if is_image(path) {
-            input.photo(uploaded)
-        } else {
-            input.document(uploaded)
-        };
+        match media_kind_of_path(path) {
+            // Compressed photo.
+            Some(MediaKind::Photo { .. }) => input = input.photo(uploaded),
+            // Everything else goes as a document, adding media attributes so
+            // the UI can classify it when it comes back through updates.
+            kind => {
+                let attrs = attributes_for(&kind, path);
+                let raw = tl::types::InputMediaUploadedDocument {
+                    nosound_video: false,
+                    force_file: false,
+                    spoiler: false,
+                    file: uploaded.raw.clone(),
+                    thumb: None,
+                    mime_type: mime_guess_of_path(path),
+                    attributes: attrs,
+                    stickers: None,
+                    ttl_seconds: None,
+                    video_cover: None,
+                    video_timestamp: None,
+                };
+                input = input.media(raw);
+            }
+        }
         let sent = self
             .client
             .send_message(*peer, input)
@@ -633,12 +650,43 @@ pub fn media_kind(media: Option<&Media>) -> Option<MediaKind> {
                 height: thumb.1,
             })
         }
-        Media::Document(doc) => Some(MediaKind::Document {
-            name: doc.name().unwrap_or_default().to_string(),
-            size: doc.size().map(|s| s as i64).unwrap_or(0),
-        }),
+        Media::Document(doc) => media_kind_of_document(doc),
         _ => None,
     }
+}
+
+/// Classifies a grammers `Document` (video / gif / audio / voice) from its
+/// `DocumentAttribute`s, falling back to a plain file.
+pub fn media_kind_of_document(doc: &grammers_client::media::Document) -> Option<MediaKind> {
+    let name = doc.name().unwrap_or_default().to_string();
+    let size = doc.size().map(|s| s as i64).unwrap_or(0);
+    use grammers_client::tl::enums::Document as D;
+    let attributes = match doc.raw.document.as_ref() {
+        Some(D::Document(d)) => d.attributes.clone(),
+        _ => return Some(MediaKind::Document { name, size }),
+    };
+    use grammers_client::tl::enums::DocumentAttribute as Attr;
+    for attr in &attributes {
+        match attr {
+            Attr::Video(v) => {
+                return Some(MediaKind::Video {
+                    name,
+                    size,
+                    duration: v.duration,
+                })
+            }
+            Attr::Animated => return Some(MediaKind::Gif { name, size }),
+            Attr::Audio(a) => {
+                return Some(MediaKind::Audio {
+                    name,
+                    size,
+                    voice: a.voice,
+                })
+            }
+            _ => {}
+        }
+    }
+    Some(MediaKind::Document { name, size })
 }
 
 /// True when the path looks like an image that Telegram can compress into a
@@ -651,6 +699,108 @@ pub fn is_image(path: &std::path::Path) -> bool {
             .as_deref(),
         Some("jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp")
     )
+}
+
+/// Returns the [`MediaKind`] a local file should be uploaded as, by extension.
+pub fn media_kind_of_path(path: &std::path::Path) -> Option<MediaKind> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let size = std::fs::metadata(path).ok().map(|m| m.len() as i64).unwrap_or(0);
+    let kind = match ext.as_str() {
+        "jpg" | "jpeg" | "png" | "webp" | "bmp" => return Some(MediaKind::Photo {
+            width: 0,
+            height: 0,
+        }),
+        "gif" => MediaKind::Gif { name, size },
+        "mp4" | "webm" | "mkv" | "mov" | "m4v" => MediaKind::Video {
+            name,
+            size,
+            duration: 0.0,
+        },
+        "ogg" | "oga" | "opus" | "m4a" | "mp3" | "wav" | "flac" => MediaKind::Audio {
+            name,
+            size,
+            voice: false,
+        },
+        _ => return None,
+    };
+    Some(kind)
+}
+
+/// Document attributes to attach when uploading a non-photo file, so the
+/// server + receivers classify it as video / GIF / audio.
+fn attributes_for(
+    kind: &Option<MediaKind>,
+    path: &std::path::Path,
+) -> Vec<grammers_client::tl::enums::DocumentAttribute> {
+    use grammers_client::tl::enums::DocumentAttribute as Attr;
+    use grammers_client::tl::types::{
+        DocumentAttributeAudio, DocumentAttributeFilename, DocumentAttributeVideo,
+    };
+
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+    match kind {
+        Some(MediaKind::Video { duration, .. }) => vec![
+            Attr::Video(DocumentAttributeVideo {
+                round_message: false,
+                supports_streaming: true,
+                nosound: false,
+                duration: *duration,
+                w: 640,
+                h: 480,
+                preload_prefix_size: None,
+                video_start_ts: None,
+                video_codec: None,
+            }),
+            Attr::Filename(DocumentAttributeFilename { file_name }),
+        ],
+        Some(MediaKind::Gif { .. }) => vec![
+            Attr::Animated,
+            Attr::Filename(DocumentAttributeFilename { file_name }),
+        ],
+        Some(MediaKind::Audio { voice, .. }) => vec![
+            Attr::Audio(DocumentAttributeAudio {
+                voice: *voice,
+                duration: 0,
+                title: None,
+                performer: None,
+                waveform: None,
+            }),
+            Attr::Filename(DocumentAttributeFilename { file_name }),
+        ],
+        // Plain document (unknown extension, "other files").
+        _ => vec![Attr::Filename(DocumentAttributeFilename { file_name })],
+    }
+}
+
+/// MIME type guess by extension (lightweight, no content sniffing).
+fn mime_guess_of_path(path: &std::path::Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("mp4") => "video/mp4".into(),
+        Some("webm") => "video/webm".into(),
+        Some("mkv") => "video/x-matroska".into(),
+        Some("mov") => "video/quicktime".into(),
+        Some("ogg" | "opus") => "audio/ogg".into(),
+        Some("oga") => "audio/ogg".into(),
+        Some("m4a") => "audio/mp4".into(),
+        Some("mp3") => "audio/mpeg".into(),
+        Some("wav") => "audio/wav".into(),
+        Some("flac") => "audio/flac".into(),
+        _ => "application/octet-stream".into(),
+    }
 }
 
 /// Extracts the forward origin from a raw forward header: the originating

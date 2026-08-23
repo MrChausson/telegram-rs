@@ -16,11 +16,17 @@ pub struct ChatInfo {
 }
 
 /// Kind of media attached to a message.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MediaKind {
     Photo { width: u32, height: u32 },
     /// A generic file (document): original file name and byte size.
     Document { name: String, size: i64 },
+    /// A video message (document + video attributes).
+    Video { name: String, size: i64, duration: f64 },
+    /// An animated GIF (document + animated attribute).
+    Gif { name: String, size: i64 },
+    /// An audio file or voice note (document + audio attributes).
+    Audio { name: String, size: i64, voice: bool },
 }
 
 /// Origin of a forwarded message, as much as the forward header exposes:

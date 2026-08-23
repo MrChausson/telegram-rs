@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Media cards for videos, GIFs and audio files**: received media render as
+  dedicated cards (icon + name + size, duration shown for video/audio) instead
+  of generic documents; clicking downloads then opens them with the system
+  player (`xdg-open`).
+- **Voice-note playback in-app**: voice messages get a play/pause bar with a
+  live progress line and elapsed time; playback uses `rodio`, pauses/resumes on
+  click, stops when another voice note starts.
+- **Send richer media**: outgoing photos are classified by extension — images
+  go as compressed photos, GIFs/videos/audio as documents with proper MTProto
+  attributes (animated/video/audio) so receivers see the right kind.
+- **Desktop notifications**: new messages in chats that aren't open raise a
+  desktop notification (`notify-rust`); best-effort, never blocks the loop.
+- **System tray**: StatusNotifier tray icon (`ksni`, pure Rust — no GTK) with
+  "Open tg" / "Quit" actions; silently a no-op where no tray host exists.
+
 ## [v0.4.0] - 2026-08-23
 
 ### Added

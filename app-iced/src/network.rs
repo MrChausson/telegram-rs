@@ -17,7 +17,7 @@ use tg::client::Telegram;
 use tg::session::load_or_new;
 use tokio::sync::mpsc;
 
-use crate::bridge::{ChatRow, DocMeta, MsgRow, Request, SearchHit, UiMessage};
+use crate::bridge::{ChatRow, DocKind, DocMeta, MsgRow, Request, SearchHit, UiMessage};
 
 const ENV_FILE: &str = ".env";
 const SESSION_FILE: &str = ".tg.session";
@@ -305,6 +305,42 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
     )
 }
 
+/// Generates a minimal valid WAV (1 s 440 Hz 16-bit mono PCM) — the canned
+/// stand-in for downloaded voice notes so the demo exercises playback
+/// end-to-end. Returns the path written.
+fn demo_voice_wav(path: &std::path::Path) -> String {
+    let rate = 8000u32;
+    let secs = 1u32;
+    let data_len = rate * secs; // 16-bit mono = 2 bytes/sample
+    let mut bytes = Vec::with_capacity(44 + (data_len * 2) as usize);
+    // RIFF header.
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_len * 2).to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+    // fmt chunk.
+    bytes.extend_from_slice(b"fmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // mono
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&(rate * 2).to_le_bytes()); // byte rate
+    bytes.extend_from_slice(&2u16.to_le_bytes()); // block align
+    bytes.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    // data chunk.
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&(data_len * 2).to_le_bytes());
+    for i in 0..data_len {
+        let t = i as f32 / rate as f32;
+        let sample = (t * 440.0 * std::f32::consts::TAU).sin();
+        let v = (sample * i16::MAX as f32).round() as i16;
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    let _ = std::fs::create_dir_all(path);
+    let wav = path.join("voix.wav");
+    let _ = std::fs::write(&wav, bytes);
+    wav.to_string_lossy().into_owned()
+}
+
 fn save_png(pixmap: &tiny_skia::Pixmap, path: &Path) {
     let _ = std::fs::create_dir_all(path.parent().expect("parent dir"));
     if let Ok(bytes) = pixmap.encode_png() {
@@ -420,7 +456,7 @@ async fn serve_demo(
         let chat = chats.iter().find(|c| c.id == id);
         let photo = chat.and_then(&photo_of);
         let doc_row = |id: i32, text: &str, date: i32, name: &str, size: i64| MsgRow {
-            doc: Some(DocMeta { name: name.into(), size }),
+            doc: Some(DocMeta { name: name.into(), size, kind: DocKind::File, duration: None }),
             ..MsgRow::text(id, text, date, false)
         };
         match id {
@@ -465,17 +501,35 @@ async fn serve_demo(
                     ..MsgRow::text(3, "Magnifique ! prise ce matin ?", now - 600, true)
                 },
                 MsgRow {
+                    doc: Some(DocMeta {
+                        name: "coucher-de-soleil.mp4".into(),
+                        size: 8_423_168,
+                        kind: DocKind::Video,
+                        duration: Some(47.0),
+                    }),
+                    ..MsgRow::text(4, "Un petit film du coucher 🌅", now - 575, true)
+                },
+                MsgRow {
                     forwarded_from: Some("Canal Paysages".into()),
                     photo: Some((640, 480)),
                     photo_path: photo.clone(),
-                    ..MsgRow::text(4, "Regarde celle-là 😍", now - 550, false)
+                    ..MsgRow::text(5, "Regarde celle-là 😍", now - 550, false)
                 },
                 MsgRow {
-                    doc: Some(DocMeta { name: "itinéraire-weekend.pdf".into(), size: 1_248_032 }),
-                    ..MsgRow::text(5, "", now - 500, false)
+                    doc: Some(DocMeta {
+                        name: "voix-memoire.ogg".into(),
+                        size: 310_000,
+                        kind: DocKind::Audio { voice: true },
+                        duration: Some(12.0),
+                    }),
+                    ..MsgRow::text(6, "", now - 520, false)
                 },
-                MsgRow::text(6, "Génial, on y va samedi ? 😎", now - 300, false),
-                MsgRow::text(7, "Oui ! à demain 👋", now - 42, true),
+                MsgRow {
+                    doc: Some(DocMeta { name: "plan-trimestre.xlsx".into(), size: 96_470, kind: DocKind::File, duration: None }),
+                    ..MsgRow::text(7, "", now - 500, true)
+                },
+                MsgRow::text(8, "Génial, on y va samedi ? 😎", now - 300, false),
+                MsgRow::text(9, "Oui ! à demain 👋", now - 42, true),
             ],
             1002 => vec![
                 MsgRow::text(1, "Qui veut présenter son projet vendredi ?", now - 14400, false),
@@ -603,7 +657,12 @@ async fn serve_demo(
                             date: now,
                             out: true,
                             photo: is_photo.then_some((640, 480)),
-                            doc: (!is_photo).then_some(DocMeta { name, size }),
+                            doc: (!is_photo).then_some(DocMeta {
+                                name,
+                                size,
+                                kind: DocKind::File,
+                                duration: None,
+                            }),
                             reply_to,
                             forwarded_from: None,
                         });
@@ -664,19 +723,29 @@ async fn serve_demo(
                         });
                     }
                 }
-                Request::DownloadDoc { chat_id, msg_id } => {
-                    // Demo documents resolve to their canned stand-in file.
+Request::DownloadDoc { chat_id, msg_id } => {
+                    // Demo docs resolve to their canned stand-in file: a real
+                    // generated WAV for voice notes (so playback can be exercised),
+                    // a text file otherwise.
+                    let path = cache_dir().join("demo");
+                    let is_voice = msgs_for(chat_id)
+                        .iter()
+                        .find(|m| m.id == msg_id)
+                        .is_some_and(|m| {
+                            matches!(
+                                m.doc.as_ref().map(|d| d.kind),
+                                Some(DocKind::Audio { voice: true })
+                            )
+                        });
+                    let file = if is_voice {
+                        demo_voice_wav(&path)
+                    } else {
+                        path.join("doc.txt").to_string_lossy().into_owned()
+                    };
                     let _ = ui_tx.send(UiMessage::DocReady {
                         chat_id,
                         msg_id,
-                        path: Some(
-                            cache_dir()
-                                .join("demo")
-                                .join("media")
-                                .join("doc.txt")
-                                .to_string_lossy()
-                                .into_owned(),
-                        ),
+                        path: Some(file),
                     });
                 }
                 Request::Search { id, query } => {
@@ -922,6 +991,52 @@ fn prioritize(pending: &mut [Request]) {
     pending.sort_by_key(|r| !matches!(r, Request::OpenChat { .. }));
 }
 
+/// Splits a core `MediaKind` into the bridge's photo / document pair.
+fn media_to_row(media: Option<tg::model::MediaKind>) -> (Option<(u32, u32)>, Option<DocMeta>) {
+    use crate::bridge::DocKind;
+    use tg::model::MediaKind as MK;
+    match media {
+        Some(MK::Photo { width, height }) => (Some((width, height)), None),
+        Some(MK::Document { name, size }) => (
+            None,
+            Some(DocMeta {
+                name,
+                size,
+                kind: DocKind::File,
+                duration: None,
+            }),
+        ),
+        Some(MK::Video { name, size, duration }) => (
+            None,
+            Some(DocMeta {
+                name,
+                size,
+                kind: DocKind::Video,
+                duration: Some(duration),
+            }),
+        ),
+        Some(MK::Gif { name, size }) => (
+            None,
+            Some(DocMeta {
+                name,
+                size,
+                kind: DocKind::Gif,
+                duration: None,
+            }),
+        ),
+        Some(MK::Audio { name, size, voice }) => (
+            None,
+            Some(DocMeta {
+                name,
+                size,
+                kind: DocKind::Audio { voice },
+                duration: None,
+            }),
+        ),
+        None => (None, None),
+    }
+}
+
 /// Maps a core `MessageInfo` to a display row: splits the media kind into
 /// photo vs document, resolves forward origins against the dialog list and
 /// reuses any already-cached photo path.
@@ -931,13 +1046,7 @@ fn msg_row_from_info(
     downloads: &Downloads,
     peers: &HashMap<i64, (String, PeerRef)>,
 ) -> MsgRow {
-    let (photo, doc) = match m.media {
-        Some(tg::model::MediaKind::Photo { width, height }) => (Some((width, height)), None),
-        Some(tg::model::MediaKind::Document { name, size }) => {
-            (None, Some(DocMeta { name, size }))
-        }
-        None => (None, None),
-    };
+    let (photo, doc) = media_to_row(m.media);
     let forwarded_from = m.forwarded.and_then(|f| {
         f.name.or_else(|| {
             f.chat_id
@@ -1110,6 +1219,29 @@ async fn serve(
         .await
         {
             if started.elapsed() >= grace {
+                // A message for a chat that is *not* open rings a desktop
+                // notification.
+                if let Update::NewMessage(ref msg) = update {
+                    if let Some(peer) = msg.peer() {
+                        let cid = peer.id().bot_api_dialog_id();
+                        if open_id != Some(cid) {
+                            let title = peers
+                                .get(&cid)
+                                .map(|(t, _)| t.clone())
+                                .unwrap_or_else(|| "Message".to_string());
+                            notify_new_message(
+                                open_id,
+                                cid,
+                                &title,
+                                &crate::state::preview_text(
+                                    msg.text(),
+                                    &None,
+                                    &None,
+                                ),
+                            );
+                        }
+                    }
+                }
                 handle_update(ui_tx, update, peers);
             }
         }
@@ -1125,15 +1257,7 @@ fn handle_update(
         Update::NewMessage(msg) => {
             if let Some(peer) = msg.peer() {
                 let chat_id = peer.id().bot_api_dialog_id();
-                let (photo, doc) = match tg::client::media_kind(msg.media().as_ref()) {
-                    Some(tg::model::MediaKind::Photo { width, height }) => {
-                        (Some((width, height)), None)
-                    }
-                    Some(tg::model::MediaKind::Document { name, size }) => {
-                        (None, Some(DocMeta { name, size }))
-                    }
-                    None => (None, None),
-                };
+                let (photo, doc) = media_to_row(tg::client::media_kind(msg.media().as_ref()));
                 let forwarded_from = msg.forward_header().as_ref().and_then(|h| {
                     // Same resolution as history rows: the header's plain name
                     // wins, else look up the origin chat in the dialog list.
@@ -1589,12 +1713,69 @@ fn spawn_doc_download(
     });
 }
 
+/// Sends a desktop notification for a new message, unless it lands in the
+/// currently open chat (that's visible already). Best-effort: any
+/// notify-rust error is silently ignored.
+pub fn notify_new_message(open_chat: Option<i64>, chat_id: i64, title: &str, preview: &str) {
+    if open_chat == Some(chat_id) {
+        return;
+    }
+    let _ = notify_rust::Notification::new()
+        .summary(title)
+        .body(preview)
+        .appname("tg")
+        .show();
+}
+
 /// Re-exported so `main.rs` can type the sender.
 pub type UnboundedSender<T> = mpsc::UnboundedSender<T>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demo_voice_wav_is_a_decodable_wave_file() {
+        let dir = std::env::temp_dir().join("tg-wav-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let p = demo_voice_wav(&dir);
+        // The file exists, has a plausible RIFF header, and rodio can decode it.
+        let bytes = std::fs::read(&p).expect("wav written");
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        let file = std::fs::File::open(&p).unwrap();
+        assert!(
+            rodio::Decoder::new(std::io::BufReader::new(file)).is_ok(),
+            "rodio must decode the generated demo voice note"
+        );
+    }
+
+    #[test]
+    fn media_to_row_classifies_document_kinds() {
+        use crate::bridge::DocKind;
+        // Video → DocKind::Video with duration.
+        let (photo, doc) = media_to_row(Some(tg::model::MediaKind::Video {
+            name: "v.mp4".into(),
+            size: 10,
+            duration: 42.0,
+        }));
+        assert!(photo.is_none());
+        assert_eq!(doc.as_ref().map(|d| d.kind), Some(DocKind::Video));
+        assert_eq!(doc.unwrap().duration, Some(42.0));
+        // Voice → DocKind::Audio { voice: true }.
+        let (_, doc) = media_to_row(Some(tg::model::MediaKind::Audio {
+            name: "v.ogg".into(),
+            size: 20,
+            voice: true,
+        }));
+        assert_eq!(doc.unwrap().kind, DocKind::Audio { voice: true });
+        // Plain file stays a file.
+        let (_, doc) = media_to_row(Some(tg::model::MediaKind::Document {
+            name: "f.pdf".into(),
+            size: 30,
+        }));
+        assert_eq!(doc.unwrap().kind, DocKind::File);
+    }
 
     #[test]
     fn open_chat_requests_are_handled_first() {
