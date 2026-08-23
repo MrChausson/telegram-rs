@@ -18,7 +18,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: System dependencies (winit / softbuffer)
+      - name: System dependencies (winit / iced tiny-skia)
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -44,14 +44,14 @@ jobs:
       - name: Tarball Linux
         run: |
           mkdir -p dist
-          tar -C target/release -czf dist/tg-linux-$(uname -m).tar.gz app
+          tar -C target/release -czf dist/tg-linux-$(uname -m).tar.gz app-iced
           cp install.sh dist/install.sh
           chmod +x dist/install.sh
 
       - name: AppImage - AppDir layout
         run: |
           rm -rf AppDir && mkdir -p AppDir/usr/bin
-          cp target/release/app AppDir/usr/bin/tg
+          cp target/release/app-iced AppDir/usr/bin/tg
           # AppImage runtime entry point (required for the image to launch)
           cat > AppDir/AppRun <<'EOF'
           #!/bin/sh
@@ -118,8 +118,8 @@ jobs:
         run: |
           mkdir -p dist
           lipo -create \
-            target/x86_64-apple-darwin/release/app \
-            target/aarch64-apple-darwin/release/app \
+            target/x86_64-apple-darwin/release/app-iced \
+            target/aarch64-apple-darwin/release/app-iced \
             -output dist/tg
           tar -C dist -czf dist/tg-macos-universal.tar.gz tg
 
@@ -152,7 +152,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist, pkg | Out-Null
-          Copy-Item target/release/app.exe pkg/tg.exe
+          Copy-Item target/release/app-iced.exe pkg/tg.exe
           Compress-Archive -Path pkg/tg.exe -DestinationPath dist/tg-windows-x86_64.zip
 
       - name: Upload artifacts
