@@ -34,17 +34,18 @@ fn state(n: usize) -> State {
     let now = 1_700_000_000i32;
     s.messages = (0..n)
         .map(|i| MsgRow {
-            id: i as i32,
-            text: if i % 7 == 0 {
-                "Un message plus long pour forcer le retour à la ligne et tester le calcul de hauteur des bulles sur plusieurs lignes, avec quelques émojis et un peu de texte pour mesurer le wrap.".into()
-            } else {
-                format!("Message {i} de la grande conversation de test — le lent fox saute pas-dessus le chien paresseux {i}")
-            },
-            date: now - i as i32,
-            out: i % 2 == 0,
             photo: if i % 40 == 7 { Some((640, 480)) } else { None },
-            photo_path: None,
             read: true,
+            ..MsgRow::text(
+                i as i32,
+                if i % 7 == 0 {
+                    "Un message plus long pour forcer le retour à la ligne et tester le calcul de hauteur des bulles sur plusieurs lignes, avec quelques émojis et un peu de texte pour mesurer le wrap.".to_string()
+                } else {
+                    format!("Message {i} de la grande conversation de test — le lent fox saute pas-dessus le chien paresseux {i}")
+                },
+                now - i as i32,
+                i % 2 == 0,
+            )
         })
         .collect();
     s

@@ -96,15 +96,18 @@ cargo build --release
 **V1 = full parity with the official Telegram Desktop.** Features ship in
 batches — each release moves the needle, not dribbles.
 
-### ✅ Already there (v0.2.1)
+### ✅ Already there
 
 - 💬 **Text messaging** — real-time push, < 1 s
 - 🖼️ **Avatars** — users, groups and channels
 - 📸 **Photos** — thumbnails + full-screen viewer
+- 📤 **Send media** — photos and documents with a live upload-progress bar
+- ↩️ **Replies & forwards** — quote a message in reply, or forward it to any chat
+- 🔍 **Search** — global across chats, or inside the open chat
 - ✏️ **Live sync** — edits and deletions from any device
 - 🔑 **In-app sign-in** — phone → code → 2FA, session persisted
 - 🟢 **Presence** — typing indicator, read receipts, unread badges, mark-as-read
-- 📋 **Context menu** — edit, copy or delete your own messages
+- 📋 **Context menu** — reply, forward, edit, copy or delete messages
 
 > 📋 **Copy / paste note:** message text can be copied from the message's
 > context menu (right-click → “Copier”), and text pastes into the composer
@@ -115,9 +118,9 @@ batches — each release moves the needle, not dribbles.
 
 | Area | In V1 |
 |---|---|
-| 📤 Media | Send photos, videos, files, voice messages · stickers, GIFs, custom emoji |
-| 💬 Messaging | Replies, forwards, custom emoji in composer |
-| 🔍 Search | Global and in-chat search |
+| 📤 Media | Send videos, voice messages · stickers, GIFs, custom emoji *(photos + documents already shipped)* |
+| 💬 Messaging | Custom emoji in composer *(replies + forwards already shipped)* |
+| 🔍 Search | *(global + in-chat already shipped)* |
 | 👥 Groups | Create and manage groups/channels, members, admin tools, topics |
 | 🎨 Experience | Light theme, settings, notifications + tray |
 | 👤 Accounts | QR login, logout, multiple accounts |
@@ -195,8 +198,9 @@ a 15 s safety net catches any missed update.
 ## Status
 
 - **Working MVP**: read, send and receive in real time, groups and channels,
-  message edits and deletions, in-app sign-in with a persisted session.
-- **29 tests** (`cargo test --workspace`), including headless UI-state tests
+  message edits and deletions, replies, forwards, photo/file sending, global
+  and in-chat search, and in-app sign-in with a persisted session.
+- **39 tests** (`cargo test --workspace`), including headless UI-state tests
   and a criterion frame-cost benchmark (`cargo bench -p app-iced --bench frame`).
 - Tested on Arch Linux (X11/Wayland); macOS and Windows are compiled by CI on
   every push/PR.

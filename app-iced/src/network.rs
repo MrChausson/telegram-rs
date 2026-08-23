@@ -17,11 +17,16 @@ use tg::client::Telegram;
 use tg::session::load_or_new;
 use tokio::sync::mpsc;
 
-use crate::bridge::{ChatRow, MsgRow, Request, UiMessage};
+use crate::bridge::{ChatRow, DocMeta, MsgRow, Request, SearchHit, UiMessage};
 
 const ENV_FILE: &str = ".env";
 const SESSION_FILE: &str = ".tg.session";
 const MESSAGE_LIMIT: usize = 200;
+/// Cap on search results returned per query.
+const SEARCH_LIMIT: usize = 30;
+/// Minimum delay between two re-runs of the *same* search query (the UI sends
+/// one `Request::Search` per keystroke; MTProto round-trips are expensive).
+const SEARCH_THROTTLE: std::time::Duration = std::time::Duration::from_millis(400);
 /// Max simultaneous MTProto transfers (avatars + photo thumbnails). Kept small
 /// so interactive requests share the connection without waiting on a backlog.
 const DOWNLOAD_CONCURRENCY: usize = 4;
@@ -414,6 +419,10 @@ async fn serve_demo(
     let msgs_for = |id: i64| -> Vec<MsgRow> {
         let chat = chats.iter().find(|c| c.id == id);
         let photo = chat.and_then(&photo_of);
+        let doc_row = |id: i32, text: &str, date: i32, name: &str, size: i64| MsgRow {
+            doc: Some(DocMeta { name: name.into(), size }),
+            ..MsgRow::text(id, text, date, false)
+        };
         match id {
             1001 if big => {
                 let count: usize = std::env::var("TG_BIG_N")
@@ -431,40 +440,73 @@ async fn serve_demo(
                         )
                     };
                     MsgRow {
-                        id,
-                        text: body,
-                        date: now - (i as i32) * 10,
-                        out: i % 2 == 0,
                         photo: if i % 40 == 7 { Some((640, 480)) } else { None },
                         photo_path: if i % 40 == 7 { photo.clone() } else { None },
-                        read: i % 2 == 0,
+                        reply_to: if i % 25 == 5 { Some(id - 1) } else { None },
+                        ..MsgRow::text(
+                            id,
+                            body,
+                            now - (i as i32) * 10,
+                            i % 2 == 0,
+                        )
                     }
                 })
                 .collect()
             },
             1001 => vec![
-                MsgRow { id: 1, text: "Salut ! tu as vu ma nouvelle photo ?".to_string(), date: now - 700, out: false, photo: None, photo_path: None, read: false },
-                MsgRow { id: 2, text: "Trop jolie ! tu l'as prise où ?".to_string(), date: now - 650, out: false, photo: None, photo_path: None, read: false },
-                MsgRow { id: 3, text: "Sur la plage, au coucher du soleil.".to_string(), date: now - 600, out: true, photo: Some((640, 480)), photo_path: photo.clone(), read: true },
-                MsgRow { id: 4, text: "Génial, on y va samedi ? 😎".to_string(), date: now - 300, out: false, photo: None, photo_path: None, read: false },
-                MsgRow { id: 5, text: "Oui ! à demain 👋".to_string(), date: now - 42, out: true, photo: None, photo_path: None, read: true },
+                MsgRow::text(1, "Salut ! tu as vu ma nouvelle photo ?", now - 700, false),
+                MsgRow {
+                    photo: Some((640, 480)),
+                    photo_path: photo.clone(),
+                    ..MsgRow::text(2, "", now - 650, true)
+                },
+                MsgRow {
+                    reply_to: Some(1),
+                    ..MsgRow::text(3, "Magnifique ! prise ce matin ?", now - 600, true)
+                },
+                MsgRow {
+                    forwarded_from: Some("Canal Paysages".into()),
+                    photo: Some((640, 480)),
+                    photo_path: photo.clone(),
+                    ..MsgRow::text(4, "Regarde celle-là 😍", now - 550, false)
+                },
+                MsgRow {
+                    doc: Some(DocMeta { name: "itinéraire-weekend.pdf".into(), size: 1_248_032 }),
+                    ..MsgRow::text(5, "", now - 500, false)
+                },
+                MsgRow::text(6, "Génial, on y va samedi ? 😎", now - 300, false),
+                MsgRow::text(7, "Oui ! à demain 👋", now - 42, true),
             ],
             1002 => vec![
-                MsgRow { id: 1, text: "Qui veut présenter son projet vendredi ?".to_string(), date: now - 14400, out: false, photo: None, photo_path: None, read: true },
-                MsgRow { id: 2, text: "Moi je peux, la CI passe enfin 🎉".to_string(), date: now - 10800, out: true, photo: None, photo_path: None, read: true },
-                MsgRow { id: 3, text: "Soumettez le lien de la v0.2 ?".to_string(), date: now - 7200, out: false, photo: None, photo_path: None, read: true },
+                MsgRow::text(1, "Qui veut présenter son projet vendredi ?", now - 14400, false),
+                MsgRow {
+                    forwarded_from: Some("Canal Paysages".into()),
+                    ..MsgRow::text(2, "[transféré] Photo du week-end dernier 🌄", now - 10800, false)
+                },
+                MsgRow::text(3, "Moi je peux, la CI passe enfin 🎉", now - 7200, true),
+                doc_row(
+                    4,
+                    "",
+                    now - 7000,
+                    "rapport-trimestre.pdf",
+                    2_458_112,
+                ),
             ],
             1003 => vec![
-                MsgRow { id: 1, text: "Photo du week-end dernier 🌄".to_string(), date: now - 90000, out: true, photo: Some((640, 480)), photo_path: photo, read: true },
-                MsgRow { id: 2, text: "Magnifique, on la met en couverture !".to_string(), date: now - 89000, out: false, photo: None, photo_path: None, read: false },
+                MsgRow {
+                    photo: Some((640, 480)),
+                    photo_path: photo,
+                    ..MsgRow::text(1, "Photo du week-end dernier 🌄", now - 90000, true)
+                },
+                MsgRow::text(2, "Magnifique, on la met en couverture !", now - 89000, false),
             ],
             1004 => vec![
-                MsgRow { id: 1, text: "Le repas de dimanche est déplacé".to_string(), date: now - 172800, out: false, photo: None, photo_path: None, read: true },
-                MsgRow { id: 2, text: "Ok, on ramène le dessert 🍰".to_string(), date: now - 160000, out: true, photo: None, photo_path: None, read: false },
+                MsgRow::text(1, "Le repas de dimanche est déplacé", now - 172800, false),
+                MsgRow::text(2, "Ok, on ramène le dessert 🍰", now - 160000, true),
             ],
             1005 => vec![
-                MsgRow { id: 1, text: "v2.4.0: nouvelle API de statut en ligne".to_string(), date: now - 604800, out: false, photo: None, photo_path: None, read: true },
-                MsgRow { id: 2, text: "Merci pour l'update !".to_string(), date: now - 600000, out: true, photo: None, photo_path: None, read: true },
+                MsgRow::text(1, "v2.4.0: nouvelle API de statut en ligne", now - 604800, false),
+                MsgRow::text(2, "Merci pour l'update !", now - 600000, true),
             ],
             _ => vec![],
         }
@@ -508,7 +550,7 @@ async fn serve_demo(
                         .unwrap_or_else(|| "Chat".to_string());
                     let _ = ui_tx.send(UiMessage::Messages { id, title, rows });
                 }
-                Request::SendMessage { id, text } => {
+                Request::SendMessage { id, text, reply_to } => {
                     let nid = next_id;
                     next_id += 1;
                     // The server would echo the outgoing message back through
@@ -520,6 +562,167 @@ async fn serve_demo(
                         date: now,
                         out: true,
                         photo: None,
+                        doc: None,
+                        reply_to,
+                        forwarded_from: None,
+                    });
+                }
+                Request::SendMedia { id, path, caption, is_photo, reply_to, token } => {
+                    let nid = next_id;
+                    next_id += 1;
+                    // Simulate an upload: progress ticks over ~1.5 s, then
+                    // the echo carries the media (the demo photo stands in
+                    // as the "uploaded" image).
+                    let ui_tx = ui_tx.clone();
+                    let photo = chats
+                        .iter()
+                        .find(|c| c.id == id)
+                        .and_then(|c| assets.photos.get(&c.id).cloned());
+                    tokio::spawn(async move {
+                        const STEPS: u32 = 10;
+                        for step in 1..=STEPS {
+                            let _ = ui_tx.send(UiMessage::UploadProgress {
+                                chat_id: id,
+                                token,
+                                progress: step as f32 / STEPS as f32,
+                            });
+                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        }
+                        let _ = ui_tx.send(UiMessage::UploadDone { chat_id: id, token });
+                        let name = std::path::Path::new(&path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "file".into());
+                        let size = std::fs::metadata(&path)
+                            .map(|m| m.len() as i64)
+                            .unwrap_or(0);
+                        let _ = ui_tx.send(UiMessage::NewMessage {
+                            chat_id: id,
+                            id: nid,
+                            text: caption,
+                            date: now,
+                            out: true,
+                            photo: is_photo.then_some((640, 480)),
+                            doc: (!is_photo).then_some(DocMeta { name, size }),
+                            reply_to,
+                            forwarded_from: None,
+                        });
+                        if !is_photo {
+                            // The document is already on disk (we just picked
+                            // it); expose it directly as downloaded.
+                            let _ = ui_tx.send(UiMessage::DocReady {
+                                chat_id: id,
+                                msg_id: nid,
+                                path: Some(path),
+                            });
+                        } else if let Some(p) = photo {
+                            let _ = ui_tx.send(UiMessage::PhotoReady {
+                                chat_id: id,
+                                msg_id: nid,
+                                path: Some(p),
+                            });
+                        }
+                    });
+                }
+                Request::ForwardMessage { from_chat, msg_id, to_chat } => {
+                    // Find the original row and echo a forwarded copy into
+                    // the destination chat.
+                    let origin = msgs_for(from_chat)
+                        .into_iter()
+                        .find(|m| m.id == msg_id);
+                    let Some(origin) = origin else { continue };
+                    let from_title = chats
+                        .iter()
+                        .find(|c| c.id == from_chat)
+                        .map(|c| c.title.to_string())
+                        .unwrap_or_default();
+                    let nid = next_id;
+                    next_id += 1;
+                    let _ = ui_tx.send(UiMessage::NewMessage {
+                        chat_id: to_chat,
+                        id: nid,
+                        text: origin.text,
+                        date: now,
+                        out: true,
+                        photo: origin.photo,
+                        doc: origin.doc,
+                        reply_to: None,
+                        forwarded_from: Some(from_title),
+                    });
+                    if let Some(p) = origin.photo_path {
+                        let _ = ui_tx.send(UiMessage::PhotoReady {
+                            chat_id: to_chat,
+                            msg_id: nid,
+                            path: Some(p),
+                        });
+                    }
+                    if let Some(p) = origin.doc_path {
+                        let _ = ui_tx.send(UiMessage::DocReady {
+                            chat_id: to_chat,
+                            msg_id: nid,
+                            path: Some(p),
+                        });
+                    }
+                }
+                Request::DownloadDoc { chat_id, msg_id } => {
+                    // Demo documents resolve to their canned stand-in file.
+                    let _ = ui_tx.send(UiMessage::DocReady {
+                        chat_id,
+                        msg_id,
+                        path: Some(
+                            cache_dir()
+                                .join("demo")
+                                .join("media")
+                                .join("doc.txt")
+                                .to_string_lossy()
+                                .into_owned(),
+                        ),
+                    });
+                }
+                Request::Search { id, query } => {
+                    let q = query.to_lowercase();
+                    let hits: Vec<SearchHit> = if let Some(chat_id) = id {
+                        // In-chat: filter the chat's canned history.
+                        let chat_title = chats
+                            .iter()
+                            .find(|c| c.id == chat_id)
+                            .map(|c| c.title.to_string())
+                            .unwrap_or_else(|| "Chat".to_string());
+                        msgs_for(chat_id)
+                            .into_iter()
+                            .filter(|m| !q.is_empty() && m.text.to_lowercase().contains(&q))
+                            .map(|row| SearchHit { chat_id, chat_title: chat_title.clone(), row })
+                            .take(SEARCH_LIMIT)
+                            .collect()
+                    } else {
+                        // Global: match dialog titles + message bodies.
+                        let mut hits = Vec::new();
+                        for c in &chats {
+                            let mut found = false;
+                            if !q.is_empty() && c.title.to_lowercase().contains(&q) {
+                                found = true;
+                            }
+                            let mut chat_hits: Vec<MsgRow> = msgs_for(c.id)
+                                .into_iter()
+                                .filter(|m| {
+                                    found || (!q.is_empty() && m.text.to_lowercase().contains(&q))
+                                })
+                                .collect();
+                            if !chat_hits.is_empty() {
+                                hits.push(SearchHit {
+                                    chat_id: c.id,
+                                    chat_title: c.title.to_string(),
+                                    row: chat_hits.remove(0),
+                                });
+                            }
+                        }
+                        hits.truncate(SEARCH_LIMIT);
+                        hits
+                    };
+                    let _ = ui_tx.send(UiMessage::SearchResults {
+                        id,
+                        query,
+                        hits,
                     });
                 }
                 Request::EditMessage { id, msg_id, text } => {
@@ -561,16 +764,23 @@ async fn serve_demo(
                 typing: false,
             });
             typing_sent = false;
+            let date = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i32;
             let _ = ui_tx.send(UiMessage::NewMessage {
                 chat_id: 1001,
                 id: next_id,
                 text,
-                date: now,
+                date,
                 out: false,
                 photo: None,
+                doc: None,
+                reply_to: None,
+                forwarded_from: None,
             });
             next_id += 1;
-            next_incoming = now_inst + std::time::Duration::from_secs(12);
+            next_incoming = now_inst + std::time::Duration::from_secs(45);
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
@@ -672,10 +882,11 @@ async fn serve_login(
     }
 }
 
-/// Shared download state: on-disk photo paths (keyed by chat/message) and a
-/// concurrency cap for background MTProto transfers.
+/// Shared download state: on-disk photo/document paths (keyed by chat/message)
+/// and a concurrency cap for background MTProto transfers.
 struct Downloads {
     photos: Mutex<HashMap<(i64, i32), String>>,
+    docs: Mutex<HashMap<(i64, i32), String>>,
     sem: Arc<Semaphore>,
 }
 
@@ -683,6 +894,7 @@ impl Downloads {
     fn new() -> Self {
         Self {
             photos: Mutex::new(HashMap::new()),
+            docs: Mutex::new(HashMap::new()),
             sem: Arc::new(Semaphore::new(DOWNLOAD_CONCURRENCY)),
         }
     }
@@ -694,12 +906,60 @@ impl Downloads {
     fn insert(&self, chat_id: i64, msg_id: i32, path: String) {
         self.photos.lock().unwrap().insert((chat_id, msg_id), path);
     }
+
+    fn doc_path(&self, chat_id: i64, msg_id: i32) -> Option<String> {
+        self.docs.lock().unwrap().get(&(chat_id, msg_id)).cloned()
+    }
+
+    fn insert_doc(&self, chat_id: i64, msg_id: i32, path: String) {
+        self.docs.lock().unwrap().insert((chat_id, msg_id), path);
+    }
 }
 
 /// Sort used by the network loop so `OpenChat` (history loading) is always
 /// handled before slower background work (avatar downloads) in the same batch.
 fn prioritize(pending: &mut [Request]) {
     pending.sort_by_key(|r| !matches!(r, Request::OpenChat { .. }));
+}
+
+/// Maps a core `MessageInfo` to a display row: splits the media kind into
+/// photo vs document, resolves forward origins against the dialog list and
+/// reuses any already-cached photo path.
+fn msg_row_from_info(
+    m: tg::model::MessageInfo,
+    chat_id: i64,
+    downloads: &Downloads,
+    peers: &HashMap<i64, (String, PeerRef)>,
+) -> MsgRow {
+    let (photo, doc) = match m.media {
+        Some(tg::model::MediaKind::Photo { width, height }) => (Some((width, height)), None),
+        Some(tg::model::MediaKind::Document { name, size }) => {
+            (None, Some(DocMeta { name, size }))
+        }
+        None => (None, None),
+    };
+    let forwarded_from = m.forwarded.and_then(|f| {
+        f.name.or_else(|| {
+            f.chat_id
+                .and_then(|id| peers.get(&id))
+                .map(|(title, _)| title.clone())
+        })
+    });
+    MsgRow {
+        id: m.id,
+        text: m.text,
+        date: m.date,
+        out: m.out,
+        photo_path: photo.as_ref().and_then(|_| downloads.path(chat_id, m.id)),
+        photo,
+        doc_path: doc.as_ref().and_then(|_| downloads.doc_path(chat_id, m.id)),
+        doc,
+        reply_to: m.reply_to,
+        forwarded_from,
+        uploading: None,
+        upload_token: None,
+        read: false,
+    }
 }
 
 /// Network loop: handles UI requests and real-time updates.
@@ -738,12 +998,30 @@ async fn serve(
     let mut last_save = std::time::Instant::now();
     let session = tg.session().clone();
 
+    // Latest search request + when it was last actually run (throttle).
+    let mut last_search: Option<(Option<i64>, String, std::time::Instant)> = None;
+
     let started = std::time::Instant::now();
     let grace = std::time::Duration::from_secs(10);
 
     loop {
-        let mut pending: Vec<Request> =
+        let pending_in: Vec<Request> =
             std::iter::from_fn(|| req_rx.try_recv().ok()).collect();
+
+        // Coalesce Search requests (the UI sends one per keystroke): keep the
+        // latest query per mode, and split them from the interactive work.
+        let mut searches: Vec<(Option<i64>, String)> = Vec::new();
+        let count = pending_in.len();
+        let mut pending: Vec<Request> = Vec::with_capacity(count);
+        for r in pending_in {
+            match r {
+                Request::Search { id, query } => {
+                    searches.retain(|(m, _)| *m != id);
+                    searches.push((id, query.trim().to_string()));
+                }
+                other => pending.push(other),
+            }
+        }
         prioritize(&mut pending);
         for req in pending {
             if let Request::OpenChat { id } = req {
@@ -751,6 +1029,25 @@ async fn serve(
                 open_sig = None;
             }
             handle_request(&tg, ui_tx, req, peers, &downloads).await;
+        }
+        // Run throttled searches: re-running the same query within the window
+        // is skipped (typing floods → one MTProto round-trip per pause).
+        for (mode, query) in &searches {
+            let throttled = last_search
+                .as_ref()
+                .is_some_and(|(m, q, t)| m == mode && q == query && t.elapsed() < SEARCH_THROTTLE);
+            if throttled {
+                continue;
+            }
+            last_search = Some((*mode, query.clone(), std::time::Instant::now()));
+            handle_request(
+                &tg,
+                ui_tx,
+                Request::Search { id: *mode, query: query.clone() },
+                peers,
+                &downloads,
+            )
+            .await;
         }
 
         if last_refresh.elapsed() >= refresh {
@@ -766,23 +1063,10 @@ async fn serve(
                         );
                         if Some(&sig) != open_sig.as_ref() {
                             open_sig = Some(sig);
-                            let rows = msgs
+                            let rows: Vec<MsgRow> = msgs
                                 .iter()
                                 .map(|m| {
-                                    let photo = m.media.map(|k| match k {
-                                        tg::model::MediaKind::Photo { width, height } => {
-                                            (width, height)
-                                        }
-                                    });
-                                    MsgRow {
-                                        id: m.id,
-                                        text: m.text.clone(),
-                                        date: m.date,
-                                        out: m.out,
-                                        photo,
-                                        photo_path: downloads.path(open, m.id),
-                                        read: false,
-                                    }
+                                    msg_row_from_info(m.clone(), open, &downloads, peers)
                                 })
                                 .collect();
                             let _ = ui_tx.send(UiMessage::Messages {
@@ -792,7 +1076,10 @@ async fn serve(
                             });
                             // Warm photo thumbnails for any new photo messages.
                             for m in &msgs {
-                                if m.media.is_some() {
+                                if matches!(
+                                    m.media,
+                                    Some(tg::model::MediaKind::Photo { .. })
+                                ) {
                                     spawn_photo(
                                         tg.clone(),
                                         ui_tx.clone(),
@@ -823,25 +1110,45 @@ async fn serve(
         .await
         {
             if started.elapsed() >= grace {
-                handle_update(ui_tx, update);
+                handle_update(ui_tx, update, peers);
             }
         }
     }
 }
 
-fn handle_update(ui_tx: &mpsc::UnboundedSender<UiMessage>, update: Update) {
+fn handle_update(
+    ui_tx: &mpsc::UnboundedSender<UiMessage>,
+    update: Update,
+    peers: &HashMap<i64, (String, PeerRef)>,
+) {
     match update {
         Update::NewMessage(msg) => {
             if let Some(peer) = msg.peer() {
+                let chat_id = peer.id().bot_api_dialog_id();
+                let (photo, doc) = match tg::client::media_kind(msg.media().as_ref()) {
+                    Some(tg::model::MediaKind::Photo { width, height }) => {
+                        (Some((width, height)), None)
+                    }
+                    Some(tg::model::MediaKind::Document { name, size }) => {
+                        (None, Some(DocMeta { name, size }))
+                    }
+                    None => (None, None),
+                };
+                let forwarded_from = msg.forward_header().as_ref().and_then(|h| {
+                    // Same resolution as history rows: the header's plain name
+                    // wins, else look up the origin chat in the dialog list.
+                    forward_name(h, peers)
+                });
                 let _ = ui_tx.send(UiMessage::NewMessage {
-                    chat_id: peer.id().bot_api_dialog_id(),
+                    chat_id,
                     id: msg.id(),
                     text: msg.text().to_string(),
                     date: msg.date().timestamp() as i32,
                     out: msg.outgoing(),
-                    photo: tg::client::media_kind(msg.media().as_ref()).map(|k| match k {
-                        tg::model::MediaKind::Photo { width, height } => (width, height),
-                    }),
+                    photo,
+                    doc,
+                    reply_to: msg.reply_to_message_id(),
+                    forwarded_from,
                 });
             }
         }
@@ -908,6 +1215,24 @@ fn action_is_cancel(action: &grammers_client::tl::enums::SendMessageAction) -> b
     )
 }
 
+/// Resolves a raw forward header into a display name: the header's anonymous
+/// `from_name` when present, else the origin chat's title from the dialog
+/// list (covers the common "forwarded from a chat I know" case).
+fn forward_name(
+    header: &grammers_client::tl::enums::MessageFwdHeader,
+    peers: &HashMap<i64, (String, PeerRef)>,
+) -> Option<String> {
+    let grammers_client::tl::enums::MessageFwdHeader::Header(h) = header;
+    if let Some(name) = &h.from_name {
+        return Some(name.clone());
+    }
+    let chat_id = h
+        .from_id
+        .as_ref()
+        .map(|peer| grammers_session::types::PeerId::from(peer.clone()).bot_api_dialog_id())?;
+    peers.get(&chat_id).map(|(title, _)| title.clone())
+}
+
 async fn handle_request(
     tg: &Arc<Telegram>,
     ui_tx: &mpsc::UnboundedSender<UiMessage>,
@@ -933,22 +1258,7 @@ async fn handle_request(
                 Ok(messages) => {
                     let msgs: Vec<MsgRow> = messages
                         .into_iter()
-                        .map(|m| {
-                            let photo = m.media.map(|k| match k {
-                                tg::model::MediaKind::Photo { width, height } => {
-                                    (width, height)
-                                }
-                            });
-                            MsgRow {
-                                id: m.id,
-                                text: m.text,
-                                date: m.date,
-                                out: m.out,
-                                photo,
-                                photo_path: downloads.path(id, m.id),
-                                read: false,
-                            }
-                        })
+                        .map(|m| msg_row_from_info(m, id, downloads, peers))
                         .collect();
                     let _ = ui_tx.send(UiMessage::Messages {
                         id,
@@ -989,9 +1299,9 @@ async fn handle_request(
                 *peer_ref,
             );
         },
-        Request::SendMessage { id, text } => match peers.get(&id) {
+        Request::SendMessage { id, text, reply_to } => match peers.get(&id) {
             Some((_, peer_ref)) => {
-                if let Err(e) = tg.send_message(peer_ref, &text).await {
+                if let Err(e) = tg.send_message(peer_ref, &text, reply_to).await {
                     let _ = ui_tx.send(UiMessage::Error(format!("Send failed: {e}")));
                 }
             }
@@ -999,6 +1309,109 @@ async fn handle_request(
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
             }
         },
+        Request::SendMedia { id, path, caption, is_photo: _, reply_to, token } => {
+            match peers.get(&id) {
+                Some((_, peer_ref)) => spawn_upload(
+                    tg.clone(),
+                    ui_tx.clone(),
+                    downloads.clone(),
+                    id,
+                    *peer_ref,
+                    std::path::PathBuf::from(path),
+                    caption,
+                    reply_to,
+                    token,
+                ),
+                None => {
+                    let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+                }
+            }
+        }
+        Request::ForwardMessage { from_chat, msg_id, to_chat } => {
+            match (peers.get(&from_chat), peers.get(&to_chat)) {
+                (Some((_, from_peer)), Some((_, to_peer))) => {
+                    if let Err(e) = tg.forward_message(from_peer, msg_id, to_peer).await {
+                        let _ = ui_tx.send(UiMessage::Error(format!("Forward failed: {e}")));
+                    }
+                }
+                _ => {
+                    let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+                }
+            }
+        }
+        Request::DownloadDoc { chat_id, msg_id } => {
+            if let Some((_, peer_ref)) = peers.get(&chat_id) {
+                spawn_doc_download(
+                    tg.clone(),
+                    ui_tx.clone(),
+                    downloads.clone(),
+                    chat_id,
+                    *peer_ref,
+                    msg_id,
+                );
+            }
+        }
+        Request::Search { id, query } => {
+            if query.is_empty() {
+                // Nothing typed: clear the results instead of listing "all".
+                let _ = ui_tx.send(UiMessage::SearchResults {
+                    id,
+                    query: String::new(),
+                    hits: Vec::new(),
+                });
+                return;
+            }
+            let from = if let Some(chat_id) = id {
+                peers.get(&chat_id).map(|(title, peer_ref)| (chat_id, title.clone(), Some(*peer_ref)))
+            } else {
+                None
+            };
+            let hits = match from {
+                // In-chat search.
+                Some((chat_id, title, Some(peer_ref))) => {
+                    match tg.search_chat(&peer_ref, &query, SEARCH_LIMIT).await {
+                        Ok(hits) => hits
+                            .into_iter()
+                            .map(|m| SearchHit {
+                                chat_id,
+                                chat_title: title.clone(),
+                                row: msg_row_from_info(m, chat_id, downloads, peers),
+                            })
+                            .collect(),
+                        Err(e) => {
+                            let _ = ui_tx.send(UiMessage::Error(format!(
+                                "Search failed: {e}"
+                            )));
+                            return;
+                        }
+                    }
+                }
+                // Global search.
+                _ => match tg.search_global(&query, SEARCH_LIMIT).await {
+                    Ok(hits) => hits
+                        .into_iter()
+                        .map(|g| {
+                            let chat_title = peers
+                                .get(&g.peer_id)
+                                .map(|(t, _)| t.clone())
+                                .unwrap_or_else(|| "Chat".to_string());
+                            SearchHit {
+                                chat_id: g.peer_id,
+                                chat_title,
+                                row: msg_row_from_info(g.msg, g.peer_id, downloads, peers),
+                            }
+                        })
+                        .collect(),
+                    Err(e) => {
+                        let _ = ui_tx.send(UiMessage::Error(format!(
+                            "Search failed: {e}"
+                        )));
+                        return;
+                    }
+                },
+            };
+            let _ = ui_tx.send(UiMessage::SearchResults { id, query, hits });
+        }
         Request::EditMessage { id, msg_id, text } => match peers.get(&id) {
             Some((_, peer_ref)) => {
                 if let Err(e) = tg.edit_message(peer_ref, msg_id, &text).await {
@@ -1082,6 +1495,97 @@ fn spawn_photo(
             msg_id,
             path,
         });
+    });
+}
+
+/// Spawns a background media upload + send, reporting progress to the UI
+/// through the shared semaphore (uploads count as transfers like downloads).
+#[allow(clippy::too_many_arguments)]
+fn spawn_upload(
+    tg: Arc<Telegram>,
+    ui_tx: mpsc::UnboundedSender<UiMessage>,
+    downloads: Arc<Downloads>,
+    chat_id: i64,
+    peer_ref: PeerRef,
+    path: PathBuf,
+    caption: String,
+    reply_to: Option<i32>,
+    token: u64,
+) {
+    tokio::spawn(async move {
+        let _permit = downloads
+            .sem
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("download semaphore");
+        // Progress callbacks hop through a std channel drained by a tiny
+        // forwarder task: the upload callback is sync (`FnMut`) and must not
+        // block on the async UI channel.
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<f32>();
+        let forwarder = tokio::spawn({
+            let ui_tx = ui_tx.clone();
+            async move {
+                while let Some(p) = progress_rx.recv().await {
+                    let _ = ui_tx.send(UiMessage::UploadProgress {
+                        chat_id,
+                        token,
+                        progress: p,
+                    });
+                }
+            }
+        });
+        let result = {
+            let progress_tx = progress_tx.clone();
+            tg.send_media(&peer_ref, &path, &caption, reply_to, move |sent, total| {
+                let p = if total > 0 { sent as f32 / total as f32 } else { 1.0 };
+                let _ = progress_tx.send(p.clamp(0.0, 1.0));
+            })
+            .await
+        };
+        drop(progress_tx);
+        let _ = forwarder.await;
+        match result {
+            Ok(_) => {
+                let _ = ui_tx.send(UiMessage::UploadDone { chat_id, token });
+            }
+            Err(e) => {
+                let _ = ui_tx.send(UiMessage::UploadDone { chat_id, token });
+                let _ = ui_tx.send(UiMessage::Error(format!("Send failed: {e}")));
+            }
+        }
+    });
+}
+
+/// Spawns a background document download (cached), reporting the on-disk path.
+fn spawn_doc_download(
+    tg: Arc<Telegram>,
+    ui_tx: mpsc::UnboundedSender<UiMessage>,
+    downloads: Arc<Downloads>,
+    chat_id: i64,
+    peer_ref: PeerRef,
+    msg_id: i32,
+) {
+    if downloads.docs.lock().unwrap().contains_key(&(chat_id, msg_id)) {
+        return;
+    }
+    tokio::spawn(async move {
+        let _permit = downloads
+            .sem
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("download semaphore");
+        let dir = cache_dir().join("media").join(chat_id.to_string());
+        let path = match tg.download_document(&peer_ref, msg_id, &dir).await {
+            Ok(Some(p)) => {
+                let p = p.to_string_lossy().into_owned();
+                downloads.insert_doc(chat_id, msg_id, p.clone());
+                Some(p)
+            }
+            _ => None,
+        };
+        let _ = ui_tx.send(UiMessage::DocReady { chat_id, msg_id, path });
     });
 }
 

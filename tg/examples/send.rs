@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
         anyhow::anyhow!("chat \"{target}\" not found")
     })?;
     eprintln!("[send] to \"{}\": {text}", chat.title);
-    tg.send_message(&chat.peer_ref, &text).await?;
+    tg.send_message(&chat.peer_ref, &text, None).await?;
     eprintln!("[send] sent");
 
     tg.shutdown().await;

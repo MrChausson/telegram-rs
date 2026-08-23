@@ -10,7 +10,7 @@ use grammers_client::tl;
 use grammers_mtsender::SenderPool;
 use grammers_session::updates::UpdatesLike;
 
-use crate::model::{ChatInfo, MediaKind, MessageInfo};
+use crate::model::{ChatInfo, ForwardInfo, GlobalHit, MediaKind, MessageInfo};
 use crate::session::FileSession;
 
 /// Wrapped Telegram client with the network runtime running in the background.
@@ -135,15 +135,46 @@ impl Telegram {
         let mut it = self.client.iter_messages(*peer).limit(limit);
         let mut out = Vec::new();
         while let Some(msg) = it.next().await? {
-            out.push(MessageInfo {
-                id: msg.id(),
-                text: msg.text().to_string(),
-                date: msg.date().timestamp() as i32,
-                out: msg.outgoing(),
-                media: media_kind(msg.media().as_ref()),
-            });
+            out.push(message_info(&msg));
         }
         out.reverse();
+        Ok(out)
+    }
+
+    /// Searches a chat's history for `query`, newest-first, mapped to the
+    /// display model like [`Telegram::get_messages`].
+    pub async fn search_chat(
+        &self,
+        peer: &grammers_session::types::PeerRef,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MessageInfo>> {
+        let mut it = self.client.search_messages(*peer).query(query).limit(limit);
+        let mut out = Vec::new();
+        while let Some(msg) = it.next().await? {
+            out.push(message_info(&msg));
+        }
+        Ok(out)
+    }
+
+    /// Searches all chats by text; each hit carries the originating chat's id
+    /// (for the caller to resolve into a title via the dialog list).
+    pub async fn search_global(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<GlobalHit>> {
+        let mut it = self.client.search_all_messages().query(query).limit(limit);
+        let mut out = Vec::new();
+        while let Some(msg) = it.next().await? {
+            let Some(peer) = msg.peer() else {
+                continue;
+            };
+            out.push(GlobalHit {
+                peer_id: peer.id().bot_api_dialog_id(),
+                msg: message_info(&msg),
+            });
+        }
         Ok(out)
     }
 
@@ -257,20 +288,139 @@ impl Telegram {
         Ok(())
     }
 
-    /// Sends a text message to a chat.
+    /// Sends a text message to a chat, optionally as a reply to `reply_to`.
     pub async fn send_message(
         &self,
         peer: &grammers_session::types::PeerRef,
         text: &str,
+        reply_to: Option<i32>,
     ) -> Result<()> {
+        let input = grammers_client::message::InputMessage::new()
+            .text(text)
+            .reply_to(reply_to);
         self.client
-            .send_message(
-                *peer,
-                grammers_client::message::InputMessage::new().text(text),
-            )
+            .send_message(*peer, input)
             .await
             .context("sending message")
             .map(|_| ())
+    }
+
+    /// Uploads and sends a file to a chat: images (jpeg/png/webp/gif/bmp)
+    /// go out as compressed photos, everything else as a document. Returns
+    /// the id of the sent message.
+    ///
+    /// `on_progress(bytes_sent, total)` fires during the upload (at least
+    /// every [`UPLOAD_PROGRESS_STEP`] bytes) so callers can surface progress.
+    pub async fn send_media(
+        &self,
+        peer: &grammers_session::types::PeerRef,
+        path: &std::path::Path,
+        caption: &str,
+        reply_to: Option<i32>,
+        on_progress: impl FnMut(u64, u64) + Send + 'static,
+    ) -> Result<i32> {
+        let uploaded = self.upload_with_progress(path, on_progress).await?;
+        // `document()` derives the file-name attribute from the upload's
+        // name, which `upload_with_progress` sets from the path.
+        let mut input = grammers_client::message::InputMessage::new()
+            .text(caption)
+            .reply_to(reply_to);
+        input = if is_image(path) {
+            input.photo(uploaded)
+        } else {
+            input.document(uploaded)
+        };
+        let sent = self
+            .client
+            .send_message(*peer, input)
+            .await
+            .context("sending media")?;
+        Ok(sent.id())
+    }
+
+    /// Forwards one message from a chat into another. Returns the id of the
+    /// forwarded copy in the destination.
+    pub async fn forward_message(
+        &self,
+        from_peer: &grammers_session::types::PeerRef,
+        msg_id: i32,
+        to_peer: &grammers_session::types::PeerRef,
+    ) -> Result<Option<i32>> {
+        let sent = self
+            .client
+            .forward_messages(*to_peer, &[msg_id], *from_peer)
+            .await
+            .context("forwarding message")?;
+        Ok(sent.into_iter().flatten().next().map(|m| m.id()))
+    }
+
+    /// Downloads a message's document into `dir` (`{msg_id}_{name}`), returning
+    /// the saved path, or `None` if the message carries no document.
+    /// Cached on disk like photos.
+    pub async fn download_document(
+        &self,
+        peer_ref: &grammers_session::types::PeerRef,
+        msg_id: i32,
+        dir: &std::path::Path,
+    ) -> Result<Option<std::path::PathBuf>> {
+        std::fs::create_dir_all(dir)?;
+        let msgs = self
+            .client
+            .get_messages_by_id(*peer_ref, &[msg_id])
+            .await
+            .context("fetching message")?;
+        let Some(Some(msg)) = msgs.into_iter().next() else {
+            return Ok(None);
+        };
+        let Some(Media::Document(doc)) = msg.media().clone() else {
+            return Ok(None);
+        };
+        let raw_name = doc.name().unwrap_or("file").to_string();
+        // The file name comes off the wire: keep only the last component to
+        // avoid path traversal when building the cache path.
+        let safe_name = raw_name.rsplit(['/', '\\']).next().unwrap_or("file");
+        let cached = dir.join(format!("{msg_id}_{safe_name}"));
+        if cached.exists() {
+            return Ok(Some(cached));
+        }
+        let mut it = self.client.iter_download(&doc);
+        let mut bytes = Vec::new();
+        while let Some(chunk) = it.next().await? {
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let tmp = dir.join(format!("{msg_id}.tmp"));
+        std::fs::write(&tmp, &bytes)?;
+        std::fs::rename(&tmp, &cached)?;
+        Ok(Some(cached))
+    }
+
+    /// Uploads a file with progress reporting: `on_progress(bytes_sent,
+    /// total)` is called at least every [`UPLOAD_PROGRESS_STEP`] bytes.
+    ///
+    /// grammers' `upload_stream` reads through our counting wrapper, so no
+    /// extra buffering happens and the callback rate is proportional to real
+    /// network progress.
+    async fn upload_with_progress(
+        &self,
+        path: &std::path::Path,
+    on_progress: impl FnMut(u64, u64) + Send + 'static,
+) -> Result<grammers_client::media::Uploaded> {
+        let size = tokio::fs::metadata(path).await?.len();
+        let file = tokio::fs::File::open(path)
+            .await
+            .with_context(|| format!("opening {}", path.display()))?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".to_string());
+        let mut reader = ProgressReader::new(file, size, on_progress);
+        self.client
+            .upload_stream(&mut reader, size as usize, name)
+            .await
+            .map_err(|e| anyhow::anyhow!("upload failed: {e}"))
     }
 
     /// Stops the network runtime.
@@ -456,16 +606,118 @@ impl Downloadable for RawPhoto {
     }
 }
 
+/// Maps a grammers `Message` to the display model shared by history and
+/// search results (reply/forward/media extracted the same way everywhere).
+fn message_info(msg: &grammers_client::message::Message) -> MessageInfo {
+    MessageInfo {
+        id: msg.id(),
+        text: msg.text().to_string(),
+        date: msg.date().timestamp() as i32,
+        out: msg.outgoing(),
+        media: media_kind(msg.media().as_ref()),
+        reply_to: msg.reply_to_message_id(),
+        forwarded: msg
+            .forward_header()
+            .as_ref()
+            .and_then(forward_info),
+    }
+}
+
 /// Media kind (for layout) of a message attachment.
 pub fn media_kind(media: Option<&Media>) -> Option<MediaKind> {
-    let Media::Photo(photo) = media? else {
+    match media? {
+        Media::Photo(photo) => {
+            let thumb = pick_photo_size(photo)?;
+            Some(MediaKind::Photo {
+                width: thumb.0,
+                height: thumb.1,
+            })
+        }
+        Media::Document(doc) => Some(MediaKind::Document {
+            name: doc.name().unwrap_or_default().to_string(),
+            size: doc.size().map(|s| s as i64).unwrap_or(0),
+        }),
+        _ => None,
+    }
+}
+
+/// True when the path looks like an image that Telegram can compress into a
+/// photo (by extension — no content sniffing).
+pub fn is_image(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp")
+    )
+}
+
+/// Extracts the forward origin from a raw forward header: the originating
+/// chat id when resolvable, otherwise the anonymous `from_name`.
+fn forward_info(header: &tl::enums::MessageFwdHeader) -> Option<ForwardInfo> {
+    let tl::enums::MessageFwdHeader::Header(h) = header;
+    let chat_id = h
+        .from_id
+        .as_ref()
+        .map(|peer| grammers_session::types::PeerId::from(peer.clone()).bot_api_dialog_id());
+    let name = h.from_name.clone();
+    if chat_id.is_none() && name.is_none() {
         return None;
-    };
-    let thumb = pick_photo_size(photo)?;
-    Some(MediaKind::Photo {
-        width: thumb.0,
-        height: thumb.1,
-    })
+    }
+    Some(ForwardInfo { chat_id, name })
+}
+
+/// Minimum byte delta between two progress callbacks (256 KiB): keeps the UI
+/// feed quiet without visibly stepping the progress bar.
+const UPLOAD_PROGRESS_STEP: u64 = 256 * 1024;
+
+/// An [`tokio::io::AsyncRead`] wrapper that counts bytes handed to the
+/// uploader and reports progress through a callback.
+struct ProgressReader<R> {
+    inner: R,
+    sent: u64,
+    total: u64,
+    last_reported: u64,
+    on_progress: Box<dyn FnMut(u64, u64) + Send>,
+}
+
+impl<R> ProgressReader<R> {
+    fn new(inner: R, total: u64, on_progress: impl FnMut(u64, u64) + Send + 'static) -> Self {
+        Self {
+            inner,
+            sent: 0,
+            total,
+            last_reported: 0,
+            on_progress: Box::new(on_progress),
+        }
+    }
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for ProgressReader<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        match std::pin::Pin::new(&mut self.inner).poll_read(cx, buf) {
+            std::task::Poll::Ready(result) => {
+                let read = (buf.filled().len() - before) as u64;
+                if read > 0 {
+                    self.sent += read;
+                    let sent = self.sent;
+                    let total = self.total;
+                    if sent - self.last_reported >= UPLOAD_PROGRESS_STEP || sent >= total {
+                        self.last_reported = sent;
+                        (self.on_progress)(sent, total);
+                    }
+                }
+                std::task::Poll::Ready(result)
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
 }
 
 /// A lightweight downloadable for a photo (a ~256 px thumbnail).

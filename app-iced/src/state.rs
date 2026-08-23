@@ -2,7 +2,23 @@
 //! here: `update` turns `Message`s into state changes + `Request`s, exactly
 //! like the custom `ui` crate's `UiState`, so it can be unit tested headlessly.
 
-use crate::bridge::{ChatRow, MsgRow, Request, UiMessage};
+use crate::bridge::{ChatRow, DocMeta, MsgRow, Request, SearchHit, UiMessage};
+
+/// One-line preview of a message for list rows / reply snippets: the text,
+/// or a media placeholder when there is none.
+pub fn preview_text(text: &str, photo: &Option<(u32, u32)>, doc: &Option<DocMeta>) -> String {
+    if !text.is_empty() {
+        return text.to_string();
+    }
+    if let Some(doc) = doc {
+        let name = if doc.name.is_empty() { "Fichier" } else { &doc.name };
+        return format!("📄 {name}");
+    }
+    if photo.is_some() {
+        return "📷 Photo".to_string();
+    }
+    String::new()
+}
 
 use std::io::Write;
 use std::sync::Mutex;
@@ -20,6 +36,23 @@ pub enum LoginStep {
 pub struct ContextMenu {
     /// Index of the message row the menu is over.
     pub row: usize,
+}
+
+/// Where the search UI is currently searching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMode {
+    /// Search across all chats (opened from the list header).
+    Global,
+    /// Search inside the open chat only.
+    InChat,
+}
+
+/// The composer is replying to a message: `(msg_id, preview snippet)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyTarget {
+    pub msg_id: i32,
+    /// Short preview of the replied-to text (or a media placeholder).
+    pub snippet: String,
 }
 
 /// Cached virtualization metrics for the open chat's message list, so a scroll
@@ -71,6 +104,32 @@ pub struct State {
     pub context_menu: Option<ContextMenu>,
     /// Message id being edited; its old text lives in `composer`.
     pub editing: Option<i32>,
+    /// Message the composer is replying to, if any.
+    pub reply_target: Option<ReplyTarget>,
+    /// Index of the message being forwarded (chat-picker overlay open).
+    pub forward_pick: Option<usize>,
+    /// A downloaded document the user asked to open (consumed by the shell
+    /// layer, which launches the system opener).
+    pub open_file: Option<String>,
+
+    /// Active search UI, if any: global or in-chat.
+    pub search_mode: Option<SearchMode>,
+    /// Live query of the search field.
+    pub search_query: String,
+    /// Latest search hits (from `UiMessage::SearchResults`).
+    pub search_hits: Vec<SearchHit>,
+    /// True while a search result may still arrive (keeps "…" placeholder).
+    pub search_pending: bool,
+    /// Target content Y to scroll the message list to (a search jump), consumed
+    /// by the shell after the next view build.
+    pub scroll_target: Option<f32>,
+    /// Id of a message to jump to once it appears in `messages` (used when the
+    /// search hit already lives in the loaded history).
+    pending_jump_id: Option<i32>,
+
+    /// Monotonic token source for optimistic media sends (ties upload
+    /// progress events back to their row).
+    next_media_token: u64,
 
     pub login_step: LoginStep,
     pub login_input: String,
@@ -148,6 +207,16 @@ impl State {
             typing: false,
             context_menu: None,
             editing: None,
+            reply_target: None,
+            forward_pick: None,
+            open_file: None,
+            search_mode: None,
+            search_query: String::new(),
+            search_hits: Vec::new(),
+            search_pending: false,
+            scroll_target: None,
+            pending_jump_id: None,
+            next_media_token: 1,
             login_step: LoginStep::Phone,
             login_input: String::new(),
             composer: String::new(),
@@ -185,10 +254,11 @@ impl State {
     }
 
     /// `--scroll-perf=SECS`: self-drive a synthetic fling for end-to-end
-    /// scroll-rate measurement (see [`Self::advance_scroll_sim`]).
+    /// scroll-rate measurement (see [`Self::advance_scroll_sim`]). The FPS
+    /// overlay only turns on for an actual run, not for the default 0.
     pub fn with_scroll_perf(mut self, secs: f32) -> Self {
         self.scroll_perf_dur = secs;
-        self.perf_show = true;
+        self.perf_show = secs > 0.0;
         self
     }
 
@@ -367,10 +437,21 @@ impl State {
                     if prev_len == 0 || self.messages.len() > prev_len {
                         self.scroll_to_bottom = true;
                     }
+                    self.resolve_pending_jump();
                     self.invalidate_layout();
                 }
             }
-            UiMessage::NewMessage { chat_id, id, text, date, out, photo } => {
+            UiMessage::NewMessage {
+                chat_id,
+                id,
+                text,
+                date,
+                out,
+                photo,
+                doc,
+                reply_to,
+                forwarded_from,
+            } => {
                 // Open chat? Merge the message (dedupe the optimistic local
                 // send, which is tagged id=0).
                 if self.open_chat == Some(chat_id) {
@@ -379,12 +460,23 @@ impl State {
                     if let Some(m) = rows.iter_mut().find(|m| m.id == id) {
                         m.text = text;
                         m.out = out;
-                    } else if let Some(i) =
-                        rows.iter().position(|m| m.id == 0 && m.text == text)
-                    {
+                        m.photo = photo;
+                        m.doc = doc;
+                        m.reply_to = reply_to;
+                        m.forwarded_from = forwarded_from;
+                        m.uploading = None;
+                    } else if let Some(i) = rows.iter().position(|m| {
+                        m.id == 0
+                            && (m.text == text || (m.uploading.is_some() && out))
+                    }) {
                         let m = &mut rows[i];
                         m.id = id;
                         m.out = out;
+                        m.photo = photo.or(m.photo.take());
+                        m.doc = doc.or(m.doc.take());
+                        m.reply_to = reply_to;
+                        m.forwarded_from = forwarded_from;
+                        m.uploading = None;
                     } else {
                         rows.push(MsgRow {
                             id,
@@ -393,6 +485,12 @@ impl State {
                             out,
                             photo,
                             photo_path: None,
+                            doc,
+                            doc_path: None,
+                            reply_to,
+                            forwarded_from,
+                            uploading: None,
+                            upload_token: None,
                             read: false,
                         });
                     }
@@ -406,7 +504,7 @@ impl State {
                 // Otherwise: update the list row (preview + unread only for
                 // incoming messages).
                 if let Some(row) = self.dialogs.iter_mut().find(|r| r.id == chat_id) {
-                    row.subtitle = text;
+                    row.subtitle = preview_text(&text, &photo, &doc);
                     row.date = date;
                     if !out {
                         row.unread += 1;
@@ -446,6 +544,54 @@ impl State {
                         }
                     }
                     self.invalidate_layout();
+                }
+            }
+            UiMessage::DocReady { chat_id, msg_id, path } => {
+                if self.open_chat == Some(chat_id) {
+                    for m in &mut self.messages {
+                        if m.id == msg_id {
+                            m.doc_path = path;
+                            break;
+                        }
+                    }
+                    self.invalidate_layout();
+                }
+            }
+            UiMessage::UploadProgress { chat_id, token, progress } => {
+                if self.open_chat != Some(chat_id) {
+                    return;
+                }
+                for m in &mut self.messages {
+                    if m.upload_token == Some(token) {
+                        m.uploading = Some(progress.clamp(0.0, 1.0));
+                        break;
+                    }
+                }
+            }
+            UiMessage::UploadDone { chat_id, token } => {
+                if self.open_chat != Some(chat_id) {
+                    return;
+                }
+                // Upload finished: hold at 100% until the server echo
+                // replaces the row (dedup clears `uploading`).
+                for m in &mut self.messages {
+                    if m.upload_token == Some(token) && m.uploading.is_some() {
+                        m.uploading = Some(1.0);
+                        break;
+                    }
+                }
+            }
+            UiMessage::SearchResults { id, query, hits } => {
+                // Guard races: only apply if the search UI is still open and
+                // matches the response's mode/query.
+                let mode_matches = match (&self.search_mode, id) {
+                    (Some(SearchMode::Global), None) => true,
+                    (Some(SearchMode::InChat), Some(chat_id)) => self.open_chat == Some(chat_id),
+                    _ => false,
+                };
+                self.search_pending = false;
+                if mode_matches && self.search_query == query {
+                    self.search_hits = hits;
                 }
             }
             UiMessage::ChatRead { id } => {
@@ -534,20 +680,41 @@ impl State {
             self.dismiss_menu();
             return;
         }
-        if let Some(path) = self.photo_at(row) {
-            self.viewer = Some(path);
+        if let Some(m) = self.messages.get(row) {
+            // Document: download on first click, open once cached.
+            if m.doc.is_some() {
+                match &m.doc_path {
+                    Some(path) => self.open_file = Some(path.clone()),
+                    None => {
+                        let _ = self.req_tx.send(Request::DownloadDoc {
+                            chat_id: self.open_chat.unwrap_or(0),
+                            msg_id: m.id,
+                        });
+                    }
+                }
+                return;
+            }
+            if let Some(path) = &m.photo_path {
+                self.viewer = Some(path.clone());
+            }
         }
     }
 
-    /// Right-click over a message row: open the context menu (outgoing only,
-    /// matching the original client).
+    /// Right-click over a message row: open the context menu (any message;
+    /// edit stays restricted to outgoing rows).
     pub fn open_context(&mut self, row: usize) {
-        let Some(m) = self.messages.get(row) else { return };
-        if !m.out {
+        if self.messages.get(row).is_none() {
             return;
         }
         self.context_menu = Some(ContextMenu { row });
         self.invalidate_layout();
+    }
+
+    /// True when the context menu's target can be edited (own text messages).
+    pub fn context_can_edit(&self) -> bool {
+        self.context_menu
+            .and_then(|c| self.messages.get(c.row))
+            .is_some_and(|m| m.out && m.doc.is_none())
     }
 
     /// Dismisses the context menu (a click outside, or opening another one).
@@ -559,12 +726,72 @@ impl State {
         self.invalidate_layout();
     }
 
-    /// Escape: closes the context menu and cancels editing.
+    /// Escape: closes the context menu, cancels editing, the reply target or
+    /// the forward picker.
     pub fn escape(&mut self) {
+        // The search UI is active: it hides the chat pane, so Escape (and the
+        // back handler) close it before touching the message rows.
+        if self.search_open() {
+            self.close_search();
+            return;
+        }
         self.context_menu = None;
         if self.editing.is_some() {
             self.editing = None;
             self.composer.clear();
+        }
+        if self.reply_target.take().is_some() {
+            // Reply cancelled; keep the typed text.
+        }
+        if self.forward_pick.take().is_some() {
+            return; // overlay closed; skip a redundant layout invalidation
+        }
+        self.invalidate_layout();
+    }
+
+    /// Click on the context menu's "Répondre" item.
+    pub fn context_reply(&mut self) {
+        let Some(menu) = self.context_menu.take() else {
+            return;
+        };
+        let Some(m) = self.messages.get(menu.row) else {
+            return;
+        };
+        let snippet = preview_text(&m.text, &m.photo, &m.doc);
+        self.reply_target = Some(ReplyTarget {
+            msg_id: m.id,
+            snippet,
+        });
+        // Replying is a composer state change, not a row-height change.
+    }
+
+    /// Click on the context menu's "Transférer" item: opens the chat picker.
+    pub fn context_forward(&mut self) {
+        let Some(menu) = self.context_menu.take() else {
+            return;
+        };
+        if self.messages.get(menu.row).is_none() {
+            return;
+        }
+        self.forward_pick = Some(menu.row);
+        self.invalidate_layout();
+    }
+
+    /// Confirms a forward into `to_chat` (chat-picker selection).
+    pub fn forward_to(&mut self, to_chat: i64) {
+        let Some(row) = self.forward_pick.take() else {
+            return;
+        };
+        let from_chat = match self.open_chat {
+            Some(id) => id,
+            None => return,
+        };
+        if let Some(m) = self.messages.get(row) {
+            let _ = self.req_tx.send(Request::ForwardMessage {
+                from_chat,
+                msg_id: m.id,
+                to_chat,
+            });
         }
         self.invalidate_layout();
     }
@@ -632,21 +859,50 @@ impl State {
                 }
             }
         } else if let Some(id) = self.open_chat {
+            let reply_to = self.reply_target.take().map(|r| r.msg_id);
             // Optimistic local send: the id and date are unknown (incoming
             // updates will provide them).
             self.messages.push(MsgRow {
-                id: 0,
-                text: text.clone(),
-                date: 0,
-                out: true,
-                photo: None,
-                photo_path: None,
-                read: false,
+                reply_to,
+                ..MsgRow::text(0, text.clone(), 0, true)
             });
-            let _ = self.req_tx.send(Request::SendMessage { id, text });
+            let _ = self.req_tx.send(Request::SendMessage { id, text, reply_to });
+            self.typing = false;
         }
         self.composer.clear();
-        self.typing = false;
+        self.scroll_to_bottom = true;
+        self.invalidate_layout();
+    }
+
+    /// Sends a picked file to the open chat: optimistic media row with a
+    /// live upload progress, then the server echo replaces it.
+    pub fn send_media(&mut self, path: String) {
+        let Some(id) = self.open_chat else { return };
+        let is_photo = crate::looks_like_image(&path);
+        let caption = std::mem::take(&mut self.composer);
+        let reply_to = self.reply_target.take().map(|r| r.msg_id);
+        let token = self.next_media_token;
+        self.next_media_token += 1;
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.messages.push(MsgRow {
+            doc: (!is_photo).then_some(crate::bridge::DocMeta { name, size: 0 }),
+            photo: is_photo.then_some((0, 0)),
+            uploading: Some(0.0),
+            upload_token: Some(token),
+            reply_to,
+            ..MsgRow::text(0, caption.clone(), 0, true)
+        });
+        let _ = self.req_tx.send(Request::SendMedia {
+            id,
+            path,
+            caption,
+            is_photo,
+            reply_to,
+            token,
+        });
         self.scroll_to_bottom = true;
         self.invalidate_layout();
     }
@@ -659,6 +915,9 @@ impl State {
         self.chat_title.clear();
         self.editing = None;
         self.context_menu = None;
+        self.reply_target = None;
+        self.forward_pick = None;
+        self.pending_jump_id = None;
         self.composer.clear();
         let _ = self.req_tx.send(Request::OpenChat { id });
         let _ = self.req_tx.send(Request::MarkRead { id });
@@ -666,12 +925,120 @@ impl State {
     }
 
     /// Path of the photo attached to row, if any and already downloaded.
+    #[allow(dead_code)]
     fn photo_at(&self, row: usize) -> Option<String> {
         let m = self.messages.get(row)?;
         if m.photo.is_some() {
             m.photo_path.clone()
         } else {
             None
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Search (global + in-chat)
+    // -------------------------------------------------------------------
+
+    /// Opens the search UI (`mode` decides where it queries).
+    pub fn open_search(&mut self, mode: SearchMode) {
+        // Keep the query if it was already typed; start fresh otherwise.
+        self.search_mode = Some(mode);
+        self.search_hits.clear();
+        self.search_pending = false;
+    }
+
+    /// Closes the search UI (Escape, ✕, or after jumping to a result).
+    pub fn close_search(&mut self) {
+        self.search_mode = None;
+        self.search_query.clear();
+        self.search_hits.clear();
+        self.search_pending = false;
+        self.pending_jump_id = None;
+    }
+
+    /// The search field changed: update the query and re-run (the network
+    /// layer throttles identical queries).
+    pub fn search_changed(&mut self, query: String) {
+        self.search_query = query.clone();
+        let q = query.trim();
+        if q.is_empty() {
+            self.search_hits.clear();
+            self.search_pending = false;
+            return;
+        }
+        self.search_pending = true;
+        let id = match self.search_mode {
+            Some(SearchMode::Global) => None,
+            Some(SearchMode::InChat) => self.open_chat,
+            None => return,
+        };
+        let _ = self.req_tx.send(Request::Search { id, query: q.to_string() });
+    }
+
+    /// A result was clicked: jump to the message, or open its chat.
+    pub fn click_search_hit(&mut self, idx: usize) {
+        let Some(hit) = self.search_hits.get(idx).cloned() else {
+            return;
+        };
+        // Jumping only works when the hit is the open chat's loaded history.
+        if self.search_mode == Some(SearchMode::InChat)
+            && self.open_chat == Some(hit.chat_id)
+        {
+            if let Some(y) = self.message_top_of(hit.row.id) {
+                self.scroll_to_bottom = false;
+                self.scroll_target = Some(y);
+            } else {
+                // Not in the loaded window (or cache cold): head to bottom.
+                self.scroll_to_bottom = true;
+            }
+            self.close_search();
+            self.invalidate_layout();
+            return;
+        }
+        // Different chat: open it; if the message is not in the (capped)
+        // history the scroll naturally lands at the bottom.
+        self.pending_jump_id = Some(hit.row.id);
+        self.open_chat(hit.chat_id);
+        self.close_search();
+    }
+
+    /// True when the search UI is open.
+    pub fn search_open(&self) -> bool {
+        self.search_mode.is_some()
+    }
+
+    /// Content Y of `msg_id` in the open chat, per the cached layout, or None
+    /// if it isn't in the loaded history (or the cache was never built).
+    fn message_top_of(&self, msg_id: i32) -> Option<f32> {
+        let idx = self.messages.iter().position(|m| m.id == msg_id)?;
+        let cache = self
+            .layout_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let c = cache.as_ref()?;
+        if c.epoch != self.layout_epoch {
+            return None;
+        }
+        let y = c.tops.get(idx).copied()?;
+        // Keep a little margin above the target so it isn't glued to the top.
+        Some((y - 24.0).max(0.0))
+    }
+
+    /// Consumes and returns a pending scroll target (the shell turns it into a
+    /// scrollable scroll). Also resolves `pending_jump_id` once the history
+    /// arrived.
+    pub fn take_scroll_target(&mut self) -> Option<f32> {
+        self.scroll_target.take()
+    }
+
+    /// After `open_chat`, `Messages` arrives: try to resolve a pending jump.
+    fn resolve_pending_jump(&mut self) {
+        let Some(id) = self.pending_jump_id.take() else {
+            return;
+        };
+        if let Some(y) = self.message_top_of(id) {
+            self.scroll_to_bottom = false;
+            self.scroll_target = Some(y);
         }
     }
 
@@ -696,22 +1063,10 @@ mod tests {
         state.open_chat = Some(42);
         state.messages = vec![
             MsgRow {
-                id: 1,
-                text: "incoming".into(),
-                date: 100,
-                out: false,
-                photo: None,
-                photo_path: None,
-                read: false,
+                ..MsgRow::text(1, "incoming", 100, false)
             },
             MsgRow {
-                id: 2,
-                text: "mine".into(),
-                date: 200,
-                out: true,
-                photo: None,
-                photo_path: None,
-                read: true,
+                ..MsgRow::text(2, "mine", 200, true)
             },
         ];
         (state, req_rx)
@@ -742,10 +1097,13 @@ mod tests {
     }
 
     #[test]
-    fn left_click_incoming_does_not_open_menu() {
+    fn right_click_incoming_opens_menu_without_edit() {
         let (mut state, _) = demo_state();
         state.open_context(0); // row 0 is incoming
-        assert!(state.context_menu.is_none());
+        // The menu opens for any message now (reply/forward), but editing
+        // stays restricted to outgoing rows.
+        assert!(state.context_menu.is_some());
+        assert!(!state.context_can_edit());
     }
 
     #[test]
@@ -809,6 +1167,9 @@ mod tests {
             date: 300,
             out: false,
             photo: None,
+            doc: None,
+            reply_to: None,
+            forwarded_from: None,
         });
         assert_eq!(state.messages.len(), 3);
         assert!(!state.typing);
@@ -833,6 +1194,9 @@ mod tests {
             date: 400,
             out: false,
             photo: None,
+            doc: None,
+            reply_to: None,
+            forwarded_from: None,
         });
         // The open chat's rows must be untouched.
         assert_eq!(state.messages.len(), 2);
@@ -857,6 +1221,9 @@ mod tests {
             date: 0,
             out: true,
             photo: None,
+            doc: None,
+            reply_to: None,
+            forwarded_from: None,
         });
         // The update merged with the optimistic row: no duplicate.
         assert_eq!(state.messages.len(), 3);
@@ -883,23 +1250,11 @@ mod tests {
     fn outbox_read_marks_only_the_open_chat_sent_messages() {
         let (mut state, _) = demo_state();
         state.messages.push(MsgRow {
-            id: 55,
-            text: "mine".into(),
-            date: 0,
-            out: true,
-            photo: None,
-            photo_path: None,
-            read: false,
-        });
+                ..MsgRow::text(55, "mine", 0, true)
+            });
         state.messages.push(MsgRow {
-            id: 56,
-            text: "mine too".into(),
-            date: 0,
-            out: true,
-            photo: None,
-            photo_path: None,
-            read: false,
-        });
+                ..MsgRow::text(56, "mine too", 0, true)
+            });
 
         // Read only up to id 55.
         state.on_message(UiMessage::OutboxRead {
@@ -961,6 +1316,9 @@ mod tests {
             date: 400,
             out: false,
             photo: None,
+            doc: None,
+            reply_to: None,
+            forwarded_from: None,
         });
         assert_eq!(state.dialogs[0].subtitle, "ping");
         assert_eq!(state.dialogs[0].unread, 1);
@@ -977,6 +1335,218 @@ mod tests {
         state.escape();
         assert!(state.editing.is_none());
         assert!(state.composer.is_empty());
+        assert!(state.context_menu.is_none());
+    }
+
+    #[test]
+    fn reply_armed_then_sent_with_the_message() {
+        let (mut state, mut req_rx) = demo_state();
+        state.open_context(0); // incoming row
+        state.context_reply();
+        assert!(state.reply_target.is_some(), "reply target armed");
+        state.composer = "ma réponse".into();
+        state.submit();
+
+        // The request carries the reply id and the optimistic row quotes it.
+        let reqs = drain(&mut req_rx);
+        assert!(matches!(
+            reqs.last(),
+            Some(Request::SendMessage { id: _, reply_to: Some(1), text }) if text == "ma réponse"
+        ));
+        let last = state.messages.last().unwrap();
+        assert_eq!(last.reply_to, Some(1));
+        // The reply is consumed after the send.
+        assert!(state.reply_target.is_none());
+    }
+
+    #[test]
+    fn escape_cancels_reply_but_keeps_text() {
+        let (mut state, _) = demo_state();
+        state.open_context(1);
+        state.context_reply();
+        state.composer = "brouillon".into();
+        state.escape();
+        assert!(state.reply_target.is_none());
+        assert_eq!(state.composer, "brouillon");
+    }
+
+    #[test]
+    fn forward_picks_a_chat_and_sends_one_request() {
+        let (mut state, mut req_rx) = demo_state();
+        state.dialogs = vec![ChatRow {
+            id: 7,
+            title: "Cible".into(),
+            subtitle: String::new(),
+            date: 0,
+            unread: 0,
+            avatar_path: None,
+        }];
+        state.open_context(1); // forward my own message (id 2)
+        state.context_forward();
+        assert_eq!(state.forward_pick, Some(1));
+
+        state.forward_to(7);
+        let reqs = drain(&mut req_rx);
+        assert!(matches!(
+            reqs.last(),
+            Some(Request::ForwardMessage { from_chat: 42, msg_id: 2, to_chat: 7 })
+        ));
+        assert!(state.forward_pick.is_none(), "picker closes after send");
+    }
+
+    #[test]
+    fn media_send_pushes_optistic_row_and_tracks_progress() {
+        let (mut state, mut req_rx) = demo_state();
+        state.send_media("/tmp/vacances.png".into());
+
+        // Optimistic photo row with a fresh upload progress.
+        let last = state.messages.last().unwrap();
+        assert_eq!(last.id, 0);
+        assert_eq!(last.photo, Some((0, 0)));
+        assert_eq!(last.uploading, Some(0.0));
+        assert!(last.upload_token.is_some());
+
+        let token = last.upload_token.unwrap();
+        let reqs = drain(&mut req_rx);
+        match reqs.last() {
+            Some(Request::SendMedia { id: 42, path, is_photo, token: t, .. }) => {
+                assert_eq!(path, "/tmp/vacances.png");
+                assert!(is_photo, "png must be detected as a photo");
+                assert_eq!(*t, token);
+            }
+            other => panic!("expected SendMedia, got {other:?}"),
+        }
+
+        // Progress updates flow into the same row.
+        state.on_message(UiMessage::UploadProgress { chat_id: 42, token, progress: 0.5 });
+        assert_eq!(state.messages.last().unwrap().uploading, Some(0.5));
+
+        // The server echo replaces the optimistic row.
+        state.on_message(UiMessage::NewMessage {
+            chat_id: 42,
+            id: 777,
+            text: String::new(),
+            date: 500,
+            out: true,
+            photo: Some((640, 480)),
+            doc: None,
+            reply_to: None,
+            forwarded_from: None,
+        });
+        assert_eq!(state.messages.len(), 3, "echo merges, no duplicate");
+        let merged = state.messages.last().unwrap();
+        assert_eq!(merged.id, 777);
+        assert_eq!(merged.uploading, None);
+    }
+
+    #[test]
+    fn document_send_is_not_flagged_as_photo() {
+        let (mut state, mut req_rx) = demo_state();
+        state.send_media("/tmp/rapport.pdf".into());
+        let last = state.messages.last().unwrap();
+        assert!(last.doc.is_some());
+        assert!(last.photo.is_none());
+
+        let reqs = drain(&mut req_rx);
+        assert!(matches!(
+            reqs.last(),
+            Some(Request::SendMedia { is_photo: false, .. })
+        ));
+    }
+
+    #[test]
+    fn opening_search_sends_requests_and_applies_results() {
+        let (mut state, mut req_rx) = demo_state();
+        state.open_search(SearchMode::InChat);
+        assert!(state.search_open());
+        state.search_changed("weekend".into());
+
+        let reqs = drain(&mut req_rx);
+        assert!(matches!(
+            reqs.last(),
+            Some(Request::Search { id: Some(42), query }) if query == "weekend"
+        ));
+
+        // A matching result lands in the list.
+        state.on_message(UiMessage::SearchResults {
+            id: Some(42),
+            query: "weekend".into(),
+            hits: vec![SearchHit {
+                chat_id: 42,
+                chat_title: "Camille".into(),
+                row: MsgRow::text(77, "le weekend 😎", 500, false),
+            }],
+        });
+        assert_eq!(state.search_hits.len(), 1);
+        assert_eq!(state.search_hits[0].row.id, 77);
+    }
+
+    #[test]
+    fn search_results_for_a_stale_mode_are_ignored() {
+        let (mut state, _) = demo_state();
+        // Query survived a close: results from an old search must not repopulate.
+        state.open_search(SearchMode::Global);
+        state.search_changed("foo".into());
+        state.close_search();
+        assert!(!state.search_open());
+        assert!(state.search_query.is_empty());
+
+        state.on_message(UiMessage::SearchResults {
+            id: Some(42),
+            query: "foo".into(),
+            hits: vec![],
+        });
+        assert!(state.search_hits.is_empty());
+    }
+
+    #[test]
+    fn in_chat_hit_jumps_to_the_message() {
+        let (mut state, _) = demo_state();
+        // Ensure the layout cache is populated (the view builds it lazily).
+        crate::messages_list(&state, 800.0, 600.0);
+
+        state.open_search(SearchMode::InChat);
+        state.on_message(UiMessage::SearchResults {
+            id: Some(42),
+            query: "".into(),
+            hits: vec![SearchHit {
+                chat_id: 42,
+                chat_title: "Camille".into(),
+                row: MsgRow::text(1, "incoming", 100, false),
+            }],
+        });
+        state.click_search_hit(0);
+        assert!(!state.search_open(), "jumping closes the search UI");
+        // Row 1 of the demo history (id 1) → its cached top ≈ view_h (0-pad).
+        assert!(state.scroll_target.unwrap_or(-1.0) >= 0.0);
+    }
+
+    #[test]
+    fn global_hit_opens_the_target_chat() {
+        let (mut state, mut req_rx) = demo_state();
+        state.open_search(SearchMode::Global);
+        state.on_message(UiMessage::SearchResults {
+            id: None,
+            query: "".into(),
+            hits: vec![SearchHit {
+                chat_id: 7,
+                chat_title: "Autre".into(),
+                row: MsgRow::text(9, "ping", 400, false),
+            }],
+        });
+        state.click_search_hit(0);
+        // Left the search UI and opened the other chat (OpenChat + MarkRead).
+        assert!(!state.search_open());
+        let reqs = drain(&mut req_rx);
+        assert!(matches!(reqs.first(), Some(Request::OpenChat { id: 7 })));
+    }
+
+    #[test]
+    fn escape_closes_search_before_context_menu() {
+        let (mut state, _) = demo_state();
+        state.open_search(SearchMode::Global);
+        state.escape();
+        assert!(!state.search_open());
         assert!(state.context_menu.is_none());
     }
 
@@ -1019,13 +1589,7 @@ mod tests {
             id: 7,
             title: "Camille".into(),
             rows: vec![MsgRow {
-                id: 1,
-                text: "hi".into(),
-                date: 5,
-                out: false,
-                photo: None,
-                photo_path: None,
-                read: false,
+                ..MsgRow::text(1, "hi", 5, false)
             }],
         });
         assert!(!state.loading, "loading stops once history arrives");
@@ -1055,13 +1619,7 @@ mod tests {
             id: 7,
             title: "Camille".into(),
             rows: vec![MsgRow {
-                id: 1,
-                text: "hi".into(),
-                date: 5,
-                out: true,
-                photo: None,
-                photo_path: None,
-                read: false,
+                ..MsgRow::text(1, "hi", 5, true)
             }],
         });
         // A refresh with a changed signature also clears loading (idempotent).

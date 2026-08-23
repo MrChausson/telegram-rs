@@ -6,6 +6,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Replies**: right-click any message → "Répondre" arms a reply bar above the
+  composer (with snippet + ✕ to cancel); sent messages carry a quoted "Réponse"
+  header inside the bubble.
+- **Forwards**: right-click → "Transférer" opens a chat picker; the copy lands
+  in the destination with a "Transféré de …" header (originating chat resolved
+  from the dialog list, or the anonymous forward name).
+- **Send photos & documents**: a paperclip button opens the native file dialog
+  (`rfd` / xdg-desktop-portal); images are sent as compressed photos, any
+  other file as a document. Media rows show a **live upload-progress bar**
+  (per-frame `%` + fill) fed by the real stream, then merge with the server
+  echo. Sent photos render as photo bubbles, documents as a file card
+  (icon + name + size) — click to download (cached), click again to open with
+  the system opener.
+- Document messages from other devices render as file cards too; a small
+  "Télécharger"/"Ouvrir" status guides the first/second click.
+- **Search**: the chat-list header's 🔍 opens a global search across all chats
+  (result rows show chat title + snippet + time; clicking opens the chat), and
+  the conversation header's 🔍 searches inside the open chat (results listed
+  in place, click jumps to the message when it's in the loaded history).
+  Queries are throttled/de-duplicated in the network layer so typing doesn't
+  flood MTProto.
+
+### Changed
+- The message context menu now opens on **any** message (reply/forward), with
+  Modifier/Copier/Supprimer still restricted to your own text messages.
+- The demo backend echoes media sends with simulated upload progress, seeds
+  reply/forward/photo/document rows in the first chat, and throttles its
+  simulated incoming messages so it stays a conversation, not a flood.
+- The `--perf` FPS badge no longer shows up in plain `--demo` runs (it was
+  force-enabled by the `--scroll-perf` default).
+
+### Fixed
+- A media send echo merges into its optimistic row even when the message has
+  no caption anymore (an uploading row is matched by its upload state, not
+  only by text), so a photo/doc send without caption no longer duplicates.
+
 ## [v0.3.0] - 2026-08-23
 
 ### Changed

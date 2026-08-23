@@ -44,17 +44,19 @@ fn demo_state(n: usize) -> State {
     let photo = Some(photo.to_string_lossy().into_owned());
     state.messages = (0..n)
         .map(|i| MsgRow {
-            id: i as i32,
-            text: if i % 5 == 0 {
-                "Long message that wraps, with a few emojis and a photo link 🖼️ for realism".into()
-            } else {
-                format!("Message number {i}: the quick brown fox jumps over the lazy dog – padding")
-            },
-            date: now - i as i32,
-            out: i % 2 == 0,
             photo: if i % 5 == 0 { Some((640, 480)) } else { None },
             photo_path: if i % 5 == 0 { photo.clone() } else { None },
             read: i % 2 == 0,
+            ..MsgRow::text(
+                i as i32,
+                if i % 5 == 0 {
+                    "Long message that wraps, with a few emojis and a photo link 🖼️ for realism".to_string()
+                } else {
+                    format!("Message number {i}: the quick brown fox jumps over the lazy dog – padding")
+                },
+                now - i as i32,
+                i % 2 == 0,
+            )
         })
         .collect();
     // A realistic dialog list so the left pane (list_pane) is exercised:
