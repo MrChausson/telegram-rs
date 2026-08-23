@@ -101,7 +101,11 @@ batches — each release moves the needle, not dribbles.
 - 💬 **Text messaging** — real-time push, < 1 s
 - 🖼️ **Avatars** — users, groups and channels
 - 📸 **Photos** — thumbnails + full-screen viewer
-- 📤 **Send media** — photos and documents with a live upload-progress bar
+- 📤 **Send media** — photos, documents, videos and GIFs with a live upload-progress bar
+- 🎬 **Media cards** — videos, GIFs and audio files render as dedicated cards (duration shown); open in the system player
+- 🎙️ **Voice notes** — recorded voice messages play in-app with a play/pause bar and progress
+- 🔔 **Desktop notifications** — new messages in non-open chats raise a desktop notification
+- 🫗 **System tray** — tray icon with "Open" / "Quit" actions (StatusNotifier, no GTK)
 - ↩️ **Replies & forwards** — quote a message in reply, or forward it to any chat
 - 🔍 **Search** — global across chats, or inside the open chat
 - ✏️ **Live sync** — edits and deletions from any device
@@ -118,11 +122,11 @@ batches — each release moves the needle, not dribbles.
 
 | Area | In V1 |
 |---|---|
-| 📤 Media | Send videos, voice messages · stickers, GIFs, custom emoji *(photos + documents already shipped)* |
+| 📤 Media | Stickers, custom emoji *(photos, documents, videos, GIFs + voice playback already shipped)* |
 | 💬 Messaging | Custom emoji in composer *(replies + forwards already shipped)* |
 | 🔍 Search | *(global + in-chat already shipped)* |
 | 👥 Groups | Create and manage groups/channels, members, admin tools, topics |
-| 🎨 Experience | Light theme, settings, notifications + tray |
+| 🎨 Experience | Light theme, settings *(notifications + tray already shipped)* |
 | 👤 Accounts | QR login, logout, multiple accounts |
 | 🔐 Privacy | Secret (end-to-end) chats |
 | 📞 Calls | Voice and video calls |
