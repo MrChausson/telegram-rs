@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.4.0] - 2026-08-23
+
 ### Added
 - **Replies**: right-click any message → "Répondre" arms a reply bar above the
   composer (with snippet + ✕ to cancel); sent messages carry a quoted "Réponse"
