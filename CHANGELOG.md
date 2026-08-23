@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.5.0] - 2026-08-23
+
 ### Added
 - **Media cards for videos, GIFs and audio files**: received media render as
   dedicated cards (icon + name + size, duration shown for video/audio) instead
