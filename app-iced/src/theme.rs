@@ -31,6 +31,14 @@ pub const INPUT_FILL: (u8, u8, u8) = (26, 38, 52);
 pub const DIVIDER: (u8, u8, u8) = (34, 47, 61);
 /// Background of the `--perf` FPS badge.
 pub const PERF_BADGE_BG: (u8, u8, u8) = (18, 28, 38);
+/// Menu surface (context menu, pickers) — one step above the chat bg.
+pub const MENU_BG: (u8, u8, u8) = (33, 47, 64);
+/// Hairline border around menu surfaces.
+pub const MENU_BORDER: (u8, u8, u8) = (56, 73, 92);
+/// Accent hover variant (buttons).
+pub const ACCENT_HOVER: (u8, u8, u8) = (66, 160, 242);
+/// Accent pressed variant (buttons).
+pub const ACCENT_PRESSED: (u8, u8, u8) = (40, 120, 200);
 
 /// Layout metrics (logical units).
 pub mod layout {
@@ -51,7 +59,7 @@ pub mod layout {
     /// Avatar diameter in the chat header.
     pub const AVATAR_CHAT: f32 = 40.0;
     /// Width of the message context menu.
-    pub const CONTEXT_W: f32 = 160.0;
+    pub const CONTEXT_W: f32 = 190.0;
     /// Horizontal padding of the message area.
     pub const MSG_PAD_X: f32 = 16.0;
     /// Bubble inner horizontal padding (2× per side).

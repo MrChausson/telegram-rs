@@ -31,6 +31,18 @@ pub enum Icon {
     Video,
     Audio,
     Gif,
+    /// App logo: paper plane on an accent disc.
+    Logo,
+    /// Pencil (context menu "Modifier").
+    Edit,
+    /// Two overlapping sheets (context menu "Copier").
+    Copy,
+    /// Trash bin (context menu "Supprimer").
+    Trash,
+    /// Filled play triangle (voice notes).
+    Play,
+    /// Pause bars (voice notes).
+    Pause,
 }
 
 fn rgb(c: (u8, u8, u8)) -> Color {
@@ -72,11 +84,46 @@ fn stroke(pixmap: &mut Pixmap, path: &tiny_skia::Path, color: (u8, u8, u8), widt
         &paint,
         &Stroke {
             width,
-            ..Default::default()
+            line_cap: tiny_skia::LineCap::Round,
+            line_join: tiny_skia::LineJoin::Round,            ..Default::default()
         },
         Transform::identity(),
         None,
     );
+}
+
+/// Fills a closed polygon (winding rule).
+fn fill_polygon(pixmap: &mut Pixmap, points: &[(f32, f32)], color: (u8, u8, u8)) {
+    let mut pb = PathBuilder::new();
+    if let Some((first, rest)) = points.split_first() {
+        pb.move_to(first.0, first.1);
+        for p in rest {
+            pb.line_to(p.0, p.1);
+        }
+        pb.close();
+    }
+    if let Some(path) = pb.finish() {
+        let mut paint = Paint::default();
+        paint.set_color(rgb(color));
+        pixmap.fill_path(
+            &path,
+            &paint,
+            tiny_skia::FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+}
+
+/// Fills a triangle given its three corners.
+fn fill_triangle(
+    pixmap: &mut Pixmap,
+    a: (f32, f32),
+    b: (f32, f32),
+    c: (f32, f32),
+    color: (u8, u8, u8),
+) {
+    fill_polygon(pixmap, &[a, b, c], color);
 }
 
 fn draw_icon(pixmap: &mut Pixmap, kind: Icon, cx: f32, cy: f32, size: f32, color: (u8, u8, u8)) {
@@ -197,30 +244,29 @@ fn draw_icon(pixmap: &mut Pixmap, kind: Icon, cx: f32, cy: f32, size: f32, color
             polyline(pixmap, &pts, color, w);
         }
         Icon::Reply | Icon::Forward => {
-            // Curved arrow pointing left (reply) or right (forward).
-            let w = size * 0.11;
+            // Reply/forward arrow: filled head + smooth curved tail
+            // (Material "reply"/"forward" outline, mirrored for forward).
+            let w = size * 0.10;
             let dir: f32 = if kind == Icon::Reply { -1.0 } else { 1.0 };
-            let tip_x = cx + dir * half * 0.85;
-            polyline(
+            let hx = cx + dir * half * 0.75; // head base
+            let tip = cx - dir * half * 0.8;
+            fill_triangle(
                 pixmap,
-                &[
-                    (tip_x, cy - half * 0.3),
-                    (tip_x - dir * size * 0.28, cy - half * 0.62),
-                    (tip_x - dir * size * 0.26, cy),
-                ],
+                (tip, cy),
+                (hx, cy - half * 0.42),
+                (hx, cy + half * 0.42),
                 color,
-                w,
             );
-            // The shaft curves toward the bubble edge.
+            // Tail drops from the head base, then sweeps back horizontally.
             let mut pb = PathBuilder::new();
-            pb.move_to(tip_x - dir * size * 0.26, cy);
+            pb.move_to(hx - dir * w * 0.4, cy - half * 0.30);
             pb.cubic_to(
-                tip_x - dir * size * 0.24,
-                cy + size * 0.34,
+                hx - dir * w * 0.4,
+                cy + half * 0.55,
                 cx - dir * size * 0.05,
-                cy + size * 0.42,
-                cx + dir * half * 0.75,
-                cy + size * 0.42,
+                cy + half * 0.62,
+                cx + dir * half * 0.85,
+                cy + half * 0.62,
             );
             if let Some(path) = pb.finish() {
                 stroke(pixmap, &path, color, w);
@@ -331,6 +377,127 @@ fn draw_icon(pixmap: &mut Pixmap, kind: Icon, cx: f32, cy: f32, size: f32, color
                     w,
                 );
             }
+        }
+        Icon::Logo => {
+            // App logo: accent disc + white paper plane (classic "send" mark,
+            // Material send polygon scaled into the disc).
+            fill_circle(pixmap, cx, cy, half, (51, 144, 236));
+            // Send-plane in a 24-unit box, scaled to 62% of the icon size.
+            let s = size * 0.62 / 24.0;
+            let bx = cx - 12.0 * s + size * 0.01; // nudge right: plane is asymmetric
+            let by = cy - 12.0 * s;
+            let p = |x: f32, y: f32| (bx + x * s, by + y * s);
+            fill_polygon(
+                pixmap,
+                &[
+                    p(2.0, 21.0),
+                    p(23.0, 12.0),
+                    p(2.0, 3.0),
+                    p(2.0, 10.0),
+                    p(16.0, 12.0),
+                    p(2.0, 17.0),
+                ],
+                (255, 255, 255),
+            );
+        }
+        Icon::Edit => {
+            // Pencil: rotated body + small tip, stroked (Material "edit").
+            let w = size * 0.09;
+            let r = half * 0.78; // body half-length
+            let t = half * 0.20; // body half-width
+            let (sn, cs) = (std::f32::consts::FRAC_PI_4.sin(), std::f32::consts::FRAC_PI_4.cos());
+            // Body corners (rotated rectangle), open at the tip end.
+            let corner = |dx: f32, dy: f32| (cx + dx * cs - dy * sn, cy + dx * sn + dy * cs);
+            polyline(
+                pixmap,
+                &[
+                    corner(-r * 0.55, -t),
+                    corner(r, -t),
+                    corner(r, t),
+                    corner(-r * 0.55, t),
+                ],
+                color,
+                w,
+            );
+            // Tip triangle closing the bottom-left end.
+            let tip_a = corner(-r * 0.55, -t);
+            let tip_b = corner(-r * 0.55, t);
+            let tip_c = corner(-r - t * 0.4, 0.0);
+            polyline(pixmap, &[tip_a, tip_c, tip_b], color, w);
+            // Eraser edge on the top-right end.
+            let e0 = corner(r, -t);
+            let e1 = corner(r, t);
+            polyline(pixmap, &[e0, e1], color, w);
+        }
+        Icon::Copy => {
+            // Two overlapping sheets (Material "content_copy"): back sheet
+            // shows only its top+left edges, front sheet is a full outline.
+            let w = size * 0.09;
+            let d = half * 0.32; // back-sheet offset
+            let x0 = cx - half * 0.55;
+            let y0 = cy - half * 0.55;
+            let x1 = cx + half * 0.55;
+            let y1 = cy + half * 0.55;
+            // Back sheet: top + left edges only.
+            polyline(pixmap, &[(x0 + d, y0), (x0, y0 + d)], color, w);
+            // Front sheet outline.
+            polyline(
+                pixmap,
+                &[(x0, y0 + d), (x0, y1), (x1 - d, y1), (x1, y1 - d), (x1, y0 + d * 2.0), (x0 + d * 2.0, y0)],
+                color,
+                w,
+            );
+        }
+        Icon::Trash => {
+            // Trash bin (Material "delete"): lid, handle and ribbed body.
+            let w = size * 0.09;
+            let x0 = cx - half * 0.5;
+            let x1 = cx + half * 0.5;
+            let y_lid = cy - half * 0.42;
+            // Lid.
+            polyline(pixmap, &[(x0, y_lid), (x1, y_lid)], color, w);
+            // Handle.
+            polyline(
+                pixmap,
+                &[(cx - half * 0.16, y_lid), (cx - half * 0.16, y_lid - half * 0.22), (cx + half * 0.16, y_lid - half * 0.22), (cx + half * 0.16, y_lid)],
+                color,
+                w,
+            );
+            // Body (tapered).
+            let by0 = y_lid + half * 0.14;
+            let by1 = cy + half * 0.72;
+            polyline(
+                pixmap,
+                &[
+                    (x0 + half * 0.1, by0),
+                    (x0 + half * 0.2, by1),
+                    (x1 - half * 0.2, by1),
+                    (x1 - half * 0.1, by0),
+                ],
+                color,
+                w,
+            );
+            // Ribs.
+            polyline(pixmap, &[(cx - half * 0.16, by0 + half * 0.1), (cx - half * 0.08, by1 - half * 0.12)], color, w * 0.9);
+            polyline(pixmap, &[(cx + half * 0.16, by0 + half * 0.1), (cx + half * 0.08, by1 - half * 0.12)], color, w * 0.9);
+        }
+        Icon::Play => {
+            // Filled play triangle (voice notes), slightly offset right to
+            // look optically centered.
+            fill_triangle(
+                pixmap,
+                (cx - half * 0.45, cy - half * 0.7),
+                (cx - half * 0.45, cy + half * 0.7),
+                (cx + half * 0.75, cy),
+                color,
+            );
+        }
+        Icon::Pause => {
+            // Two rounded bars (voice notes).
+            let w = size * 0.22;
+            let d = half * 0.32;
+            polyline(pixmap, &[(cx - d, cy - half * 0.55), (cx - d, cy + half * 0.55)], color, w);
+            polyline(pixmap, &[(cx + d, cy - half * 0.55), (cx + d, cy + half * 0.55)], color, w);
         }
         Icon::Tick { read } => {
             let w = size * 0.09;
@@ -448,6 +615,12 @@ mod tests {
             Icon::Video,
             Icon::Audio,
             Icon::Gif,
+            Icon::Logo,
+            Icon::Edit,
+            Icon::Copy,
+            Icon::Trash,
+            Icon::Play,
+            Icon::Pause,
         ] {
             let mut c = canvas();
             draw_icon(&mut c, kind, 40.0, 40.0, 24.0, (255, 255, 255));
