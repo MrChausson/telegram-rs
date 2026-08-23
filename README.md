@@ -1,33 +1,36 @@
 # tg — a feather-light Telegram client
 
-A fast, minimalist **Telegram desktop client** written in Rust, rendered
-**100% on the CPU** — no GPU required. It does everything a chat client
-should while using a fraction of the RAM of mainstream clients.
+A fast, minimalist **Telegram desktop client** written in Rust, real-time via
+MTProto push. Rendered with a **GPU by default** (wgpu, GL backend) with an
+automatic software fallback — a fraction of the RAM of mainstream clients.
 
 - ⚡ **Real-time by push** — messages arrive in < 1 s, no polling spam
-- 💾 **~10× less RAM** — ≈30 MB RSS vs 300-500 MB for Telegram Desktop
-- 🧠 **100% CPU rendering** — Iced on the tiny-skia software backend
-- 📦 **Tiny footprint** — ~7 MB binary, ~12 KB session file, no database
+- 💾 **~10× less RAM** — ≈40-50 MB RSS vs 300-500 MB for Telegram Desktop
+- 🖥️ **GPU rendering (wgpu/GL)** — buttery scrolling on long chats, ~1% CPU
+- 📦 **Tiny footprint** — ~8 MB binary, ~12 KB session file, no database
 - 🔒 **Sign in inside the app** — phone → code → 2FA, nothing else to install
 
 ## Measured performance
 
-Measured on a real session (HiDPI 1.6×, Arch Linux, `--release`):
+Measured on a real session (HiDPI 1.6×, Arch Linux, NVIDIA/Wayland, `--release`):
 
 | Metric | tg | Telegram Desktop |
 |---|---|---|
-| **Resident memory (RSS)** | **~30 MB** | 300-500 MB |
-| **PSS** (proportional size) | **~18 MB** | — |
-| **Idle CPU** | **~0.7%** | — |
+| **Resident memory (RSS)** | **~40-50 MB** | 300-500 MB |
+| **PSS** (proportional size, +NVIDIA driver) | **~47 MB** | — |
+| **Idle CPU** | **~1%** | — |
+| **Scroll, 420-msg chat** | **~275-380 rendered fps** | — |
 | **Threads** | **2** | dozens |
-| **Binary size** | **~7 MB** | ~100+ MB |
+| **Binary size** | **~8 MB** | ~100+ MB |
 | **Persisted session** | **~12 KB** | SQLite DBs |
 | **Message latency** | < 1 s (push) | < 1 s |
 
 > Methodology: `VmRSS` from `/proc/<pid>/status` and the sum of `Pss:` entries
 > in `/proc/<pid>/smaps`, 15 s after launch with a chat open. VmSize (virtual
 > address space) can exceed 1 GB with mimalloc — that's reserved address
-> space, **not** physical memory (RSS/PSS are what matter).
+> space, **not** physical memory (RSS/PSS are what matter). The GPU path loads
+> the driver's private heap (~20 MB Private_Dirty), which is why RSS is higher
+> than the old software renderer (which pinned a core at ~24 fps on big chats).
 
 ## Quick start
 
@@ -106,7 +109,7 @@ batches — each release moves the needle, not dribbles.
 > 📋 **Copy / paste note:** message text can be copied from the message's
 > context menu (right-click → “Copier”), and text pastes into the composer
 > with Ctrl/⌘-V. Drag-to-select inside message bubbles isn't supported by the
-> Iced text widget — a deliberate trade-off of the software-rendered UI.
+> Iced text widget — a documented trade-off.
 
 ### 🚧 Next up
 
@@ -125,24 +128,25 @@ batches — each release moves the needle, not dribbles.
 
 | Choice | Detail |
 |---|---|
-| **Pure CPU rendering** | [Iced](https://iced.rs) on its **tiny-skia** software backend: no GPU, no platform-graphics dependency at runtime. |
+| **GPU rendering** | [Iced](https://iced.rs) on **wgpu** with the **GL backend** by default (`WGPU_BACKEND` overrides it; e.g. `vulkan`); **tiny-skia software** is the automatic fallback when no GPU adapter is found. |
 | **HiDPI-aware** | Rendered at physical resolution with scaled metrics — crisp text, no upscaling. |
 | **No database** | Session persisted in a **small binary file** (~12 KB), no SQLite. |
 | **Single network thread** | `current_thread` tokio runtime; 2 threads total (UI + network). |
-| **No continuous redraw** | On-demand rendering; ~0.7% CPU at idle. |
+| **No continuous redraw** | On-demand rendering; ~1% CPU at idle. |
 | **Tiny binary** | `opt-level="z"`, `lto="fat"`, `panic="abort"`, stripped symbols. |
 
 ## Project layout
 
 ```
-app-iced/ → Iced-based UI (tiny-skia backend) + app state, headless-tested
+app-iced/ → Iced-based UI (wgpu/GL, tiny-skia fallback) + app state, headless-tested
 tg/       → core networking: grammers (MTProto), persisted session
 ```
 
 - **MTProto**: [grammers](https://github.com/Lonami/grammers) (Rust) — a real
   user client, compatible with all other Telegram clients.
-- **UI**: [iced](https://iced.rs) with the `tiny-skia` software renderer —
-  cross-platform Linux/macOS/Windows.
+- **UI**: [iced](https://iced.rs) rendered with **wgpu (GL backend)** — GPU
+  acceleration on Linux/macOS/Windows, transparently falling back to the
+  software renderer.
 
 ## Build & run
 
@@ -164,8 +168,24 @@ cargo run --release -p app-iced
 A canned offline backend exercises the UI without a network session:
 
 ```bash
-cargo run -p app-iced -- --demo --open-first
+cargo run --release -p app-iced -- --demo --open-first
+# Long-history chat for scroll performance (420 msgs; TG_BIG_N=N to override):
+cargo run --release -p app-iced -- --demo --demo-big
 ```
+
+### Measuring performance (scroll, frame rate)
+
+- `--perf` shows a live **FPS badge in the conversation header** counting
+  actually-presented frames (verified against `renders_s` in the log).
+- `--scroll-perf=SECS` self-drives a synthetic fling through the real
+  update→view→layout→draw→present pipeline and prints a `FINAL` line
+  (`fps` = event cadence, `renders_s` = TRUE presented frames/s). See
+  `tools/scroll-perf.sh` for an automatic 3-way comparison
+  (loop ceiling vs 420-msg chat vs pre-virtualization).
+- `WGPU_BACKEND=vulkan` restores the Vulkan adapter; `gl` is the default.
+
+> **Always use a release build for perf checks.** Debug is ~8× slower
+> (~25 ms/frame vs ~3 ms/frame) and alone looks like a lag bug.
 
 ### Real-time test
 
@@ -176,9 +196,10 @@ a 15 s safety net catches any missed update.
 
 - **Working MVP**: read, send and receive in real time, groups and channels,
   message edits and deletions, in-app sign-in with a persisted session.
-- 90 unit tests (`cargo test --workspace`), including headless UI-state tests.
+- **29 tests** (`cargo test --workspace`), including headless UI-state tests
+  and a criterion frame-cost benchmark (`cargo bench -p app-iced --bench frame`).
 - Tested on Arch Linux (X11/Wayland); macOS and Windows are compiled by CI on
-  every push/PR as well.
+  every push/PR.
 
 ## License
 
