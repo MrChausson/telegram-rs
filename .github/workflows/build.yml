@@ -18,12 +18,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: System dependencies (winit / iced tiny-skia)
+      - name: System dependencies (winit / iced tiny-skia / alsa for rodio)
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libxkbcommon-dev libwayland-dev libx11-dev \
             libxcursor-dev libxrandr-dev libxi-dev libxext-dev \
+            libasound2-dev \
             imagemagick fonts-dejavu-core
 
       - name: Toolchain Rust
