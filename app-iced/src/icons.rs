@@ -23,6 +23,11 @@ pub enum Icon {
     Send,
     Info,
     Tick { read: bool },
+    Paperclip,
+    Reply,
+    Forward,
+    FileDoc,
+    Close,
 }
 
 fn rgb(c: (u8, u8, u8)) -> Color {
@@ -52,19 +57,23 @@ fn polyline(pixmap: &mut Pixmap, points: &[(f32, f32)], color: (u8, u8, u8), wid
         }
     }
     if let Some(path) = pb.finish() {
-        let mut paint = Paint::default();
-        paint.set_color(rgb(color));
-        pixmap.stroke_path(
-            &path,
-            &paint,
-            &Stroke {
-                width,
-                ..Default::default()
-            },
-            Transform::identity(),
-            None,
-        );
+        stroke(pixmap, &path, color, width);
     }
+}
+
+fn stroke(pixmap: &mut Pixmap, path: &tiny_skia::Path, color: (u8, u8, u8), width: f32) {
+    let mut paint = Paint::default();
+    paint.set_color(rgb(color));
+    pixmap.stroke_path(
+        path,
+        &paint,
+        &Stroke {
+            width,
+            ..Default::default()
+        },
+        Transform::identity(),
+        None,
+    );
 }
 
 fn draw_icon(pixmap: &mut Pixmap, kind: Icon, cx: f32, cy: f32, size: f32, color: (u8, u8, u8)) {
@@ -157,6 +166,108 @@ fn draw_icon(pixmap: &mut Pixmap, kind: Icon, cx: f32, cy: f32, size: f32, color
             }
             fill_circle(pixmap, cx, cy - r * 0.3, size * 0.06, color);
             polyline(pixmap, &[(cx, cy - r * 0.05), (cx, cy + r * 0.35)], color, w);
+        }
+        Icon::Paperclip => {
+            // Classic vertical paperclip: outer staple down-around-up, then
+            // a short inner leg. Arcs are approximated with dense polylines.
+            let w = size * 0.09;
+            let r = size * 0.17; // outer half-width
+            let ri = size * 0.065; // inner half-width
+            let top = cy - size * 0.40;
+            let bot = cy + size * 0.24;
+            let arc = |ox: f32, oy: f32, rad: f32, a0: f32, a1: f32| {
+                let steps = 14;
+                (0..=steps)
+                    .map(|i| {
+                        let a = a0 + (a1 - a0) * i as f32 / steps as f32;
+                        (ox + rad * a.cos(), oy + rad * a.sin())
+                    })
+                    .collect::<Vec<_>>()
+            };
+            // Right leg down, around the bottom, up the left side.
+            let mut pts = vec![(cx + r, top), (cx + r, bot)];
+            pts.extend(arc(cx, bot, r, 0.0, std::f32::consts::PI));
+            pts.push((cx - r, top + r));
+            // Over the top (inner), then a short inner leg back down.
+            pts.extend(arc(cx - r + ri, top + r, ri, std::f32::consts::PI, 2.0 * std::f32::consts::PI));
+            pts.push((cx - r + 2.0 * ri, cy));
+            polyline(pixmap, &pts, color, w);
+        }
+        Icon::Reply | Icon::Forward => {
+            // Curved arrow pointing left (reply) or right (forward).
+            let w = size * 0.11;
+            let dir: f32 = if kind == Icon::Reply { -1.0 } else { 1.0 };
+            let tip_x = cx + dir * half * 0.85;
+            polyline(
+                pixmap,
+                &[
+                    (tip_x, cy - half * 0.3),
+                    (tip_x - dir * size * 0.28, cy - half * 0.62),
+                    (tip_x - dir * size * 0.26, cy),
+                ],
+                color,
+                w,
+            );
+            // The shaft curves toward the bubble edge.
+            let mut pb = PathBuilder::new();
+            pb.move_to(tip_x - dir * size * 0.26, cy);
+            pb.cubic_to(
+                tip_x - dir * size * 0.24,
+                cy + size * 0.34,
+                cx - dir * size * 0.05,
+                cy + size * 0.42,
+                cx + dir * half * 0.75,
+                cy + size * 0.42,
+            );
+            if let Some(path) = pb.finish() {
+                stroke(pixmap, &path, color, w);
+            }
+        }
+        Icon::FileDoc => {
+            // Sheet with a folded corner.
+            let w = size * 0.09;
+            let x0 = cx - half * 0.62;
+            let y0 = cy - half * 0.85;
+            let x1 = cx + half * 0.62;
+            let y1 = cy + half * 0.85;
+            let fold = size * 0.28;
+            polyline(
+                pixmap,
+                &[
+                    (x0, y0),
+                    (x1 - fold, y0),
+                    (x1, y0 + fold),
+                    (x1, y1),
+                    (x0, y1),
+                    (x0, y0),
+                ],
+                color,
+                w,
+            );
+            polyline(
+                pixmap,
+                &[(x1 - fold, y0), (x1 - fold, y0 + fold), (x1, y0 + fold)],
+                color,
+                w * 0.8,
+            );
+            polyline(
+                pixmap,
+                &[(x0 + size * 0.14, cy), (x0 + size * 0.52, cy)],
+                color,
+                w * 0.8,
+            );
+            polyline(
+                pixmap,
+                &[(x0 + size * 0.14, cy + size * 0.18), (x0 + size * 0.4, cy + size * 0.18)],
+                color,
+                w * 0.8,
+            );
+        }
+        Icon::Close => {
+            let w = size * 0.1;
+            let d = half * 0.65;
+            polyline(pixmap, &[(cx - d, cy - d), (cx + d, cy + d)], color, w);
+            polyline(pixmap, &[(cx - d, cy + d), (cx + d, cy - d)], color, w);
         }
         Icon::Tick { read } => {
             let w = size * 0.09;
@@ -266,6 +377,11 @@ mod tests {
             Icon::Info,
             Icon::Tick { read: false },
             Icon::Tick { read: true },
+            Icon::Paperclip,
+            Icon::Reply,
+            Icon::Forward,
+            Icon::FileDoc,
+            Icon::Close,
         ] {
             let mut c = canvas();
             draw_icon(&mut c, kind, 40.0, 40.0, 24.0, (255, 255, 255));

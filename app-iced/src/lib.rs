@@ -21,7 +21,7 @@ use iced::{Alignment, Color, Length, Task};
 
 use bridge::{ChatRow, MsgRow, Request, UiMessage};
 use icons::{icon, Icon};
-use state::{LoginStep, State};
+use state::{LoginStep, SearchMode, State};
 
 /// Id of the open chat's message list, used to auto-scroll to the bottom.
 const MSG_LIST_ID: &str = "msg-list";
@@ -36,6 +36,11 @@ type Element<'a> = iced::Element<'a, Message>;
 
 fn rgb(c: (u8, u8, u8)) -> Color {
     Color::from_rgb8(c.0, c.1, c.2)
+}
+
+/// True when a picked file looks like an image (compressed-photo send).
+pub fn looks_like_image(path: &str) -> bool {
+    tg::client::is_image(std::path::Path::new(path))
 }
 
 /// UI → application messages.
@@ -57,10 +62,32 @@ pub enum Message {
     ContextCopy,
     /// "Supprimer" pressed in the context menu.
     ContextDelete,
+    /// "Répondre" pressed in the context menu.
+    ContextReply,
+    /// The reply bar's ✕ was pressed (cancel the armed reply).
+    CancelReply,
+    /// "Transférer" pressed in the context menu (opens the chat picker).
+    ContextForward,
+    /// A destination chat was picked in the forward overlay.
+    ForwardTo(i64),
+    /// The attach 📎 button was pressed: open a file dialog.
+    AttachFile,
+    /// The file dialog returned a path (None = cancelled).
+    FilePicked(Option<String>),
     /// The context menu was dismissed.
     DismissMenu,
     /// Escape: close the context menu, cancel editing or close the viewer.
     Escape,
+    /// The list header's search icon: global search.
+    OpenGlobalSearch,
+    /// The conversation header's search icon: in-chat search.
+    OpenInChatSearch,
+    /// Close the search UI (✕ / Escape).
+    CloseSearch,
+    /// The search field changed (debounced/throttled by the network layer).
+    SearchChanged(String),
+    /// A search result row was clicked.
+    SearchHitClicked(usize),
     /// Composer text changed.
     ComposerChanged(String),
     /// Composer submitted (send / edit).
@@ -135,14 +162,47 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             }
         }
         Message::ContextDelete => state.context_delete(),
+        Message::ContextReply => state.context_reply(),
+        Message::CancelReply => state.reply_target = None,
+        Message::ContextForward => state.context_forward(),
+        Message::ForwardTo(chat) => {
+            state.forward_to(chat);
+            return Task::none();
+        }
+        Message::AttachFile => {
+            let task = iced::Task::future(async {
+                let picked = rfd::AsyncFileDialog::new()
+                    .set_title("Envoyer un fichier")
+                    .pick_file()
+                    .await
+                    .map(|f| f.path().to_string_lossy().into_owned());
+                Message::FilePicked(picked)
+            });
+            return task;
+        }
+        Message::FilePicked(Some(path)) => {
+            if std::path::Path::new(&path).exists() {
+                state.send_media(path);
+            } else {
+                state.status = format!("Fichier introuvable : {path}");
+            }
+        }
+        Message::FilePicked(None) => {}
         Message::DismissMenu => state.dismiss_menu(),
         Message::Escape => {
-            if state.viewer.is_some() {
+            if state.search_open() {
+                state.close_search();
+            } else if state.viewer.is_some() {
                 state.back();
             } else {
                 state.escape();
             }
         }
+        Message::OpenGlobalSearch => state.open_search(SearchMode::Global),
+        Message::OpenInChatSearch => state.open_search(SearchMode::InChat),
+        Message::CloseSearch => state.close_search(),
+        Message::SearchChanged(text) => state.search_changed(text),
+        Message::SearchHitClicked(idx) => state.click_search_hit(idx),
         Message::ComposerChanged(text) => {
             state.composer = text;
             // Notify the server while the user types (best-effort).
@@ -173,6 +233,19 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             } else {
                 state.on_perf_tick();
             }
+        }
+    }
+    // A downloaded document was clicked: hand it to the system opener.
+    if let Some(path) = state.open_file.take() {
+        let _ = std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn();
+    }
+    // A search jump was armed: scroll the message list to the target.
+    {
+        use iced::widget::operation::{scroll_to, AbsoluteOffset};
+        if let Some(y) = state.take_scroll_target() {
+            return scroll_to::<Message>(MSG_LIST_ID, AbsoluteOffset { x: 0.0, y });
         }
     }
     if state.scroll_to_bottom {
@@ -263,7 +336,132 @@ fn view(state: &State) -> Element<'_> {
     if !state.authenticated {
         return login_view(state);
     }
+    if state.search_open() {
+        return search_view(state);
+    }
     chat_view(state)
+}
+
+// ---------------------------------------------------------------------------
+// Search views (global + in-chat)
+// ---------------------------------------------------------------------------
+
+/// Full-window search UI replacing the chat view while `search_mode` is set:
+/// a header with the back ✕ + query field, and the results list below.
+fn search_view(state: &State) -> Element<'_> {
+    let mode_label = match state.search_mode {
+        Some(SearchMode::Global) => "Recherche dans tous les chats…",
+        Some(SearchMode::InChat) => "Rechercher dans ce chat…",
+        None => "Recherche…",
+    };
+    let field = text_input(mode_label, &state.search_query)
+        .on_input(Message::SearchChanged)
+        .padding(12)
+        .style(text_input_style);
+
+    let mut results = column![].spacing(2);
+    if state.search_query.trim().is_empty() {
+        results = results.push(search_hint("Tapez un mot-clé pour lancer la recherche…"));
+    } else if state.search_hits.is_empty() {
+        if state.search_pending {
+            results = results.push(search_hint("Recherche…"));
+        } else {
+            results = results.push(search_hint("Aucun résultat"));
+        }
+    } else {
+        let highlighted = &state.search_query;
+        for (i, hit) in state.search_hits.iter().enumerate() {
+            results = results.push(search_hit_row(hit, highlighted, i));
+        }
+    }
+
+    let header = container(
+        row![
+            button(icon(Icon::Back, theme::ICON, 18.0))
+                .on_press(Message::CloseSearch)
+                .padding(8)
+                .style(flat_button),
+            container(field)
+                .width(Length::Fill)
+                .height(40.0)
+                .style(field_rounded),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .height(theme::layout::CHAT_HEADER_H)
+    .padding([0, 12])
+    .style(header_bg);
+
+    column![
+        header,
+        container(iced::widget::Space::new())
+            .width(Length::Fill)
+            .height(1.0)
+            .style(divider),
+        container(scrollable(results))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(chat_bg),
+    ]
+    .into()
+}
+
+/// A tappable search-result line: avatar, chat title + snippet, timestamp.
+fn search_hit_row( hit: &bridge::SearchHit, _query: &str, idx: usize) -> Element<'static> {
+    let snippet = state::preview_text(&hit.row.text, &hit.row.photo, &hit.row.doc);
+    let title = hit.chat_title.clone();
+    let ts = if hit.row.date > 0 {
+        theme::cached_time(hit.row.date)
+    } else {
+        String::new()
+    };
+    // The avatar is resolved lazily by the caller via the dialog list; here we
+    // render a deterministic letter circle to keep the row self-contained.
+    let av = avatar_circle(None, &title, 40.0);
+
+    button(
+        row![
+            av,
+            column![
+                text(title)
+                    .size(theme::font::NAME)
+                    .color(Color::WHITE)
+                    .wrapping(iced::widget::text::Wrapping::None),
+                text(snippet)
+                    .size(theme::font::PLACEHOLDER)
+                    .color(rgb(theme::TEXT_SECONDARY))
+                    .wrapping(iced::widget::text::Wrapping::None),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            text(ts)
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(theme::TEXT_SECONDARY)),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center),
+    )
+    .on_press(Message::SearchHitClicked(idx))
+    .width(Length::Fill)
+    .padding([10, 12])
+    .style(move |theme, status| row_style(theme, status, false))
+    .into()
+}
+
+/// Muted centered line for the search hint/empty/loading states.
+fn search_hint(label: &str) -> Element<'static> {
+    container(
+        text(label.to_string())
+            .size(theme::font::MESSAGE)
+            .color(rgb(theme::TEXT_SECONDARY)),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    .into()
 }
 
 // ---------------------------------------------------------------------------
@@ -433,7 +631,10 @@ fn list_pane(state: &State) -> Element<'_> {
             row![
                 text("Chats").size(theme::font::TITLE).color(Color::WHITE),
                 horizontal_spacer(),
-                icon(Icon::Search, theme::ICON, 20.0),
+                button(icon(Icon::Search, theme::ICON, 20.0))
+                    .on_press(Message::OpenGlobalSearch)
+                    .padding(6)
+                    .style(flat_button),
                 icon(Icon::Compose, theme::ICON, 20.0),
                 icon(Icon::Dots, theme::ICON, 20.0),
             ]
@@ -561,7 +762,8 @@ fn chat_row_button<'a>(row: &'a ChatRow, selected: bool, title: &'a str, sub: &'
     .into()
 }
 
-/// Right pane: chat header + messages + composer (+ context menu overlay).
+/// Right pane: chat header + messages + composer (+ context menu overlay),
+/// plus the forward chat-picker overlay when armed.
 fn conversation_pane(state: &State) -> Element<'_> {
     let open = state.open_chat;
     let chat = state.dialogs.iter().find(|d| Some(d.id) == open);
@@ -625,7 +827,7 @@ fn conversation_pane(state: &State) -> Element<'_> {
 
     let composer = composer_bar(state);
 
-    column![
+    let pane = column![
         header,
         container(iced::widget::Space::new())
             .width(Length::Fill)
@@ -635,8 +837,75 @@ fn conversation_pane(state: &State) -> Element<'_> {
         composer
     ]
     .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    .height(Length::Fill);
+
+    if state.forward_pick.is_some() {
+        forward_overlay(state, pane.into())
+    } else {
+        pane.into()
+    }
+}
+
+/// Full-pane modal listing the chats as forward destinations. Rendered on
+/// top of the conversation pane when a "Transférer" is armed; Escape or the
+/// header ✕ cancels.
+fn forward_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
+    let mut rows = column![].spacing(2);
+    for d in &state.dialogs {
+        rows = rows.push(
+            button(
+                row![
+                    avatar_circle(d.avatar_path.as_deref(), &d.title, theme::layout::AVATAR_LIST - 12.0),
+                    text(&d.title)
+                        .size(theme::font::MESSAGE)
+                        .color(Color::WHITE)
+                        .wrapping(iced::widget::text::Wrapping::None),
+                    horizontal_spacer(),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            )
+            .on_press(Message::ForwardTo(d.id))
+            .width(Length::Fill)
+            .padding([6, 10])
+            .style(|_theme, status| row_style(_theme, status, false)),
+        );
+    }
+
+    let card = container(
+        column![
+            row![
+                icon(Icon::Forward, theme::ACCENT, 16.0),
+                text("Transférer vers…").size(theme::font::NAME).color(Color::WHITE),
+                horizontal_spacer(),
+                button(icon(Icon::Close, theme::ICON, 14.0))
+                    .on_press(Message::Escape)
+                    .padding(6)
+                    .style(flat_button),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            scrollable(rows).height(Length::Fill),
+        ]
+        .spacing(10),
+    )
+    .width(320.0)
+    .height(400.0)
+    .padding(14)
+    .style(menu_bg);
+
+    // Dim + center the card over the conversation pane.
+    let _ = under;
+    container(card)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(Color::from_rgba8(0, 0, 0, 160.0))),
+            ..container::Style::default()
+        })
+        .into()
 }
 
 /// Chat header: back, avatar, name + status, search/info icons (+ FPS badge).
@@ -697,7 +966,10 @@ fn chat_header(
             avatar_circle(avatar_path, title, theme::layout::AVATAR_CHAT),
             column![name, status].spacing(2),
             horizontal_spacer(),
-            icon(Icon::Search, theme::ICON, 20.0),
+            button(icon(Icon::Search, theme::ICON, 20.0))
+                .on_press(Message::OpenInChatSearch)
+                .padding(6)
+                .style(flat_button),
             icon(Icon::Info, theme::ICON, 20.0),
             perf_badge,
         ]
@@ -712,7 +984,8 @@ fn chat_header(
     .into()
 }
 
-/// Composer bar: rounded field + send (or edit check) button.
+/// Composer bar: rounded field + attach (or edit check) + send button, with
+/// the reply preview bar stacked above when a reply is armed.
 fn composer_bar(state: &State) -> Element<'_> {
     let placeholder = if state.editing.is_some() {
         "Modifier le message…"
@@ -735,22 +1008,77 @@ fn composer_bar(state: &State) -> Element<'_> {
             .style(accent_circle_button)
     };
 
-    container(
+    let bar = row![
+        container(field)
+            .width(Length::Fill)
+            .height(theme::layout::INPUT_H)
+            .style(field_rounded),
+        send,
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
+
+    let mut col = column![].width(Length::Fill);
+    if let Some(reply) = &state.reply_target {
+        col = col.push(
+            container(
+                row![
+                    icon(Icon::Reply, theme::ACCENT, 16.0),
+                    column![
+                        text("Réponse à")
+                            .size(theme::font::TIMESTAMP)
+                            .color(rgb(theme::ACCENT)),
+                        text(&reply.snippet)
+                            .size(theme::font::TIMESTAMP)
+                            .color(rgb(theme::TEXT_SECONDARY))
+                            .wrapping(iced::widget::text::Wrapping::None),
+                    ]
+                    .spacing(1)
+                    .width(Length::Fill),
+                    button(icon(Icon::Close, theme::ICON, 14.0))
+                        .on_press(Message::CancelReply)
+                        .padding(6)
+                        .style(flat_button),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([6, 12])
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(rgb(theme::INPUT_FILL))),
+                border: iced::Border {
+                    radius: 10.0.into(),
+                    ..iced::Border::default()
+                },
+                ..container::Style::default()
+            }),
+        );
+        col = col.push(iced::widget::Space::new().height(6.0));
+    }
+    col = col.push(bar);
+
+    // The attach button sits left of the field (hidden while editing).
+    let with_attach: Element<'_> = if state.editing.is_some() {
+        col.into()
+    } else {
         row![
-            container(field)
-                .width(Length::Fill)
-                .height(theme::layout::INPUT_H)
-                .style(field_rounded),
-            send,
+            button(icon(Icon::Paperclip, theme::ICON, 20.0))
+                .on_press(Message::AttachFile)
+                .padding(8)
+                .style(flat_button),
+            col,
         ]
-        .spacing(10)
-        .align_y(Alignment::Center),
-    )
-    .width(Length::Fill)
-    .height(theme::layout::INPUT_H + 12.0)
-    .padding([6, 12])
-    .style(list_bg)
-    .into()
+        .spacing(4)
+        .align_y(Alignment::Center)
+        .into()
+    };
+
+    container(with_attach)
+        .width(Length::Fill)
+        .padding([6, 12])
+        .style(list_bg)
+        .into()
 }
 
 // ---------------------------------------------------------------------------
@@ -760,19 +1088,52 @@ fn composer_bar(state: &State) -> Element<'_> {
 /// A message row: bubble (sent at right, received at left) + timestamp.
 /// `pane_w` is the conversation pane width used to size the bubble (received:
 /// 70% of the pane, sent: 60%, matching the winit client).
-fn message_row(idx: usize, m: &MsgRow, pane_w: f32) -> Element<'_> {
+fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> Element<'a> {
     // Bubble width (received: 70% of the pane, sent: 60%).
     let bubble_w = if m.out { pane_w * 0.6 } else { pane_w * 0.7 };
 
-    // Bubble content: photo or text.
-    let body: Element<'_> = if let Some(path) = &m.photo_path {
-        let photo_el: Element<'_> = image(image::Handle::from_path(path))
-            .width(Length::Fill)
-            .content_fit(iced::ContentFit::Contain)
-            .border_radius(12.0)
-            .into();
+    // Quoted header inside the bubble (reply target or forward origin).
+    let quote: Option<Element<'a>> = if let Some(reply_id) = m.reply_to {
+        let snippet = state
+            .messages
+            .iter()
+            .find(|r| r.id == reply_id)
+            .map(|r| crate::state::preview_text(&r.text, &r.photo, &r.doc))
+            .unwrap_or_else(|| "Message original".to_string());
+        Some(quote_block("Réponse", snippet))
+    } else {
+        m.forwarded_from
+            .as_ref()
+            .map(|from| quote_block("Transféré", from.clone()))
+    };
+
+    // Bubble content: document card, photo or text.
+    let body: Element<'a> = if let Some(doc) = &m.doc {
+        let doc_name = if doc.name.is_empty() { "Fichier" } else { doc.name.as_str() };
+        let status = if m.uploading.is_some() {
+            "Envoi…".to_string()
+        } else if m.doc_path.is_some() {
+            "Ouvrir".to_string()
+        } else {
+            "Télécharger".to_string()
+        };
         column![
-            photo_el,
+            row![
+                icon(Icon::FileDoc, theme::ACCENT, 30.0),
+                column![
+                    text(doc_name.to_string())
+                        .size(theme::font::MESSAGE)
+                        .color(Color::WHITE)
+                        .wrapping(iced::widget::text::Wrapping::None),
+                    text(format!("{} · {}", fmt_size(doc.size), status))
+                        .size(theme::font::TIMESTAMP)
+                        .color(rgb(theme::TEXT_SECONDARY)),
+                ]
+                .spacing(2)
+                .width(Length::Fill),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
             if m.text.is_empty() {
                 horizontal_spacer()
             } else {
@@ -781,8 +1142,37 @@ fn message_row(idx: usize, m: &MsgRow, pane_w: f32) -> Element<'_> {
         ]
         .spacing(6)
         .into()
+    } else if let Some((w, h)) = m.photo {
+        if w == 0 || h == 0 {
+            // Optimistic media upload before the echo: live progress bar.
+            uploading_bar(m.uploading.unwrap_or(0.0))
+        } else if let Some(path) = &m.photo_path {
+            let photo_el: Element<'_> = image(image::Handle::from_path(path))
+                .width(Length::Fill)
+                .content_fit(iced::ContentFit::Contain)
+                .border_radius(12.0)
+                .into();
+            column![
+                photo_el,
+                if m.text.is_empty() {
+                    horizontal_spacer()
+                } else {
+                    text(&m.text).size(theme::font::MESSAGE).color(Color::WHITE).into()
+                },
+            ]
+            .spacing(6)
+            .into()
+        } else {
+            placeholder_strip("Chargement de l'image…")
+        }
     } else {
         text(&m.text).size(theme::font::MESSAGE).color(Color::WHITE).into()
+    };
+
+    // Stack the quote above the media/text body.
+    let body_full: Element<'a> = match quote {
+        Some(q) => column![q, body].spacing(6).into(),
+        None => body,
     };
 
     // Tail corner smaller, opposite corner small — Telegram style.
@@ -794,7 +1184,7 @@ fn message_row(idx: usize, m: &MsgRow, pane_w: f32) -> Element<'_> {
         .bottom_left(radius)
         .bottom_right(radius);
 
-    let bubble = container(body)
+    let bubble = container(body_full)
         .padding([
             theme::layout::BUBBLE_PAD_Y,
             theme::layout::BUBBLE_PAD_X,
@@ -847,11 +1237,7 @@ fn message_row(idx: usize, m: &MsgRow, pane_w: f32) -> Element<'_> {
         row![bubble, meta].spacing(8).align_y(Alignment::Center)
     })
     .on_press(Message::RowClicked(idx))
-    .on_right_press(if m.out {
-        Message::RowContext(idx)
-    } else {
-        Message::RowClicked(idx)
-    });
+    .on_right_press(Message::RowContext(idx));
 
     let row_el: Element<'_> = if m.out {
         row![horizontal_spacer(), wrapped].into()
@@ -864,43 +1250,195 @@ fn message_row(idx: usize, m: &MsgRow, pane_w: f32) -> Element<'_> {
         .into()
 }
 
+/// The quoted block inside a bubble (reply preview / forward origin): an
+/// accent bar + two lines of small text.
+fn quote_block(label: &str, content: String) -> Element<'static> {
+    row![
+        container(iced::widget::Space::new())
+            .width(3.0)
+            .height(28.0)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(rgb(theme::ACCENT))),
+                border: iced::Border {
+                    radius: 2.0.into(),
+                    ..iced::Border::default()
+                },
+                ..container::Style::default()
+            }),
+        column![
+            text(label.to_string())
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(theme::ACCENT)),
+            text(content)
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(theme::TEXT_SECONDARY))
+                .wrapping(iced::widget::text::Wrapping::None),
+        ]
+        .spacing(1),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// Thin horizontal upload-progress bar with a percentage label.
+fn uploading_bar(p: f32) -> Element<'static> {
+    let pct = (p.clamp(0.0, 1.0) * 100.0).round();
+    column![
+        text(format!("Envoi… {} %", pct))
+            .size(theme::font::TIMESTAMP)
+            .color(rgb(theme::TEXT_SECONDARY)),
+        container(
+            container(iced::widget::Space::new())
+                .width(Length::FillPortion(pct.max(1.0) as u16))
+                .height(Length::Fill)
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(rgb(theme::ACCENT))),
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..iced::Border::default()
+                    },
+                    ..container::Style::default()
+                })
+        )
+        .width(Length::Fill)
+        .height(4.0)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(rgb(theme::DIVIDER))),
+            border: iced::Border {
+                radius: 2.0.into(),
+                ..iced::Border::default()
+            },
+            ..container::Style::default()
+        }),
+    ]
+    .spacing(4)
+    .width(Length::Fill)
+    .into()
+}
+
+/// Rounded grey strip used while a photo thumbnail has not arrived yet.
+fn placeholder_strip(label: &str) -> Element<'static> {
+    container(
+        text(label.to_string())
+            .size(theme::font::TIMESTAMP)
+            .color(rgb(theme::TEXT_SECONDARY)),
+    )
+    .width(Length::Fill)
+    .padding(24)
+    .align_x(Alignment::Center)
+    .style(|_| container::Style {
+        background: Some(iced::Background::Color(rgb(theme::INPUT_FILL))),
+        border: iced::Border {
+            radius: 12.0.into(),
+            ..iced::Border::default()
+        },
+        ..container::Style::default()
+    })
+    .into()
+}
+
+/// Human-readable byte size ("1.5 Mo" style).
+fn fmt_size(bytes: i64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * KB;
+    const GB: f64 = MB * KB;
+    let b = bytes.max(0) as f64;
+    if b >= GB {
+        format!("{:.1} Go", b / GB)
+    } else if b >= MB {
+        format!("{:.1} Mo", b / MB)
+    } else if b >= KB {
+        format!("{:.0} Ko", b / KB)
+    } else {
+        format!("{bytes} o")
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Context menu (Modifier / Supprimer)
+// Context menu (Répondre / Transférer / Modifier / Copier / Supprimer)
 // ---------------------------------------------------------------------------
 
-/// The right-click context menu (Modifier / Copier / Supprimer), rendered
-/// inline right under the message that raised it instead of an absolute
-/// overlay: floating a menu at the clicked coordinates isn't available in
-/// iced, so anchoring it to the row is the closest faithful behaviour.
-fn context_menu_bar() -> Element<'static> {
-    let menu_el = container(
-        column![
+/// Height of one context-menu item (10 px padding per side + ~17 px text).
+const CONTEXT_ITEM_H: f32 = 37.0;
+
+/// The right-click context menu, rendered inline right under the message
+/// that raised it instead of an absolute overlay: floating a menu at the
+/// clicked coordinates isn't available in iced, so anchoring it to the row
+/// is the closest faithful behaviour. Reply/forward apply to any message;
+/// edit stays restricted to the user's own text messages.
+fn context_menu_bar(state: &State) -> Element<'static> {
+    let can_edit = state.context_can_edit();
+    let mut items = column![].spacing(0);
+    items = items.push(
+        button(
+            row![
+                icon(Icon::Reply, theme::ICON, 15.0),
+                text("Répondre").size(theme::font::PLACEHOLDER).color(rgb(theme::TEXT_PRIMARY)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .on_press(Message::ContextReply)
+        .width(Length::Fill)
+        .padding(10)
+        .style(menu_item_style),
+    );
+    items = items.push(
+        button(
+            row![
+                icon(Icon::Forward, theme::ICON, 15.0),
+                text("Transférer").size(theme::font::PLACEHOLDER).color(rgb(theme::TEXT_PRIMARY)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .on_press(Message::ContextForward)
+        .width(Length::Fill)
+        .padding(10)
+        .style(menu_item_style),
+    );
+    if can_edit {
+        items = items.push(
             button(
-                text("Modifier").size(theme::font::PLACEHOLDER).color(rgb(theme::TEXT_PRIMARY))
+                text("Modifier").size(theme::font::PLACEHOLDER).color(rgb(theme::TEXT_PRIMARY)),
             )
             .on_press(Message::ContextEdit)
             .width(Length::Fill)
             .padding(10)
             .style(menu_item_style),
+        );
+    }
+    if state
+        .context_menu
+        .and_then(|c| state.messages.get(c.row))
+        .is_some_and(|m| !m.text.is_empty())
+    {
+        items = items.push(
             button(
-                text("Copier").size(theme::font::PLACEHOLDER).color(rgb(theme::TEXT_PRIMARY))
+                text("Copier").size(theme::font::PLACEHOLDER).color(rgb(theme::TEXT_PRIMARY)),
             )
             .on_press(Message::ContextCopy)
             .width(Length::Fill)
             .padding(10)
             .style(menu_item_style),
+        );
+    }
+    if can_edit {
+        items = items.push(
             button(
-                text("Supprimer").size(theme::font::PLACEHOLDER).color(rgb(theme::ERROR))
+                text("Supprimer").size(theme::font::PLACEHOLDER).color(rgb(theme::ERROR)),
             )
             .on_press(Message::ContextDelete)
             .width(Length::Fill)
             .padding(10)
             .style(menu_item_style),
-        ]
-        .spacing(0),
-    )
-    .width(theme::layout::CONTEXT_W)
-    .style(menu_bg);
+        );
+    }
+
+    let menu_el = container(items)
+        .width(theme::layout::CONTEXT_W)
+        .style(menu_bg);
 
     // Right-aligned under the message (editable messages are ours → right).
     row![horizontal_spacer(), menu_el]
@@ -915,8 +1453,16 @@ fn context_menu_bar() -> Element<'static> {
 /// Rows kept above/below the visible window so estimated-height drift (and a
 /// one-frame-late `on_scroll` offset) never reveals a blank gap.
 const LIST_OVERSCAN: usize = 16;
-/// Estimated height (logical px) of the 3-item context menu.
-const CONTEXT_MENU_H: f32 = 3.0 * 37.0;
+
+/// Number of items the open context menu shows (drives its cached height).
+fn context_menu_items(state: &State) -> usize {
+    let can_edit = state.context_can_edit();
+    let has_text = state
+        .context_menu
+        .and_then(|c| state.messages.get(c.row))
+        .is_some_and(|m| !m.text.is_empty());
+    2 + usize::from(can_edit) + usize::from(has_text) + usize::from(can_edit)
+}
 
 /// Virtualized message list: only the rows intersecting the scrollable's
 /// viewport (plus an over-scan on each side) are built and layed-out each
@@ -1025,9 +1571,9 @@ pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
             cols =
                 cols.push(iced::widget::Space::new().height(gap_between(prev_out.unwrap_or(m.out), m.out)));
         }
-        cols = cols.push(message_row(i, m, pane_w));
+        cols = cols.push(message_row(i, m, pane_w, state));
         if state.context_menu.map(|c| c.row) == Some(i) {
-            cols = cols.push(context_menu_bar());
+            cols = cols.push(context_menu_bar(state));
         }
         prev_out = Some(m.out);
     }
@@ -1060,10 +1606,11 @@ fn build_layout(state: &State, pane_w: f32, view_h: f32) -> crate::state::MsgLay
         .map(|m| est_row_height(m, pane_w))
         .collect();
     let menu_row = state.context_menu.map(|c| c.row);
+    let menu_h_total = CONTEXT_ITEM_H * context_menu_items(state) as f32;
     let menu_h: Vec<f32> = (0..n)
         .map(|i| {
             if menu_row == Some(i) {
-                CONTEXT_MENU_H
+                menu_h_total
             } else {
                 0.0
             }
@@ -1104,9 +1651,22 @@ fn est_row_height(m: &MsgRow, pane_w: f32) -> f32 {
     let inner = (bubble_w - 2.0 * theme::layout::BUBBLE_PAD_X).max(1.0);
     let font_h = theme::font::MESSAGE;
 
+    // Quoted header (reply / forward): accent bar + 2 small lines + gap.
+    let quote_h = if m.reply_to.is_some() || m.forwarded_from.is_some() {
+        2.0 * theme::font::TIMESTAMP * 1.3 + 6.0
+    } else {
+        0.0
+    };
+
+    // Document card: icon row (~30 px) + optional caption.
+    let doc_h = if m.doc.is_some() { 34.0 } else { 0.0 };
+
+    // Photo: fills the bubble width with `Contain`; the optimistic
+    // (0,0)-dimensioned upload shows the progress strip instead.
     let photo_h = match m.photo {
         Some((w, h)) if w > 0 && h > 0 => inner * (h as f32 / w as f32),
-        _ => 0.0,
+        Some(_) => 30.0,
+        None => 0.0,
     };
     let text_h = if m.text.is_empty() {
         0.0
@@ -1116,12 +1676,13 @@ fn est_row_height(m: &MsgRow, pane_w: f32) -> f32 {
         let lines = (m.text.chars().count() as f32 / per_line).ceil();
         lines * font_h * 1.3
     };
-    let caption = if m.photo.is_some() && !m.text.is_empty() {
+    let caption = if (m.photo.is_some() || m.doc.is_some()) && !m.text.is_empty() {
         6.0
     } else {
         0.0
     };
-    2.0 * theme::layout::BUBBLE_PAD_Y + photo_h + caption + text_h
+    let body_gap = if quote_h > 0.0 { 6.0 } else { 0.0 };
+    2.0 * theme::layout::BUBBLE_PAD_Y + quote_h + body_gap + doc_h + photo_h + caption + text_h
 }
 
 // ---------------------------------------------------------------------------
@@ -1469,14 +2030,16 @@ mod tests {
         state.open_chat = Some(42);
         state.chat_title = "Test".into();
         state.messages = (0..300)
-            .map(|i| MsgRow {
-                id: i,
-                text: format!("message {i} with some text that wraps a bit"),
-                date: 1_700_000_000 - i,
-                out: i % 2 == 0,
-                photo: None,
-                photo_path: None,
-                read: true,
+            .map(|i| {
+                MsgRow {
+                    read: true,
+                    ..MsgRow::text(
+                        i,
+                        format!("message {i} with some text that wraps a bit"),
+                        1_700_000_000 - i,
+                        i % 2 == 0,
+                    )
+                }
             })
             .collect();
 
