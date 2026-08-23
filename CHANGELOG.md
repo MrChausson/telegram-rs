@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-08-23
+
 ### Changed
 - **Switched the renderer to wgpu (GPU)** with the tiny-skia software renderer
   kept as automatic fallback for machines without a usable GPU stack. The
