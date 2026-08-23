@@ -200,7 +200,7 @@ fn bench_frame(c: &mut Criterion) {
             b.iter(|| {
                 let mut el = chat_view(&state);
                 Widget::diff(el.as_widget(), &mut tree);
-                let node = Widget::layout(el.as_widget_mut(), &mut tree, &mut renderer, &limits);
+                let node = Widget::layout(el.as_widget_mut(), &mut tree, &renderer, &limits);
                 let layout = Layout::new(&node);
                 let viewport = Rectangle::new(Point::new(0.0, 0.0), Size::new(W, H));
                 Widget::draw(

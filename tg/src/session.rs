@@ -149,7 +149,7 @@ pub fn save(session: &FileSession, path: &Path) -> io::Result<()> {
         updates_state: snap.updates_state,
     };
     let bytes = bincode::serialize(&persisted)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, &bytes)?;
     std::fs::rename(&tmp, path)?;

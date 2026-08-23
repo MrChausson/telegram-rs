@@ -268,16 +268,6 @@ impl State {
         }
     }
 
-    /// Current FPS estimate from the recent frame-time samples (0 when idle).
-    pub fn fps(&self) -> u32 {
-        let n = self.perf_frames.len();
-        if n == 0 {
-            return 0;
-        }
-        let sum: f32 = self.perf_frames.iter().sum();
-        (1000.0 / (sum / n as f32)).round() as u32
-    }
-
     fn sample_frame_time(&mut self) {
         let now = std::time::Instant::now();
         let dt = now.duration_since(self.perf_last).as_secs_f32() * 1000.0;

@@ -72,7 +72,7 @@ async fn interactive_login(tg: &Telegram, api_hash: &str) -> anyhow::Result<()> 
                     Ok(Err(_)) => {
                         anyhow::bail!("Invalid password, try again.");
                     }
-                    Err(e) => return Err(e.into()),
+                    Err(e) => return Err(e),
                 }
             }
             Err(SignInError::InvalidCode) => {
