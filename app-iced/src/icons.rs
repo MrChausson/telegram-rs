@@ -33,17 +33,17 @@ pub enum Icon {
     Gif,
     /// App logo: paper plane on an accent disc.
     Logo,
-    /// Pencil (context menu "Modifier").
+    /// Pencil (context menu "Edit").
     Edit,
-    /// Two overlapping sheets (context menu "Copier").
+    /// Two overlapping sheets (context menu "Copy").
     Copy,
-    /// Trash bin (context menu "Supprimer").
+    /// Trash bin (context menu "Delete").
     Trash,
     /// Filled play triangle (voice notes).
     Play,
     /// Pause bars (voice notes).
     Pause,
-    /// Push pin (message "Épingler" / pinned banner).
+    /// Push pin (message "Pin" / pinned banner).
     Pin,
 }
 
