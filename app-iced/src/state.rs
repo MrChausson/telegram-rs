@@ -2,7 +2,9 @@
 //! here: `update` turns `Message`s into state changes + `Request`s, exactly
 //! like the custom `ui` crate's `UiState`, so it can be unit tested headlessly.
 
-use crate::bridge::{ChatRow, DocMeta, MsgRow, Request, SearchHit, UiMessage};
+use crate::bridge::{
+    ChatDetail, ChatRow, DocMeta, MsgRow, ParticipantRow, Request, SearchHit, UiMessage,
+};
 
 /// One-line preview of a message for list rows / reply snippets: the text,
 /// or a media placeholder when there is none.
@@ -221,6 +223,17 @@ pub struct State {
     /// the banner under the chat header; a click jumps to the message.
     pub pinned_id: Option<i32>,
 
+    /// Right-hand info panel is open (chat details + members).
+    pub info_open: bool,
+    /// Latest fetched detail of the open chat (`None` until it arrives).
+    pub chat_info: Option<ChatDetail>,
+    /// Members of the open group/channel (info panel).
+    pub participants: Vec<ParticipantRow>,
+    /// Member id awaiting kick confirmation (inline Yes/No on its row).
+    pub kick_confirm: Option<i64>,
+    /// Local mute flag of the open chat (optimistic; drives the button label).
+    pub muted: bool,
+
     /// Absolute Y offset of the message list's viewport (content coordinates),
     /// fed by the scrollable's `on_scroll`. Drives virtualization: only the
     /// rows overlapping `[offset, offset + viewport]` are built each frame.
@@ -316,6 +329,11 @@ impl State {
             initial_chat: None,
             scroll_to_bottom: false,
             pinned_id: None,
+            info_open: false,
+            chat_info: None,
+            participants: Vec::new(),
+            kick_confirm: None,
+            muted: false,
             scroll_offset: 0.0,
             dialog_scroll_offset: 0.0,
             layout_cache: Mutex::new(None),
@@ -783,6 +801,30 @@ impl State {
                     }
                 }
             }
+            UiMessage::ChatInfo(detail) => {
+                // Stale guard: only apply while that chat is still open.
+                if self.open_chat == Some(detail.id) {
+                    self.chat_info = Some(detail);
+                }
+            }
+            UiMessage::Participants(rows) => {
+                // The payload carries no chat id; members are only requested
+                // while the panel is open on the current chat.
+                if self.info_open {
+                    if let Some(k) = self.kick_confirm {
+                        if !rows.iter().any(|p| p.id == k) {
+                            self.kick_confirm = None;
+                        }
+                    }
+                    self.participants = rows;
+                }
+            }
+            UiMessage::ParticipantKicked { user_id } => {
+                self.participants.retain(|p| p.id != user_id);
+                if self.kick_confirm == Some(user_id) {
+                    self.kick_confirm = None;
+                }
+            }
             UiMessage::LoginCodeRequired => {
                 self.login_step = LoginStep::Code;
                 self.login_input.clear();
@@ -948,13 +990,21 @@ impl State {
         self.invalidate_layout();
     }
 
-    /// Escape: closes the topmost overlay (creation modal, chat-row menu,
-    /// confirmation, context menu), cancels editing or the reply target.
+    /// Escape: closes the topmost overlay — kick confirmation, info panel,
+    /// creation modal, chat-row menu, leave confirmation — then the context
+    /// menu, cancels editing or the reply target.
     pub fn escape(&mut self) {
         // The search UI is active: it hides the chat pane, so Escape (and the
         // back handler) close it before touching the message rows.
         if self.search_open() {
             self.close_search();
+            return;
+        }
+        if self.kick_confirm.take().is_some() {
+            return; // only cancel the confirmation
+        }
+        if self.info_open {
+            self.close_info();
             return;
         }
         if self.create_dialog.take().is_some() {
@@ -1232,6 +1282,60 @@ impl State {
         let _ = self.req_tx.send(req);
     }
 
+    // Info panel (chat details + members)
+    // -------------------------------------------------------------------
+
+    /// Opens the right-hand info panel and fetches this chat's details +
+    /// member list. Re-opening on the same chat refreshes both.
+    pub fn open_info(&mut self) {
+        self.info_open = true;
+        self.chat_info = None;
+        self.participants.clear();
+        self.kick_confirm = None;
+        if let Some(id) = self.open_chat {
+            let _ = self.req_tx.send(Request::GetChatInfo { id });
+            let _ = self.req_tx.send(Request::GetParticipants { id });
+        }
+    }
+
+    /// Closes the info panel (✕ button, header click or Escape).
+    pub fn close_info(&mut self) {
+        self.info_open = false;
+        self.kick_confirm = None;
+    }
+
+    /// The Mute button: flips the local flag and pushes it server-side.
+    pub fn toggle_mute(&mut self) {
+        let Some(id) = self.open_chat else { return };
+        self.muted = !self.muted;
+        let _ = self.req_tx.send(Request::SetMuted { id, muted: self.muted });
+    }
+
+    /// "Remove" was clicked on a member row: arm the inline confirmation.
+    pub fn kick(&mut self, user_id: i64) {
+        if self.participants.iter().any(|p| p.id == user_id) {
+            self.kick_confirm = Some(user_id);
+        }
+    }
+
+    /// Confirms a pending kick: sends the request; the authoritative
+    /// `ParticipantKicked` echo removes the row.
+    pub fn kick_confirmed(&mut self) {
+        let Some(user_id) = self.kick_confirm.take() else {
+            return;
+        };
+        let Some(id) = self.open_chat else {
+            return;
+        };
+        let _ = self.req_tx.send(Request::KickParticipant { id, user_id });
+    }
+
+    /// The @username line was clicked: returns the text to copy.
+    pub fn copy_username(&mut self) -> Option<String> {
+        let username = self.chat_info.as_ref()?.username.as_ref()?;
+        Some(format!("@{username}"))
+    }
+
     /// Submit the composer: send (or edit) the current text.
     pub fn submit(&mut self) {
         let text = self.composer.trim().to_string();
@@ -1342,6 +1446,11 @@ impl State {
         self.pending_jump_id = None;
         self.pinned_id = None;
         self.composer.clear();
+        self.info_open = false;
+        self.chat_info = None;
+        self.participants.clear();
+        self.kick_confirm = None;
+        self.muted = false;
         if self.persist_ui {
             write_last_chat_at(&last_chat_path(), Some(id));
         }
@@ -1358,6 +1467,11 @@ impl State {
         self.editing = None;
         self.context_menu = None;
         self.pinned_id = None;
+        self.info_open = false;
+        self.chat_info = None;
+        self.participants.clear();
+        self.kick_confirm = None;
+        self.muted = false;
         if self.persist_ui {
             write_last_chat_at(&last_chat_path(), None);
         }
@@ -2227,8 +2341,8 @@ mod tests {
     fn seed_dialogs(state: &mut State) {
         state.on_message(UiMessage::Dialogs(vec![
             ChatRow { id: 1001, title: "Camille".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
-            ChatRow { id: 1002, title: "Rust Groupe".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
-            ChatRow { id: 1003, title: "Canal Paysages".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
+            ChatRow { id: 1002, title: "Rust Group".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
+            ChatRow { id: 1003, title: "Landscape Channel".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
         ]));
     }
 
@@ -2300,6 +2414,18 @@ mod tests {
         }
     }
 
+    fn group_detail(id: i64) -> ChatDetail {
+        ChatDetail {
+            id,
+            title: "Rust Group".into(),
+            kind: crate::bridge::ChatKind::Group,
+            username: None,
+            bio: Some("Weekly reviews".into()),
+            phone: None,
+            members_count: Some(3),
+        }
+    }
+
     #[test]
     fn chat_created_opens_the_new_chat() {
         let (mut state, mut req_rx) = demo_state();
@@ -2353,5 +2479,170 @@ mod tests {
         state.escape();
         assert!(state.row_menu.is_none());
         assert_eq!(state.editing, Some(2), "deeper overlays are untouched");
+    }
+
+    #[test]
+    fn info_panel_opens_and_requests_details() {
+        let (mut state, mut req_rx) = demo_state();
+        assert!(!state.info_open);
+        state.open_info();
+        assert!(state.info_open, "panel open");
+        let reqs = drain(&mut req_rx);
+        assert!(
+            reqs.iter().any(|r| matches!(r, Request::GetChatInfo { id: 42 })),
+            "expected GetChatInfo, got {reqs:?}"
+        );
+        assert!(
+            reqs.iter().any(|r| matches!(r, Request::GetParticipants { id: 42 })),
+            "expected GetParticipants, got {reqs:?}"
+        );
+    }
+
+    #[test]
+    fn chat_info_populates_panel_and_stale_is_ignored() {
+        let (mut state, _) = demo_state();
+        state.open_info();
+        state.on_message(UiMessage::ChatInfo(group_detail(42)));
+        assert_eq!(state.chat_info.as_ref().map(|d| d.id), Some(42));
+        // A response for another chat must not overwrite the panel.
+        state.on_message(UiMessage::ChatInfo(group_detail(99)));
+        assert_eq!(state.chat_info.as_ref().map(|d| d.id), Some(42));
+    }
+
+    #[test]
+    fn participants_kick_flow_with_inline_confirmation() {
+        let (mut state, mut req_rx) = demo_state();
+        state.open_info();
+        state.on_message(UiMessage::Participants(vec![
+            crate::bridge::ParticipantRow {
+                id: 2001,
+                name: "Camille".into(),
+                username: None,
+                role: crate::bridge::ParticipantRole::Creator,
+            },
+            crate::bridge::ParticipantRow {
+                id: 2002,
+                name: "Léo".into(),
+                username: None,
+                role: crate::bridge::ParticipantRole::Member,
+            },
+        ]));
+        assert_eq!(state.participants.len(), 2);
+
+        // Click "remove" → arms the confirmation, no request yet.
+        state.kick(2002);
+        assert_eq!(state.kick_confirm, Some(2002));
+        drain(&mut req_rx);
+
+        // Confirm → request sent; row stays until the echo.
+        state.kick_confirmed();
+        let reqs = drain(&mut req_rx);
+        assert!(
+            reqs.iter().any(|r| matches!(r, Request::KickParticipant { id: 42, user_id: 2002 })),
+            "expected KickParticipant, got {reqs:?}"
+        );
+        assert_eq!(state.participants.len(), 2);
+
+        // Echo removes the row and clears the confirmation.
+        state.on_message(UiMessage::ParticipantKicked { user_id: 2002 });
+        assert_eq!(state.participants.len(), 1);
+        assert_eq!(state.kick_confirm, None);
+
+        // Kicking an unknown member must not arm anything.
+        state.kick(9999);
+        assert_eq!(state.kick_confirm, None);
+    }
+
+    #[test]
+    fn toggle_mute_flips_and_sends() {
+        let (mut state, mut req_rx) = demo_state();
+        assert!(!state.muted);
+        state.toggle_mute();
+        assert!(state.muted);
+        state.toggle_mute();
+        assert!(!state.muted);
+        let reqs = drain(&mut req_rx);
+        assert_eq!(
+            reqs.iter().filter(|r| matches!(r, Request::SetMuted { id: 42, .. })).count(),
+            2
+        );
+    }
+
+    #[test]
+    fn switching_chats_resets_the_info_panel() {
+        let (mut state, _) = demo_state();
+        state.open_info();
+        state.on_message(UiMessage::ChatInfo(group_detail(42)));
+        state.on_message(UiMessage::Participants(vec![crate::bridge::ParticipantRow {
+            id: 2001,
+            name: "Camille".into(),
+            username: None,
+            role: crate::bridge::ParticipantRole::Creator,
+        }]));
+        state.kick(2001);
+        assert!(state.info_open && !state.participants.is_empty());
+        assert!(!state.muted);
+
+        state.toggle_mute();
+        state.muted = true;
+        state.open_chat(43);
+        assert!(!state.info_open, "panel closed on chat switch");
+        assert!(state.chat_info.is_none(), "stale detail dropped");
+        assert!(state.participants.is_empty(), "stale members dropped");
+        assert_eq!(state.kick_confirm, None);
+        assert!(!state.muted, "mute flag is per-chat");
+        assert_eq!(state.pinned_id, None);
+    }
+
+    #[test]
+    fn escape_closes_kick_confirm_then_info_panel() {
+        let (mut state, _) = demo_state();
+        state.open_info();
+        state.on_message(UiMessage::Participants(vec![crate::bridge::ParticipantRow {
+            id: 2001,
+            name: "Camille".into(),
+            username: None,
+            role: crate::bridge::ParticipantRole::Creator,
+        }]));
+        state.kick(2001);
+
+        // First Escape cancels only the inline confirmation.
+        state.escape();
+        assert_eq!(state.kick_confirm, None);
+        assert!(state.info_open, "panel must stay open");
+
+        // Second Escape closes the panel itself.
+        state.escape();
+        assert!(!state.info_open);
+    }
+
+    #[test]
+    fn close_chat_clears_the_info_panel() {
+        let (mut state, _) = demo_state();
+        state.persist_ui = false;
+        state.open_info();
+        state.on_message(UiMessage::ChatInfo(group_detail(42)));
+        state.close_chat();
+        assert!(!state.info_open);
+        assert!(state.chat_info.is_none());
+        assert!(state.participants.is_empty());
+        assert!(state.kick_confirm.is_none());
+    }
+
+    #[test]
+    fn copy_username_returns_at_prefixed_handle() {
+        let (mut state, _) = demo_state();
+        state.open_info();
+        assert_eq!(state.copy_username(), None, "no info yet");
+        state.on_message(UiMessage::ChatInfo(ChatDetail {
+            id: 42,
+            title: "Camille".into(),
+            kind: crate::bridge::ChatKind::User,
+            username: Some("camille_dev".into()),
+            bio: None,
+            phone: None,
+            members_count: None,
+        }));
+        assert_eq!(state.copy_username().as_deref(), Some("@camille_dev"));
     }
 }

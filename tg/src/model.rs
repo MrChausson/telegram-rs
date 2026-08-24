@@ -69,3 +69,49 @@ pub struct GlobalHit {
     pub peer_id: i64,
     pub msg: MessageInfo,
 }
+
+/// Kind of a chat (drives what the info panel shows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatKind {
+    /// A private conversation with a human.
+    User,
+    /// A basic (legacy) group chat.
+    Group,
+    /// A channel or megagroup.
+    Channel,
+    /// A bot account.
+    Bot,
+}
+
+/// Detailed info about a chat, shown in the right-hand info panel.
+/// Every field except `id`/`title`/`kind` is optional: Telegram hides what
+/// the peer didn't publish.
+#[derive(Debug, Clone)]
+pub struct ChatDetail {
+    /// Bot-API style id (same space as the dialog list ids).
+    pub id: i64,
+    pub title: String,
+    pub kind: ChatKind,
+    pub username: Option<String>,
+    pub bio: Option<String>,
+    pub phone: Option<String>,
+    pub members_count: Option<u32>,
+}
+
+/// Role of a member inside a group/channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParticipantRole {
+    Creator,
+    Admin,
+    Member,
+}
+
+/// One member row of the participants list.
+#[derive(Debug, Clone)]
+pub struct ParticipantRow {
+    /// Bot-API style user id.
+    pub id: i64,
+    pub name: String,
+    pub username: Option<String>,
+    pub role: ParticipantRole,
+}

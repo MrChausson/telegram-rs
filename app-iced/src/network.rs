@@ -17,7 +17,10 @@ use tg::client::Telegram;
 use tg::session::load_or_new;
 use tokio::sync::mpsc;
 
-use crate::bridge::{ChatRow, DocKind, DocMeta, MsgRow, Request, SearchHit, UiMessage};
+use crate::bridge::{
+    ChatDetail, ChatKind, ChatRow, DocKind, DocMeta, MsgRow, ParticipantRole, ParticipantRow,
+    Request, SearchHit, UiMessage,
+};
 
 const ENV_FILE: &str = ".env";
 const SESSION_FILE: &str = ".tg.session";
@@ -392,6 +395,95 @@ fn ensure_demo_assets(chats: &[DemoChat]) -> DemoAssets {
     }
 
     assets
+}
+
+/// Canned info-panel detail for a demo chat (`None` = unknown chat).
+fn demo_chat_detail(id: i64) -> Option<ChatDetail> {
+    let d = match id {
+        1001 => ChatDetail {
+            id,
+            title: "Camille".into(),
+            kind: ChatKind::User,
+            username: Some("camille_dev".into()),
+            bio: Some("Rust & mountains. Weekend hike photos inside 🏔".into()),
+            phone: Some("+33 6 12 34 56 78".into()),
+            members_count: None,
+        },
+        1002 => ChatDetail {
+            id,
+            title: "Rust Group".into(),
+            kind: ChatKind::Group,
+            username: None,
+            bio: Some("Weekly project reviews — Fridays at 18:00.".into()),
+            phone: None,
+            members_count: Some(5),
+        },
+        1003 => ChatDetail {
+            id,
+            title: "Canal Paysages".into(),
+            kind: ChatKind::Channel,
+            username: Some("paysages".into()),
+            bio: Some("Paysages du monde entier, une photo par jour 🌍".into()),
+            phone: None,
+            members_count: Some(1284),
+        },
+        1004 => ChatDetail {
+            id,
+            title: "Groupe Famille".into(),
+            kind: ChatKind::Group,
+            username: None,
+            bio: None,
+            phone: None,
+            members_count: Some(4),
+        },
+        1005 => ChatDetail {
+            id,
+            title: "Paris Bots".into(),
+            kind: ChatKind::Bot,
+            username: Some("parisbot".into()),
+            bio: Some("Release news for Paris bots. /help for commands.".into()),
+            phone: None,
+            members_count: None,
+        },
+        _ => return None,
+    };
+    Some(d)
+}
+
+/// Canned member list of a demo group/channel (empty = hidden/none).
+fn demo_participants(id: i64) -> Vec<ParticipantRow> {
+    let p = |id: i64, name: &str, role| ParticipantRow {
+        id,
+        name: name.to_string(),
+        username: None,
+        role,
+    };
+    let named = |id: i64, name: &str, username: &str, role| ParticipantRow {
+        id,
+        name: name.to_string(),
+        username: Some(username.to_string()),
+        role,
+    };
+    match id {
+        1002 => vec![
+            named(2001, "Camille", "camille_dev", ParticipantRole::Creator),
+            named(2002, "Léo", "leo_builds", ParticipantRole::Admin),
+            named(2003, "Thomas", "thomas_rs", ParticipantRole::Member),
+            p(2004, "Sofia", ParticipantRole::Member),
+            p(2005, "Marc", ParticipantRole::Member),
+        ],
+        1003 => vec![
+            p(2201, "Camille", ParticipantRole::Creator),
+            p(2202, "Léo", ParticipantRole::Admin),
+        ],
+        1004 => vec![
+            p(2101, "Maman", ParticipantRole::Creator),
+            p(2102, "Papa", ParticipantRole::Member),
+            p(2103, "Sophie", ParticipantRole::Member),
+            p(2104, "Toi", ParticipantRole::Member),
+        ],
+        _ => Vec::new(),
+    }
 }
 
 /// Offline "backend" for `--demo`: replays canned dialogs/messages, echoes
@@ -887,6 +979,19 @@ Request::DownloadDoc { chat_id, msg_id } => {
                 }
                 Request::MarkRead { id } => {
                     let _ = ui_tx.send(UiMessage::ChatRead { id });
+                }
+                Request::GetChatInfo { id } => {
+                    if let Some(detail) = demo_chat_detail(id) {
+                        let _ = ui_tx.send(UiMessage::ChatInfo(detail));
+                    }
+                }
+                Request::GetParticipants { id } => {
+                    let _ = ui_tx.send(UiMessage::Participants(demo_participants(id)));
+                }
+                Request::SetMuted { .. } => {}
+                Request::KickParticipant { user_id, .. } => {
+                    // The server would confirm through an update; echo it.
+                    let _ = ui_tx.send(UiMessage::ParticipantKicked { user_id });
                 }
                 Request::Typing { .. } => {}
                 _ => {}
@@ -1501,6 +1606,40 @@ fn forward_name(
     peers.get(&chat_id).map(|(title, _)| title.clone())
 }
 
+/// Maps a core `ChatDetail` onto its bridge duplicate.
+fn chat_detail_to_bridge(d: tg::model::ChatDetail) -> ChatDetail {
+    let kind = match d.kind {
+        tg::model::ChatKind::User => ChatKind::User,
+        tg::model::ChatKind::Group => ChatKind::Group,
+        tg::model::ChatKind::Channel => ChatKind::Channel,
+        tg::model::ChatKind::Bot => ChatKind::Bot,
+    };
+    ChatDetail {
+        id: d.id,
+        title: d.title,
+        kind,
+        username: d.username,
+        bio: d.bio,
+        phone: d.phone,
+        members_count: d.members_count,
+    }
+}
+
+/// Maps a core `ParticipantRow` onto its bridge duplicate.
+fn participant_to_bridge(p: tg::model::ParticipantRow) -> ParticipantRow {
+    let role = match p.role {
+        tg::model::ParticipantRole::Creator => ParticipantRole::Creator,
+        tg::model::ParticipantRole::Admin => ParticipantRole::Admin,
+        tg::model::ParticipantRole::Member => ParticipantRole::Member,
+    };
+    ParticipantRow {
+        id: p.id,
+        name: p.name,
+        username: p.username,
+        role,
+    }
+}
+
 async fn handle_request(
     tg: &Arc<Telegram>,
     ui_tx: &mpsc::UnboundedSender<UiMessage>,
@@ -1801,6 +1940,56 @@ async fn handle_request(
                 }
                 Err(e) => {
                     let _ = ui_tx.send(UiMessage::Error(format!("Rename failed: {e}")));
+                }
+            },
+            None => {
+                let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+            }
+        },
+        Request::GetChatInfo { id } => match peers.get(&id) {
+            Some((_, peer_ref)) => match tg.get_chat_detail(peer_ref).await {
+                Ok(detail) => {
+                    let _ = ui_tx.send(UiMessage::ChatInfo(chat_detail_to_bridge(detail)));
+                }
+                Err(e) => {
+                    let _ = ui_tx.send(UiMessage::Error(format!("Could not load info: {e}")));
+                }
+            },
+            None => {
+                let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+            }
+        },
+        Request::SetMuted { id, muted } => {
+            if let Some((_, peer_ref)) = peers.get(&id) {
+                if let Err(e) = tg.set_muted(peer_ref, muted).await {
+                    let _ = ui_tx
+                        .send(UiMessage::Error(format!("Could not update mute: {e}")));
+                }
+            }
+        }
+        Request::GetParticipants { id } => match peers.get(&id) {
+            Some((_, peer_ref)) => match tg.get_participants(peer_ref, 200).await {
+                Ok(rows) => {
+                    let _ = ui_tx.send(UiMessage::Participants(
+                        rows.into_iter().map(participant_to_bridge).collect(),
+                    ));
+                }
+                Err(e) => {
+                    let _ = ui_tx
+                        .send(UiMessage::Error(format!("Could not load members: {e}")));
+                }
+            },
+            None => {
+                let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+            }
+        },
+        Request::KickParticipant { id, user_id } => match peers.get(&id) {
+            Some((_, peer_ref)) => match tg.kick_participant(peer_ref, user_id).await {
+                Ok(()) => {
+                    let _ = ui_tx.send(UiMessage::ParticipantKicked { user_id });
+                }
+                Err(e) => {
+                    let _ = ui_tx.send(UiMessage::Error(format!("Kick failed: {e}")));
                 }
             },
             None => {

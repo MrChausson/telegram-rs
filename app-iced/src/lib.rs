@@ -22,7 +22,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Color, Length, Task};
 
-use bridge::{ChatRow, MsgRow, Request, UiMessage};
+use bridge::{ChatKind, ChatRow, MsgRow, Request, UiMessage};
 use icons::{icon, Icon};
 use state::{LoginStep, SearchMode, State};
 
@@ -188,6 +188,18 @@ pub enum Message {
     ConfirmYes,
     /// The confirmation dialog was cancelled.
     ConfirmNo,
+    /// The chat header (or ℹ️) was clicked: toggle the right info panel.
+    ToggleInfo,
+    /// The info panel's ✕ was pressed.
+    CloseInfo,
+    /// The info panel's Mute button was pressed.
+    ToggleMute,
+    /// The @username line in the info panel was clicked (copy).
+    CopyUsername,
+    /// "Remove" was clicked on a member row (arms the inline confirmation).
+    KickMember(i64),
+    /// The inline kick confirmation was accepted.
+    ConfirmKick,
     /// The reply bar's ✕ was pressed (cancel the armed reply).
     CancelReply,
     /// "Forward" pressed in the context menu (opens the chat picker).
@@ -317,6 +329,22 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::AskConfirm(kind, id) => state.ask_confirm(kind, id),
         Message::ConfirmYes => state.confirm_yes(),
         Message::ConfirmNo => state.cancel_confirm(),
+        Message::ToggleInfo => {
+            if state.info_open {
+                state.close_info();
+            } else {
+                state.open_info();
+            }
+        }
+        Message::CloseInfo => state.close_info(),
+        Message::ToggleMute => state.toggle_mute(),
+        Message::CopyUsername => {
+            if let Some(handle) = state.copy_username() {
+                return iced::clipboard::write::<Message>(handle);
+            }
+        }
+        Message::KickMember(user_id) => state.kick(user_id),
+        Message::ConfirmKick => state.kick_confirmed(),
         Message::CancelReply => state.reply_target = None,
         Message::ContextForward => state.context_forward(),
         Message::ForwardTo(chat) => {
@@ -1138,11 +1166,255 @@ fn conversation_pane(state: &State) -> Element<'_> {
 
     let pane = pane.push(top).push(body).push(composer).height(Length::Fill);
 
-    if state.forward_pick.is_some() {
+    let pane: Element<'_> = if state.forward_pick.is_some() {
         forward_overlay(state, pane.into())
     } else {
         pane.into()
+    };
+
+    // Right-hand info panel, when open: [conversation | divider | info].
+    if state.info_open && state.open_chat.is_some() {
+        return row![
+            pane,
+            container(iced::widget::Space::new())
+                .width(1.0)
+                .height(Length::Fill)
+                .style(divider),
+            info_panel(state),
+        ]
+        .into();
     }
+    pane
+}
+
+/// Width of the right-hand chat-info side panel.
+const INFO_W: f32 = 300.0;
+
+/// Right-hand panel with the open chat's details (avatar, username, bio…),
+/// quick actions (mute, search) and the member list of groups/channels.
+fn info_panel(state: &State) -> Element<'_> {
+    let close = button(icon(Icon::Close, theme::ICON, 16.0))
+        .on_press(Message::CloseInfo)
+        .padding(6)
+        .style(flat_button);
+
+    let mut col = column![row![
+        text("Chat info")
+            .size(theme::font::NAME)
+            .color(Color::WHITE)
+            .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+        horizontal_spacer(),
+        close,
+    ]
+    .width(Length::Fill)
+    .align_y(Alignment::Center)]
+    .spacing(12)
+    .padding([12, 14]);
+
+    // Identity block: avatar + title + subtitle.
+    let dialog = state.dialogs.iter().find(|d| Some(d.id) == state.open_chat);
+    let avatar_path = dialog.and_then(|d| d.avatar_path.as_deref());
+    let detail = state.chat_info.as_ref();
+    let title = detail
+        .map(|d| d.title.clone())
+        .unwrap_or_else(|| state.chat_title.clone());
+
+    col = col.push(
+        column![
+            container(avatar_circle(avatar_path, &title, 72.0)).center_x(Length::Fill),
+            container(
+                text(title)
+                    .size(theme::font::NAME)
+                    .color(Color::WHITE)
+                    .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT })
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .center_x(Length::Fill),
+            container(
+                text(info_subtitle(state))
+                    .size(theme::font::TIMESTAMP)
+                    .color(rgb(theme::TEXT_SECONDARY)),
+            )
+            .center_x(Length::Fill),
+        ]
+        .spacing(6)
+        .align_x(Alignment::Center),
+    );
+
+    // @username (click to copy), bio, phone.
+    if let Some(d) = detail {
+        if let Some(username) = &d.username {
+            col = col.push(
+                button(
+                    row![
+                        icon(Icon::Info, theme::ICON, 14.0),
+                        text(format!("@{username}"))
+                            .size(theme::font::TIMESTAMP)
+                            .color(rgb(theme::ACCENT)),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .on_press(Message::CopyUsername)
+                .padding([4, 8])
+                .style(flat_button),
+            );
+        }
+        if let Some(bio) = &d.bio {
+            col = col.push(
+                text(bio.clone())
+                    .size(theme::font::TIMESTAMP)
+                    .color(rgb(theme::TEXT_SECONDARY)),
+            );
+        }
+        if let Some(phone) = &d.phone {
+            col = col.push(
+                text(phone.clone())
+                    .size(theme::font::TIMESTAMP)
+                    .color(rgb(theme::TEXT_SECONDARY)),
+            );
+        }
+    }
+
+    // Quick actions: mute toggle + in-chat search.
+    col = col.push(
+        row![
+            button(
+                text(if state.muted { "Unmute" } else { "Mute" })
+                    .size(theme::font::TIMESTAMP)
+                    .color(rgb(theme::ICON)),
+            )
+            .on_press(Message::ToggleMute)
+            .padding([6, 12])
+            .style(flat_button),
+            button(
+                row![
+                    icon(Icon::Search, theme::ICON, 14.0),
+                    text("Search in chat")
+                        .size(theme::font::TIMESTAMP)
+                        .color(rgb(theme::ICON)),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            )
+            .on_press(Message::OpenInChatSearch)
+            .padding([6, 12])
+            .style(flat_button),
+        ]
+        .spacing(8),
+    );
+
+    // Members section (groups/channels only).
+    let show_members = matches!(
+        detail.map(|d| d.kind),
+        Some(ChatKind::Group) | Some(ChatKind::Channel)
+    ) || (!state.participants.is_empty() && detail.is_none());
+    if show_members {
+        col = col.push(
+            text(format!("Members ({})", state.participants.len()))
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(theme::ICON))
+                .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+        );
+        for p in &state.participants {
+            col = col.push(member_row(p, state.kick_confirm == Some(p.id)));
+        }
+        if state.participants.is_empty() {
+            col = col.push(
+                text("No members to show")
+                    .size(theme::font::TIMESTAMP)
+                    .color(rgb(theme::TEXT_SECONDARY)),
+            );
+        }
+    }
+
+    container(scrollable(col))
+        .width(INFO_W)
+        .height(Length::Fill)
+        .style(list_bg)
+        .into()
+}
+
+/// One-line summary under the panel's avatar: members count / presence.
+fn info_subtitle(state: &State) -> String {
+    match state.chat_info.as_ref() {
+        Some(d) => match d.kind {
+            ChatKind::User => "online".to_string(),
+            ChatKind::Bot => "bot".to_string(),
+            ChatKind::Group | ChatKind::Channel => match d.members_count {
+                Some(n) => format!("{n} members"),
+                None => String::new(),
+            },
+        },
+        None => String::new(),
+    }
+}
+
+/// A member row: letter avatar, name (+ role badge) and a remove action that
+/// flips into an inline Yes/No confirmation when armed.
+fn member_row(p: &bridge::ParticipantRow, confirming: bool) -> Element<'static> {
+    let name = p.name.clone();
+    let trailing: Element<'static> = if confirming {
+        row![
+            button(text("Remove").size(theme::font::BADGE).color(rgb(theme::ERROR)))
+                .on_press(Message::ConfirmKick)
+                .padding([3, 8])
+                .style(flat_button),
+            button(text("Cancel").size(theme::font::BADGE).color(rgb(theme::ICON)))
+                .on_press(Message::Escape)
+                .padding([3, 8])
+                .style(flat_button),
+        ]
+        .spacing(4)
+        .into()
+    } else {
+        button(icon(Icon::Close, theme::ICON, 14.0))
+            .on_press(Message::KickMember(p.id))
+            .padding(5)
+            .style(flat_button)
+            .into()
+    };
+    button(
+        row![
+            avatar_circle(None, &name, 34.0),
+            column![
+                text(name)
+                    .size(theme::font::MESSAGE)
+                    .color(Color::WHITE)
+                    .wrapping(iced::widget::text::Wrapping::None),
+            ]
+            .width(Length::Fill),
+            role_badge(p.role),
+            trailing,
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding([4, 0])
+    .style(|_theme, status| row_style(_theme, status, false))
+    .into()
+}
+
+/// Small role chip next to a member's name ("Owner"/"Admin"; none for plain
+/// members).
+fn role_badge(role: bridge::ParticipantRole) -> Element<'static> {
+    let (label, color) = match role {
+        bridge::ParticipantRole::Creator => ("Owner", theme::ACCENT),
+        bridge::ParticipantRole::Admin => ("Admin", theme::ICON),
+        bridge::ParticipantRole::Member => return horizontal_spacer(),
+    };
+    container(text(label).size(theme::font::BADGE).color(rgb(color)))
+        .padding([2, 6])
+        .style(move |_| container::Style {
+            background: Some(iced::Background::Color(rgb(theme::PERF_BADGE_BG))),
+            border: iced::Border {
+                radius: 6.0.into(),
+                ..iced::Border::default()
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
 /// Full-pane modal listing the chats as forward destinations. Rendered on
@@ -1423,14 +1695,27 @@ fn chat_header(
                 .on_press(Message::BackToChats)
                 .padding(8)
                 .style(flat_button),
-            avatar_circle(avatar_path, title, theme::layout::AVATAR_CHAT),
-            column![name, status].spacing(2),
+            // Avatar + name open/close the info panel (same as the ℹ️ icon).
+            button(
+                row![
+                    avatar_circle(avatar_path, title, theme::layout::AVATAR_CHAT),
+                    column![name, status].spacing(2),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            )
+            .on_press(Message::ToggleInfo)
+            .padding(4)
+            .style(flat_button),
             horizontal_spacer(),
             button(icon(Icon::Search, theme::ICON, 20.0))
                 .on_press(Message::OpenInChatSearch)
                 .padding(6)
                 .style(flat_button),
-            icon(Icon::Info, theme::ICON, 20.0),
+            button(icon(Icon::Info, theme::ICON, 20.0))
+                .on_press(Message::ToggleInfo)
+                .padding(6)
+                .style(flat_button),
             perf_badge,
         ]
         .spacing(10)
@@ -1969,7 +2254,7 @@ const PINNED_BANNER_H: f32 = 34.0;
 /// Thin banner showing the pinned message: pin icon + label + snippet.
 /// Clicking jumps to the message in the list.
 fn pinned_banner(m: &MsgRow) -> Element<'static> {
-    let snippet = state::preview_text(&m.text, &m.photo, &m.doc);
+    let snippet = crate::ellipsize(&state::preview_text(&m.text, &m.photo, &m.doc), 48);
     button(
         row![
             icon(Icon::Pin, theme::ACCENT, 14.0),

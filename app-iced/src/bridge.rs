@@ -114,6 +114,46 @@ pub struct SearchHit {
     pub row: MsgRow,
 }
 
+/// Kind of chat, mirrored from the `tg` crate; drives the info panel layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatKind {
+    User,
+    Group,
+    Channel,
+    Bot,
+}
+
+/// Detailed info about a chat (right-hand info panel). Duplicated from the
+/// `tg` model like `ChatRow`/`MsgRow` so `app-iced` stays independent of the
+/// core types.
+#[derive(Debug, Clone)]
+pub struct ChatDetail {
+    pub id: i64,
+    pub title: String,
+    pub kind: ChatKind,
+    pub username: Option<String>,
+    pub bio: Option<String>,
+    pub phone: Option<String>,
+    pub members_count: Option<u32>,
+}
+
+/// Role of a member inside a group/channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParticipantRole {
+    Creator,
+    Admin,
+    Member,
+}
+
+/// One member of a group/channel (info panel's member list).
+#[derive(Debug, Clone)]
+pub struct ParticipantRow {
+    pub id: i64,
+    pub name: String,
+    pub username: Option<String>,
+    pub role: ParticipantRole,
+}
+
 /// Request sent by the UI to the network.
 #[derive(Debug, Clone)]
 pub enum Request {
@@ -161,6 +201,14 @@ pub enum Request {
     DeleteChat { id: i64 },
     /// Renames a group/channel.
     EditChatTitle { id: i64, title: String },
+    /// Fetches the info-panel details of a chat.
+    GetChatInfo { id: i64 },
+    /// Mutes (`muted=true`) or unmutes a chat server-side.
+    SetMuted { id: i64, muted: bool },
+    /// Lists the members of a group/channel (info panel).
+    GetParticipants { id: i64 },
+    /// Removes a member from the open group/channel.
+    KickParticipant { id: i64, user_id: i64 },
     /// Downloads a message's document into the cache.
     DownloadDoc { chat_id: i64, msg_id: i32 },
     /// Searches messages (`id: None` = global, `Some` = that chat). The
@@ -242,6 +290,12 @@ pub enum UiMessage {
     PeerTyping { chat_id: i64, typing: bool },
     /// A profile photo thumbnail was downloaded (path = option).
     AvatarReady { chat_id: i64, path: Option<String> },
+    /// Detailed info of a chat arrived (info panel).
+    ChatInfo(ChatDetail),
+    /// The member list of the open group/channel arrived.
+    Participants(Vec<ParticipantRow>),
+    /// A member was removed from the open chat server-side.
+    ParticipantKicked { user_id: i64 },
     /// Some messages were deleted live (in the open chat).
     MessageDeleted { ids: Vec<i32> },
     /// The open chat's pinned message changed (`None` = no pin left).
