@@ -157,6 +157,10 @@ pub enum Message {
     ContextDelete,
     /// "Répondre" pressed in the context menu.
     ContextReply,
+    /// "Épingler"/"Désépingler" pressed in the context menu.
+    ContextPin,
+    /// The pinned-message banner was clicked: jump to the message.
+    PinnedClicked,
     /// The reply bar's ✕ was pressed (cancel the armed reply).
     CancelReply,
     /// "Transférer" pressed in the context menu (opens the chat picker).
@@ -272,6 +276,8 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         }
         Message::ContextDelete => state.context_delete(),
         Message::ContextReply => state.context_reply(),
+        Message::ContextPin => state.context_pin(),
+        Message::PinnedClicked => state.jump_to_pinned(),
         Message::CancelReply => state.reply_target = None,
         Message::ContextForward => state.context_forward(),
         Message::ForwardTo(chat) => {
@@ -931,6 +937,13 @@ fn conversation_pane(state: &State) -> Element<'_> {
             None
         },
     );
+
+    // Pinned-message banner (under the header): icon + label + snippet.
+    let pinned_banner: Option<Element<'_>> = state.pinned_id.and_then(|pid| {
+        let m = state.messages.iter().find(|m| m.id == pid)?;
+        Some(pinned_banner(m))
+    });
+
     let body: Element<'_> = if state.messages.is_empty() {
         let msg = if state.open_chat.is_some() {
             if state.loading {
@@ -975,11 +988,16 @@ fn conversation_pane(state: &State) -> Element<'_> {
             .width(Length::Fill)
             .height(1.0)
             .style(divider),
-        body,
-        composer
     ]
-    .width(Length::Fill)
-    .height(Length::Fill);
+    .width(Length::Fill);
+
+    // Banner slots between header divider and body.
+    let mut top: iced::widget::Column<'_, Message> = column![];
+    if let Some(b) = pinned_banner {
+        top = top.push(b);
+    }
+
+    let pane = pane.push(top).push(body).push(composer).height(Length::Fill);
 
     if state.forward_pick.is_some() {
         forward_overlay(state, pane.into())
@@ -1427,10 +1445,28 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
         message_body(&m.text)
     };
 
-    // Stack the quote above the media/text body.
-    let body_full: Element<'a> = match quote {
-        Some(q) => column![q, body].spacing(6).into(),
-        None => body,
+    // Stack the sender name (group chats) and quote above the media/text body.
+    let sender_line: Option<Element<'a>> = if !m.out {
+        m.sender_name.as_ref().filter(|_| !m.text.is_empty() || m.photo.is_some() || m.doc.is_some()).map(|name| {
+            text(name.clone())
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(sender_color(m.sender_id)))
+                .font(iced::Font { weight: iced::font::Weight::Semibold, ..iced::Font::DEFAULT })
+                .into()
+        })
+    } else {
+        None
+    };
+    let body_full: Element<'a> = {
+        let mut stack: iced::widget::Column<'a, Message> = column![];
+        if let Some(s) = sender_line {
+            stack = stack.push(s);
+        }
+        if let Some(q) = quote {
+            stack = stack.push(q);
+        }
+        stack = stack.push(body);
+        stack.spacing(4).into()
     };
 
     // Tail corner smaller, opposite corner small — Telegram style.
@@ -1624,7 +1660,75 @@ fn duration_fmt(secs: f64) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Context menu (Répondre / Transférer / Modifier / Copier / Supprimer)
+// Pinned-message banner
+// ---------------------------------------------------------------------------
+
+/// Height of the pinned banner under the chat header.
+const PINNED_BANNER_H: f32 = 34.0;
+
+/// Thin banner showing the pinned message: pin icon + label + snippet.
+/// Clicking jumps to the message in the list.
+fn pinned_banner(m: &MsgRow) -> Element<'static> {
+    let snippet = state::preview_text(&m.text, &m.photo, &m.doc);
+    button(
+        row![
+            icon(Icon::Pin, theme::ACCENT, 14.0),
+            text("Épinglé")
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(theme::ACCENT)),
+            text(snippet)
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(theme::TEXT_SECONDARY))
+                .wrapping(iced::widget::text::Wrapping::None)
+                .width(Length::Fill),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    )
+    .on_press(Message::PinnedClicked)
+    .width(Length::Fill)
+    .height(PINNED_BANNER_H)
+    .padding([0.0, theme::layout::MSG_PAD_X])
+    .style(|_theme, status| {
+        let bg = match status {
+            iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
+                rgb(theme::ROW_HOVER)
+            }
+            _ => rgb(theme::LIST_BG),
+        };
+        iced::widget::button::Style {
+            background: Some(iced::Background::Color(bg)),
+            border: iced::Border::default(),
+            ..iced::widget::button::Style::default()
+        }
+    })
+    .into()
+}
+
+// ---------------------------------------------------------------------------
+// Group sender names
+// ---------------------------------------------------------------------------
+
+/// Telegram's group sender palette (7 hues), picked deterministically from
+/// the sender id so a given author always gets the same color.
+const SENDER_COLORS: [(u8, u8, u8); 7] = [
+    (228, 105, 98),  // red
+    (230, 145, 56),  // orange
+    (119, 156, 62),  // green
+    (46, 174, 176),  // cyan
+    (124, 132, 219), // blue-violet
+    (214, 96, 178),  // pink
+    (240, 122, 90),  // coral
+];
+
+/// Color of a sender's display name (by bot-api id).
+fn sender_color(id: Option<i64>) -> (u8, u8, u8) {
+    let i = id.unwrap_or(0).rem_euclid(SENDER_COLORS.len() as i64) as usize;
+    SENDER_COLORS[i]
+}
+
+// ---------------------------------------------------------------------------
+// Context menu (Répondre / Transférer / Épingler / Modifier / Copier / Supprimer)
 // ---------------------------------------------------------------------------
 
 /// Height of one context-menu item (10 px padding per side + ~17 px text).
@@ -1689,6 +1793,12 @@ fn context_menu_bar(state: &State) -> Element<'static> {
         "Transférer",
         false,
     ));
+    let pinned_label = if state.context_row_pinned() {
+        "Désépingler"
+    } else {
+        "Épingler"
+    };
+    items = items.push(menu_item(Message::ContextPin, Icon::Pin, pinned_label, false));
     if can_edit {
         items = items.push(menu_item(Message::ContextEdit, Icon::Edit, "Modifier", false));
     }
@@ -1725,7 +1835,7 @@ fn context_menu_items(state: &State) -> usize {
         .context_menu
         .and_then(|c| state.messages.get(c.row))
         .is_some_and(|m| !m.text.is_empty());
-    2 + usize::from(can_edit) + usize::from(has_text) + usize::from(can_edit)
+    3 + usize::from(can_edit) + usize::from(has_text) + usize::from(can_edit)
 }
 
 /// Rendered height of the open context menu (items + spacing + padding) —
@@ -1946,6 +2056,13 @@ fn est_row_height(m: &MsgRow, pane_w: f32) -> f32 {
         0.0
     };
 
+    // Group sender name line above the body.
+    let sender_h = if m.sender_name.is_some() && !m.out {
+        theme::font::TIMESTAMP * 1.3 + 4.0
+    } else {
+        0.0
+    };
+
     // Document card: icon row (~30 px) + optional caption.
     let doc_h = if m.doc.is_some() { 34.0 } else { 0.0 };
 
@@ -1970,7 +2087,14 @@ fn est_row_height(m: &MsgRow, pane_w: f32) -> f32 {
         0.0
     };
     let body_gap = if quote_h > 0.0 { 6.0 } else { 0.0 };
-    2.0 * theme::layout::BUBBLE_PAD_Y + quote_h + body_gap + doc_h + photo_h + caption + text_h
+    2.0 * theme::layout::BUBBLE_PAD_Y
+        + quote_h
+        + sender_h
+        + body_gap
+        + doc_h
+        + photo_h
+        + caption
+        + text_h
 }
 
 // ---------------------------------------------------------------------------
@@ -2438,6 +2562,18 @@ mod tests {
         assert!(linkify("").is_none());
         // Bare "www." with nothing behind it is not a link.
         assert!(linkify("regarde www. et dis-moi").is_none());
+    }
+
+    #[test]
+    fn sender_colors_are_deterministic_and_bounded() {
+        // Same id → same color; ids cycle through the palette.
+        assert_eq!(sender_color(Some(7)), sender_color(Some(7)));
+        assert_eq!(sender_color(None), sender_color(Some(0)));
+        let distinct: Vec<_> = (0..7).map(|i| sender_color(Some(i))).collect();
+        assert_eq!(distinct.len(), 7);
+        for c in &distinct {
+            assert!(*c != (0, 0, 0));
+        }
     }
 
     #[test]

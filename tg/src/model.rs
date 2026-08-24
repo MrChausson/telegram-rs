@@ -53,6 +53,13 @@ pub struct MessageInfo {
     pub reply_to: Option<i32>,
     /// Forward header, if the message was forwarded from somewhere.
     pub forwarded: Option<ForwardInfo>,
+    /// Display name of the sender in group chats (`None` in private chats
+    /// where the name is redundant, or when unresolvable).
+    pub sender_name: Option<String>,
+    /// Bot-API id of the sender, when known (drives per-sender colors).
+    pub sender_id: Option<i64>,
+    /// True when the message is currently pinned in its chat.
+    pub pinned: bool,
 }
 
 /// A global search hit: the message plus the id of the chat it lives in

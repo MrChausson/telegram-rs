@@ -178,6 +178,48 @@ impl Telegram {
         Ok(out)
     }
 
+    /// Fetches the chat's currently pinned message, if any.
+    pub async fn get_pinned_message(
+        &self,
+        peer: &grammers_session::types::PeerRef,
+    ) -> Result<Option<MessageInfo>> {
+        let Some(msg) = self
+            .client
+            .get_pinned_message(*peer)
+            .await
+            .context("fetching pinned message")?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(message_info(&msg)))
+    }
+
+    /// Pins a message in a chat (server-side; notifies participants).
+    pub async fn pin_message(
+        &self,
+        peer: &grammers_session::types::PeerRef,
+        msg_id: i32,
+    ) -> Result<()> {
+        self.client
+            .pin_message(*peer, msg_id)
+            .await
+            .context("pinning message")?;
+        Ok(())
+    }
+
+    /// Unpins a message from a chat.
+    pub async fn unpin_message(
+        &self,
+        peer: &grammers_session::types::PeerRef,
+        msg_id: i32,
+    ) -> Result<()> {
+        self.client
+            .unpin_message(*peer, msg_id)
+            .await
+            .context("unpinning message")?;
+        Ok(())
+    }
+
     /// Downloads a message's photo (a small thumbnail, ~256 px) into `dir`,
     /// returning the saved path, or `None` if the message has no photo.
     /// If the thumbnail is already cached, no network request is made.
@@ -626,6 +668,13 @@ impl Downloadable for RawPhoto {
 /// Maps a grammers `Message` to the display model shared by history and
 /// search results (reply/forward/media extracted the same way everywhere).
 fn message_info(msg: &grammers_client::message::Message) -> MessageInfo {
+    // Sender name only matters in group-ish chats; private chats show one
+    // side of the conversation so the name is redundant.
+    let is_private = matches!(
+        msg.peer_id().kind(),
+        grammers_session::types::PeerKind::User | grammers_session::types::PeerKind::UserSelf
+    );
+    let sender = msg.sender();
     MessageInfo {
         id: msg.id(),
         text: msg.text().to_string(),
@@ -637,6 +686,17 @@ fn message_info(msg: &grammers_client::message::Message) -> MessageInfo {
             .forward_header()
             .as_ref()
             .and_then(forward_info),
+        sender_name: if is_private {
+            None
+        } else {
+            sender.and_then(|p| p.name()).map(str::to_string)
+        },
+        sender_id: if is_private {
+            None
+        } else {
+            msg.sender_id().map(|id| id.bot_api_dialog_id())
+        },
+        pinned: msg.pinned(),
     }
 }
 

@@ -71,6 +71,12 @@ pub struct MsgRow {
     pub upload_token: Option<u64>,
     /// True once the (outgoing) message was read by the other party.
     pub read: bool,
+    /// Display name of the sender in group chats (`None` in private chats).
+    pub sender_name: Option<String>,
+    /// Bot-API id of the sender, when known (drives per-sender colors).
+    pub sender_id: Option<i64>,
+    /// True when the message is currently pinned in its chat.
+    pub pinned: bool,
 }
 
 impl MsgRow {
@@ -90,6 +96,9 @@ impl MsgRow {
             uploading: None,
             upload_token: None,
             read: false,
+            sender_name: None,
+            sender_id: None,
+            pinned: false,
         }
     }
 }
@@ -133,6 +142,8 @@ pub enum Request {
     EditMessage { id: i64, msg_id: i32, text: String },
     /// Deletes one of the user's messages (from all devices).
     DeleteMessage { id: i64, msg_id: i32 },
+    /// Pins (`pin: true`) or unpins a message in a chat.
+    PinMessage { id: i64, msg_id: i32, pin: bool },
     /// Downloads a chat's profile photo thumbnail.
     DownloadAvatar { chat_id: i64 },
     /// Downloads a message's document into the cache.
@@ -171,6 +182,8 @@ pub enum UiMessage {
         doc: Option<DocMeta>,
         reply_to: Option<i32>,
         forwarded_from: Option<String>,
+        sender_name: Option<String>,
+        sender_id: Option<i64>,
     },
     /// An existing message was edited live.
     MessageEdited {
@@ -216,6 +229,8 @@ pub enum UiMessage {
     AvatarReady { chat_id: i64, path: Option<String> },
     /// Some messages were deleted live (in the open chat).
     MessageDeleted { ids: Vec<i32> },
+    /// The open chat's pinned message changed (`None` = no pin left).
+    PinnedMessage { chat_id: i64, msg_id: Option<i32> },
     /// The server acknowledged the phone number: ask the user for the code.
     LoginCodeRequired,
     /// The account has a 2FA password: ask for it (hint = if any).

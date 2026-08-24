@@ -43,6 +43,8 @@ pub enum Icon {
     Play,
     /// Pause bars (voice notes).
     Pause,
+    /// Push pin (message "Épingler" / pinned banner).
+    Pin,
 }
 
 fn rgb(c: (u8, u8, u8)) -> Color {
@@ -498,6 +500,45 @@ fn draw_icon(pixmap: &mut Pixmap, kind: Icon, cx: f32, cy: f32, size: f32, color
             let d = half * 0.32;
             polyline(pixmap, &[(cx - d, cy - half * 0.55), (cx - d, cy + half * 0.55)], color, w);
             polyline(pixmap, &[(cx + d, cy - half * 0.55), (cx + d, cy + half * 0.55)], color, w);
+        }
+        Icon::Pin => {
+            // Push pin (Material "push_pin" outline): slanted pin head with a
+            // hollow inner line and a needle pointing down.
+            let w = size * 0.09;
+            let head_w = half * 0.52; // half-width of the head
+            let head_top = cy - half * 0.72;
+            let head_bot = cy - half * 0.05;
+            let neck_x = cx + half * 0.18;
+            // Head: vertical slab with a chamfered bottom-right (neck).
+            polyline(
+                pixmap,
+                &[
+                    (cx - head_w, head_bot),
+                    (cx - head_w, head_top),
+                    (neck_x, head_top),
+                    (neck_x + half * 0.12, head_bot - half * 0.12),
+                    (cx - head_w, head_bot),
+                ],
+                color,
+                w,
+            );
+            // Hollow center line of the head.
+            polyline(
+                pixmap,
+                &[
+                    (cx - head_w * 0.45, head_top + half * 0.16),
+                    (cx - head_w * 0.45, head_bot - half * 0.14),
+                ],
+                color,
+                w * 0.8,
+            );
+            // Needle.
+            polyline(
+                pixmap,
+                &[(cx - half * 0.02, head_bot + w * 0.4), (cx - half * 0.02, cy + half * 0.72)],
+                color,
+                w,
+            );
         }
         Icon::Tick { read } => {
             let w = size * 0.09;

@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Pinned messages**: pin/unpin any message from its context menu; a banner
+  under the chat header shows the pinned snippet ("Épinglé") and clicking it
+  jumps straight to the message in the list. Pin state syncs live across
+  devices (`updatePinnedMessages`), and deleting the pinned message clears the
+  banner.
+- **Group sender names**: incoming messages in groups/channels show their
+  author's name above the bubble, in a deterministic per-sender color from
+  Telegram's 7-hue palette (private chats are unaffected). The virtualized
+  row-height estimate accounts for the extra line.
+
 ## [v0.6.1] - 2026-08-24
 
 ### Fixed

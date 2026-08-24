@@ -113,7 +113,9 @@ batches — each release moves the needle, not dribbles.
 - ✏️ **Live sync** — edits and deletions from any device
 - 🔑 **In-app sign-in** — phone → code → 2FA, session persisted
 - 🟢 **Presence** — typing indicator, read receipts, unread badges, mark-as-read
-- 📋 **Context menu** — reply, forward, edit, copy or delete messages
+- 📋 **Context menu** — reply, forward, pin, edit, copy or delete messages
+- 📌 **Pinned messages** — banner under the header; click to jump to the message
+- 👥 **Group senders** — author names above bubbles, one color per sender
 
 > 📋 **Copy / paste note:** message text can be copied from the message's
 > context menu (right-click → “Copier”), and text pastes into the composer
