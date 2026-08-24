@@ -211,6 +211,12 @@ pub enum Message {
     AttachFile,
     /// The file dialog returned a path (None = cancelled).
     FilePicked(Option<String>),
+    /// The sticker button was pressed: toggle the picker panel.
+    ToggleStickerPicker,
+    /// A sticker thumbnail was clicked in the picker: `(set index, doc index)`.
+    StickerPicked(usize, usize),
+    /// The sticker picker panel was closed (✕).
+    CloseStickerPicker,
     /// The context menu was dismissed.
     DismissMenu,
     /// Escape: close the context menu, cancel editing or close the viewer.
@@ -377,6 +383,9 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             }
         }
         Message::FilePicked(None) => {}
+        Message::ToggleStickerPicker => state.toggle_sticker_picker(),
+        Message::StickerPicked(set, doc) => state.send_sticker(set, doc),
+        Message::CloseStickerPicker => state.close_sticker_picker(),
         Message::DismissMenu => state.dismiss_menu(),
         Message::Escape => {
             if state.search_open() {
@@ -635,7 +644,7 @@ fn search_view(state: &State) -> Element<'_> {
 
 /// A tappable search-result line: avatar, chat title + snippet, timestamp.
 fn search_hit_row( hit: &bridge::SearchHit, _query: &str, idx: usize) -> Element<'static> {
-    let snippet = state::preview_text(&hit.row.text, &hit.row.photo, &hit.row.doc);
+    let snippet = state::preview_text(&hit.row.text, &hit.row.photo, &hit.row.doc, &hit.row.sticker);
     let title = hit.chat_title.clone();
     let ts = if hit.row.date > 0 {
         theme::cached_time(hit.row.date)
@@ -1197,7 +1206,9 @@ fn conversation_pane(state: &State) -> Element<'_> {
 
     let pane = pane.push(top).push(body).push(composer).height(Length::Fill);
 
-    let pane: Element<'_> = if state.forward_pick.is_some() {
+    let pane: Element<'_> = if state.sticker_picker_open {
+        sticker_picker_overlay(state, pane.into())
+    } else if state.forward_pick.is_some() {
         forward_overlay(state, pane.into())
     } else {
         pane.into()
@@ -1443,6 +1454,129 @@ fn role_badge(role: bridge::ParticipantRole) -> Element<'static> {
                 radius: 6.0.into(),
                 ..iced::Border::default()
             },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// Size of a rendered sticker in a conversation (logical px).
+const STICKER_SIZE: f32 = 180.0;
+/// Picker panel geometry (floating above the composer).
+const STICKER_PICKER_W: f32 = 360.0;
+const STICKER_PICKER_H: f32 = 420.0;
+/// Thumb cell size inside the picker grid (4 columns).
+const STICKER_THUMB: f32 = 64.0;
+
+/// Floating sticker picker anchored above the composer (left side): the
+/// installed packs, each with its title and a 4-column thumbnail grid.
+/// Clicking a thumbnail sends the sticker and closes the panel.
+fn sticker_picker_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
+    // Kept for overlay-signature symmetry (`forward_overlay`); the picker is
+    // a floating card, not a replacement of the pane content.
+    let _ = under;
+    let close = button(icon(Icon::Close, theme::ICON, 14.0))
+        .on_press(Message::CloseStickerPicker)
+        .padding(6)
+        .style(flat_button);
+
+    let mut body: iced::widget::Column<'a, Message> = column![].spacing(10);
+    if state.sticker_sets.is_empty() {
+        body = body.push(
+            container(
+                text("Loading packs…")
+                    .size(theme::font::MESSAGE)
+                    .color(rgb(theme::TEXT_SECONDARY)),
+            )
+            .width(Length::Fill)
+            .padding(24),
+        );
+    }
+    for (si, set) in state.sticker_sets.iter().enumerate() {
+        body = body.push(
+            text(format!("{} ({})", set.title, set.docs.len()))
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(theme::ICON))
+                .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+        );
+        for (row_i, chunk) in set.docs.chunks(4).enumerate() {
+            let mut cells: iced::widget::Row<'a, Message> = row![].spacing(6);
+            for (col_i, (doc_id, _, _alt)) in chunk.iter().enumerate() {
+                let di = row_i * 4 + col_i;
+                let cell: Element<'a> = match state.sticker_thumbs.get(doc_id) {
+                    Some(path) => button(
+                        container(
+                            image(image::Handle::from_path(path))
+                                .width(Length::Fixed(STICKER_THUMB))
+                                .height(Length::Fixed(STICKER_THUMB))
+                                .content_fit(iced::ContentFit::Contain),
+                        )
+                        .width(STICKER_THUMB)
+                        .height(STICKER_THUMB)
+                        .style(|_| container::Style {
+                            background: Some(iced::Background::Color(rgb(theme::INPUT_FILL))),
+                            border: iced::Border { radius: 12.0.into(), ..Default::default() },
+                            ..container::Style::default()
+                        }),
+                    )
+                    .on_press(Message::StickerPicked(si, di))
+                    .padding(2)
+                    .style(flat_button)
+                    .into(),
+                    None => container(
+                        icon(Icon::Sticker, theme::DIVIDER, 22.0),
+                    )
+                    .width(STICKER_THUMB)
+                    .height(STICKER_THUMB)
+                    .align_x(iced::alignment::Horizontal::Center)
+                    .align_y(iced::alignment::Vertical::Center)
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(rgb(theme::INPUT_FILL))),
+                        border: iced::Border { radius: 12.0.into(), ..Default::default() },
+                        ..container::Style::default()
+                    })
+                    .into(),
+                };
+                cells = cells.push(cell);
+            }
+            body = body.push(cells);
+        }
+    }
+
+    let card = container(
+        column![
+            row![
+                text("Stickers")
+                    .size(theme::font::NAME)
+                    .color(Color::WHITE)
+                    .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+                horizontal_spacer(),
+                close,
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            scrollable(body).height(Length::Fill),
+        ]
+        .spacing(10),
+    )
+    .width(STICKER_PICKER_W)
+    .height(STICKER_PICKER_H)
+    .padding(14)
+    .style(menu_bg);
+
+    // Anchor the card bottom-left, above the composer bar; clicks on the dim
+    // area close it via Escape semantics (the ✕ is always visible too).
+    container(card)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Left)
+        .align_y(iced::alignment::Vertical::Bottom)
+        .padding(iced::Padding {
+            left: 16.0,
+            bottom: theme::layout::INPUT_H + 20.0,
+            ..Default::default()
+        })
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(Color::from_rgba8(0, 0, 0, 120.0))),
             ..container::Style::default()
         })
         .into()
@@ -1920,15 +2054,26 @@ fn composer_bar(state: &State) -> Element<'_> {
     }
     col = col.push(bar);
 
-    // The attach button sits left of the field (hidden while editing).
+    // The attach + sticker buttons sit left of the field (hidden while
+    // editing). The sticker button toggles the floating picker panel.
     let with_attach: Element<'_> = if state.editing.is_some() {
         col.into()
     } else {
+        let sticker_btn: Element<'_> = if state.open_chat.is_some() {
+            button(icon(Icon::Sticker, theme::ICON, 20.0))
+                .on_press(Message::ToggleStickerPicker)
+                .padding(8)
+                .style(flat_button)
+                .into()
+        } else {
+            horizontal_spacer()
+        };
         row![
             button(icon(Icon::Paperclip, theme::ICON, 20.0))
                 .on_press(Message::AttachFile)
                 .padding(8)
                 .style(flat_button),
+            sticker_btn,
             col,
         ]
         .spacing(4)
@@ -1951,6 +2096,10 @@ fn composer_bar(state: &State) -> Element<'_> {
 /// `pane_w` is the conversation pane width used to size the bubble (received:
 /// 70% of the pane, sent: 60%, matching the winit client).
 fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> Element<'a> {
+    // Stickers render frameless (no bubble): centered image + timestamp.
+    if m.sticker.is_some() {
+        return sticker_message_row(idx, m);
+    }
     // Bubble width (received: 70% of the pane, sent: 60%).
     let bubble_w = if m.out { pane_w * 0.6 } else { pane_w * 0.7 };
 
@@ -1960,7 +2109,7 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
             .messages
             .iter()
             .find(|r| r.id == reply_id)
-            .map(|r| crate::state::preview_text(&r.text, &r.photo, &r.doc))
+            .map(|r| crate::state::preview_text(&r.text, &r.photo, &r.doc, &r.sticker))
             .unwrap_or_else(|| "Original message".to_string());
         Some(quote_block("Reply", snippet))
     } else {
@@ -2246,6 +2395,79 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
         .into()
 }
 
+/// Frameless sticker row: centered image (no bubble, no background), the
+/// group sender name above it and a discreet timestamp below.
+fn sticker_message_row<'a>(idx: usize, m: &'a MsgRow) -> Element<'a> {
+    // Sender name only for incoming group messages that show names anyway.
+    let sender_line: Option<Element<'a>> = if !m.out {
+        m.sender_name.as_ref().map(|name| {
+            text(name.clone())
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(sender_color(m.sender_id)))
+                .font(iced::Font { weight: iced::font::Weight::Semibold, ..iced::Font::DEFAULT })
+                .into()
+        })
+    } else {
+        None
+    };
+
+    let img: Element<'a> = match &m.sticker_path {
+        Some(path) => image(image::Handle::from_path(path))
+            .width(Length::Fixed(STICKER_SIZE))
+            .height(Length::Fixed(STICKER_SIZE))
+            .content_fit(iced::ContentFit::Contain)
+            .into(),
+        None => container(
+            text("…")
+                .size(theme::font::NAME)
+                .color(rgb(theme::TEXT_SECONDARY)),
+        )
+        .width(STICKER_SIZE)
+        .height(STICKER_SIZE)
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center)
+        .into(),
+    };
+
+    let ts = if m.date > 0 {
+        theme::cached_time(m.date)
+    } else {
+        String::new()
+    };
+    let meta: Element<'_> = if m.out {
+        let tick: Element<'_> = if m.read {
+            icon(Icon::Tick { read: true }, theme::ACCENT, 15.0)
+        } else {
+            icon(Icon::Tick { read: false }, theme::TEXT_SECONDARY, 15.0)
+        };
+        row![tick, text(ts).size(theme::font::TIMESTAMP).color(rgb(theme::TEXT_SECONDARY))]
+            .spacing(6)
+            .into()
+    } else {
+        text(ts)
+            .size(theme::font::TIMESTAMP)
+            .color(rgb(theme::TEXT_SECONDARY))
+            .into()
+    };
+
+    let mut stack: iced::widget::Column<'a, Message> = column![];
+    if let Some(s) = sender_line {
+        stack = stack.push(container(s).width(Length::Fill).align_x(iced::alignment::Horizontal::Center));
+    }
+    stack = stack.push(img);
+    stack = stack.push(container(meta).width(Length::Fill).align_x(iced::alignment::Horizontal::Center));
+    stack = stack.spacing(4);
+
+    let wrapped = mouse_area(stack)
+        .on_press(Message::RowClicked(idx))
+        .on_right_press(Message::RowContext(idx));
+
+    container(wrapped)
+        .padding([0.0, theme::layout::MSG_PAD_X])
+        .width(Length::Fill)
+        .into()
+}
+
 /// The quoted block inside a bubble (reply preview / forward origin): an
 /// accent bar + two lines of small text.
 fn quote_block(label: &str, content: String) -> Element<'static> {
@@ -2371,7 +2593,7 @@ const PINNED_BANNER_H: f32 = 34.0;
 /// Thin banner showing the pinned message: pin icon + label + snippet.
 /// Clicking jumps to the message in the list.
 fn pinned_banner(m: &MsgRow) -> Element<'static> {
-    let snippet = crate::ellipsize(&state::preview_text(&m.text, &m.photo, &m.doc), 48);
+    let snippet = crate::ellipsize(&state::preview_text(&m.text, &m.photo, &m.doc, &m.sticker), 48);
     button(
         row![
             icon(Icon::Pin, theme::ACCENT, 14.0),
@@ -2747,6 +2969,15 @@ fn build_layout(state: &State, pane_w: f32, view_h: f32) -> crate::state::MsgLay
 /// width with `Contain`, caption gets a 6 px gap, bubble padding is
 /// [`theme::layout::BUBBLE_PAD_X`]/[`theme::layout::BUBBLE_PAD_Y`]).
 fn est_row_height(m: &MsgRow, pane_w: f32) -> f32 {
+    // Stickers: fixed-size frameless block (image + timestamp + gaps).
+    if m.sticker.is_some() {
+        let sender_h = if m.sender_name.is_some() && !m.out {
+            theme::font::TIMESTAMP * 1.3 + 4.0
+        } else {
+            0.0
+        };
+        return STICKER_SIZE + sender_h + theme::font::TIMESTAMP * 1.3 + 12.0;
+    }
     let bubble_w = if m.out { pane_w * 0.6 } else { pane_w * 0.7 };
     let inner = (bubble_w - 2.0 * theme::layout::BUBBLE_PAD_X).max(1.0);
     let font_h = theme::font::MESSAGE;
@@ -3225,6 +3456,66 @@ mod tests {
         let el = std::hint::black_box(messages_list(&state, 820.0, 610.0));
         let _ = el;
         assert_eq!(state.messages.len(), 300);
+    }
+
+    #[test]
+    fn sticker_rows_render_headlessly_with_fixed_height() {
+        use crate::bridge::StickerMeta;
+
+        let (req_tx, _req_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::new(req_tx);
+        state.authenticated = true;
+        state.open_chat = Some(42);
+        state.messages = vec![
+            MsgRow {
+                sticker: Some(StickerMeta { alt: "🎉".into() }),
+                sticker_path: Some("/nonexistent/sticker.webp".into()),
+                sender_name: Some("Léo".into()),
+                sender_id: Some(7),
+                ..MsgRow::text(1, String::new(), 100, false)
+            },
+            MsgRow {
+                sticker: Some(StickerMeta { alt: "⭐".into() }),
+                // Not downloaded yet: placeholder branch.
+                ..MsgRow::text(2, String::new(), 101, true)
+            },
+            MsgRow::text(3, "plain text neighbour", 102, false),
+        ];
+
+        // The exact per-frame entry point must build every variant without
+        // touching the image file (decoding happens at raster time).
+        let el = std::hint::black_box(messages_list(&state, 820.0, 610.0));
+        let _ = el;
+
+        // Height estimate: fixed-size block, independent of the pane width.
+        let h_narrow = est_row_height(&state.messages[0], 400.0);
+        let h_wide = est_row_height(&state.messages[0], 1200.0);
+        assert_eq!(h_narrow, h_wide, "sticker rows have a fixed height");
+        assert!(h_wide > 180.0 && h_wide < 320.0, "sane magnitude, got {h_wide}");
+        // Sender name adds a line for incoming group stickers only.
+        let out_h = est_row_height(&state.messages[1], 800.0);
+        assert!(out_h < h_wide, "no sender line on outgoing stickers");
+    }
+
+    #[test]
+    fn sticker_picker_overlay_renders_in_all_states() {
+        use crate::bridge::StickerSetBridge;
+
+        let (req_tx, _req_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::new(req_tx);
+        state.authenticated = true;
+        state.open_chat = Some(42);
+        // Empty (loading) picker.
+        state.sticker_picker_open = true;
+        let _ = std::hint::black_box(chat_view(&state));
+        // Loaded packs + thumbnails.
+        state.sticker_sets = vec![StickerSetBridge {
+            title: "Happy Blocks".into(),
+            short_name: "happy_blocks".into(),
+            docs: (0..8).map(|i| (900_000_000 + i, 10 * i, format!("{i}"))).collect(),
+        }];
+        state.sticker_thumbs.insert(900_000_000, "/nonexistent/thumb.webp".into());
+        let _ = std::hint::black_box(chat_view(&state));
     }
 
     #[test]

@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 
 use crate::bridge::{
     ChatDetail, ChatKind, ChatRow, DocKind, DocMeta, MsgRow, ParticipantRole, ParticipantRow,
-    Request, SearchHit, UiMessage,
+    Request, SearchHit, StickerMeta, StickerSetBridge, UiMessage,
 };
 
 const ENV_FILE: &str = ".env";
@@ -397,6 +397,167 @@ fn ensure_demo_assets(chats: &[DemoChat]) -> DemoAssets {
     assets
 }
 
+/// One generated demo sticker document.
+struct DemoSticker {
+    doc_id: i64,
+    access_hash: i64,
+    alt: String,
+    path: String,
+}
+
+/// A generated demo sticker pack (stand-in for `messages.getAllStickers`).
+struct DemoStickerSet {
+    title: String,
+    short_name: String,
+    docs: Vec<DemoSticker>,
+}
+
+/// Generates two demo sticker packs of 10 stickers each as 512x512 PNGs
+/// (simple tiny-skia shapes on transparent background, one shape family per
+/// index). Written under `demo/stickers/<set>/`; deterministic, so repeated
+/// runs reuse the same files.
+fn ensure_demo_stickers() -> Vec<DemoStickerSet> {
+    use tiny_skia::{Color, Paint, Transform};
+
+    let alts = [
+        "😀", "🎉", "❤️", "⭐", "🌙", "🔥", "🍀", "💎", "🎵", "⚡",
+    ];
+    let palettes: [[u8; 3]; 10] = [
+        [244, 67, 54],
+        [233, 30, 99],
+        [156, 39, 176],
+        [103, 58, 183],
+        [33, 150, 243],
+        [0, 188, 212],
+        [76, 175, 80],
+        [205, 220, 57],
+        [255, 152, 0],
+        [121, 85, 72],
+    ];
+    let sets = [
+        ("Happy Blocks", "happy_blocks"),
+        ("Rust Buddies", "rust_buddies"),
+    ];
+    let mut out = Vec::new();
+    for (si, (title, short)) in sets.iter().enumerate() {
+        let mut docs = Vec::new();
+        for (i, alt) in alts.iter().enumerate() {
+            let size = 512u32;
+            let c = palettes[(i + si * 3) % palettes.len()];
+            let mut pm = tiny_skia::Pixmap::new(size, size).expect("sticker pixmap");
+            let paint = |a: u8| {
+                let mut p = Paint::default();
+                p.set_color(Color::from_rgba8(c[0], c[1], c[2], a));
+                p
+            };
+            let fill = |pm: &mut tiny_skia::Pixmap, path: &tiny_skia::Path, a: u8| {
+                pm.fill_path(path, &paint(a), tiny_skia::FillRule::Winding, Transform::identity(), None);
+            };
+            let cx = size as f32 / 2.0;
+            let cy = size as f32 / 2.0;
+            let r = size as f32 * 0.36;
+            match i % 5 {
+                0 => {
+                    // Filled disc + white ring highlight.
+                    if let Some(p) = tiny_skia::PathBuilder::from_circle(cx, cy, r) {
+                        fill(&mut pm, &p, 255);
+                    }
+                    if let Some(p) = tiny_skia::PathBuilder::from_circle(cx - r * 0.3, cy - r * 0.35, r * 0.22) {
+                        fill(&mut pm, &p, 140);
+                    }
+                }
+                1 => {
+                    // Five-point star.
+                    let mut pb = tiny_skia::PathBuilder::new();
+                    for k in 0..10 {
+                        let ang = -std::f32::consts::FRAC_PI_2 + k as f32 * std::f32::consts::PI / 5.0;
+                        let rad = if k % 2 == 0 { r } else { r * 0.45 };
+                        let (x, y) = (cx + rad * ang.cos(), cy + rad * ang.sin());
+                        if k == 0 {
+                            pb.move_to(x, y);
+                        } else {
+                            pb.line_to(x, y);
+                        }
+                    }
+                    pb.close();
+                    if let Some(p) = pb.finish() {
+                        fill(&mut pm, &p, 235);
+                    }
+                }
+                2 => {
+                    // Heart: two discs + a triangle.
+                    if let (Some(l), Some(rr)) = (
+                        tiny_skia::PathBuilder::from_circle(cx - r * 0.45, cy - r * 0.25, r * 0.48),
+                        tiny_skia::PathBuilder::from_circle(cx + r * 0.45, cy - r * 0.25, r * 0.48),
+                    ) {
+                        let mut pb = tiny_skia::PathBuilder::new();
+                        pb.move_to(cx - r * 0.9, cy - r * 0.05);
+                        pb.line_to(cx + r * 0.9, cy - r * 0.05);
+                        pb.line_to(cx, cy + r);
+                        pb.close();
+                        fill(&mut pm, &l, 240);
+                        fill(&mut pm, &rr, 240);
+                        if let Some(t) = pb.finish() {
+                            fill(&mut pm, &t, 240);
+                        }
+                    }
+                }
+                3 => {
+                    // Rounded square rotated 45° (diamond-ish).
+                    let d = r * 0.95;
+                    let mut pb = tiny_skia::PathBuilder::new();
+                    pb.move_to(cx, cy - d);
+                    pb.line_to(cx + d, cy);
+                    pb.line_to(cx, cy + d);
+                    pb.line_to(cx - d, cy);
+                    pb.close();
+                    if let Some(p) = pb.finish() {
+                        fill(&mut pm, &p, 225);
+                    }
+                }
+                _ => {
+                    // Donut: big disc minus an inner punch-out via even-odd.
+                    let mut pb = tiny_skia::PathBuilder::new();
+                    let outer = tiny_skia::PathBuilder::from_circle(cx, cy, r)
+                        .expect("outer ring");
+                    let inner = tiny_skia::PathBuilder::from_circle(cx, cy, r * 0.45)
+                        .expect("inner ring");
+                    pb.push_path(&outer);
+                    pb.push_path(&inner);
+                    if let Some(p) = pb.finish() {
+                        pm.fill_path(
+                            &p,
+                            &paint(230),
+                            tiny_skia::FillRule::EvenOdd,
+                            Transform::identity(),
+                            None,
+                        );
+                    }
+                }
+            }
+            let path = cache_dir()
+                .join("demo")
+                .join("stickers")
+                .join(short)
+                .join(format!("{i}.png"));
+            save_png(&pm, &path);
+            let doc_id = 900_000_000i64 + (si as i64) * 1000 + i as i64;
+            docs.push(DemoSticker {
+                doc_id,
+                access_hash: doc_id.wrapping_mul(7919),
+                alt: alt.to_string(),
+                path: path.to_string_lossy().into_owned(),
+            });
+        }
+        out.push(DemoStickerSet {
+            title: title.to_string(),
+            short_name: short.to_string(),
+            docs,
+        });
+    }
+    out
+}
+
 /// Canned info-panel detail for a demo chat (`None` = unknown chat).
 fn demo_chat_detail(id: i64) -> Option<ChatDetail> {
     let d = match id {
@@ -501,8 +662,8 @@ async fn serve_demo(
         .as_secs() as i32;
 
     let chats = vec![
-        DemoChat { id: 1001, title: "Camille".into(), subtitle: "Great! see you tomorrow 👋".into(), last_ago: 42, unread: 3, hue: 0.55 },
         DemoChat { id: 1002, title: "Rust Group".into(), subtitle: "Thomas: novel review of the PR?".into(), last_ago: 7200, unread: 0, hue: 0.1 },
+        DemoChat { id: 1001, title: "Camille".into(), subtitle: "Great! see you tomorrow 👋".into(), last_ago: 42, unread: 3, hue: 0.55 },
         DemoChat { id: 1003, title: "Landscape Channel".into(), subtitle: "Sunset over the sea 🏖".into(), last_ago: 86400, unread: 0, hue: 0.95 },
         DemoChat { id: 1004, title: "Family Group".into(), subtitle: "Mom: when are you coming over?".into(), last_ago: 172800, unread: 12, hue: 0.3 },
         DemoChat { id: 1005, title: "Paris Bots".into(), subtitle: "New version 2.4.0 released".into(), last_ago: 604800, unread: 0, hue: 0.75 },
@@ -512,6 +673,8 @@ async fn serve_demo(
     let chats = std::rc::Rc::new(std::cell::RefCell::new(chats));
 
     let assets = ensure_demo_assets(&chats.borrow());
+    // Two canned sticker packs (512x512 generated PNGs) + their picker data.
+    let demo_stickers = ensure_demo_stickers();
     // Snapshot of the chat list as dialog rows (also used by the
     // create/leave/delete handlers to refresh the UI).
     let build_rows = |chats: &[DemoChat]| -> Vec<ChatRow> {
@@ -640,18 +803,42 @@ async fn serve_demo(
                     ..MsgRow::text(2, "[forwarded] Photo from last weekend 🌄", now - 10800, false)
                 },
                 MsgRow {
+                    sticker: demo_stickers
+                        .first()
+                        .and_then(|s| s.docs.first())
+                        .map(|d| StickerMeta { alt: d.alt.clone() }),
+                    sticker_path: demo_stickers
+                        .first()
+                        .and_then(|s| s.docs.first())
+                        .map(|d| d.path.clone()),
+                    sender_name: Some("Léo".into()),
+                    sender_id: Some(2002),
+                    ..MsgRow::text(3, "", now - 7500, false)
+                },
+                MsgRow {
                     sender_name: Some("Camille".into()),
                     sender_id: Some(2001),
-                    ..MsgRow::text(3, "@Léo can you review it before Friday?", now - 7300, false)
+                    ..MsgRow::text(4, "@Léo can you review it before Friday?", now - 7300, false)
                 },
-                MsgRow::text(4, "I can, the CI finally passes 🎉", now - 7200, true),
+                MsgRow::text(5, "I can, the CI finally passes 🎉", now - 7200, true),
                 doc_row(
-                    5,
+                    6,
                     "",
                     now - 7000,
                     "quarterly-report.pdf",
                     2_458_112,
                 ),
+                MsgRow {
+                    sticker: demo_stickers
+                        .get(1)
+                        .and_then(|s| s.docs.get(4))
+                        .map(|d| StickerMeta { alt: d.alt.clone() }),
+                    sticker_path: demo_stickers
+                        .get(1)
+                        .and_then(|s| s.docs.get(4))
+                        .map(|d| d.path.clone()),
+                    ..MsgRow::text(7, "", now - 6500, true)
+                },
             ],
             1003 => vec![
                 MsgRow {
@@ -735,6 +922,7 @@ async fn serve_demo(
                         out: true,
                         photo: None,
                         doc: None,
+                        sticker: None,
                         reply_to,
                         forwarded_from: None,
                         sender_name: None,
@@ -784,6 +972,7 @@ async fn serve_demo(
                                 kind: DocKind::File,
                                 duration: None,
                             }),
+                            sticker: None,
                             reply_to,
                             forwarded_from: None,
                             sender_name: None,
@@ -829,6 +1018,7 @@ async fn serve_demo(
                         out: true,
                         photo: origin.photo,
                         doc: origin.doc,
+                        sticker: None,
                         reply_to: None,
                         forwarded_from: Some(from_title),
                         sender_name: None,
@@ -994,6 +1184,72 @@ Request::DownloadDoc { chat_id, msg_id } => {
                     let _ = ui_tx.send(UiMessage::ParticipantKicked { user_id });
                 }
                 Request::Typing { .. } => {}
+                Request::GetStickerSets => {
+                    // The packs + thumbnails are pre-generated: everything
+                    // answers immediately from disk.
+                    let bridge_sets: Vec<StickerSetBridge> = demo_stickers
+                        .iter()
+                        .map(|s| StickerSetBridge {
+                            title: s.title.clone(),
+                            short_name: s.short_name.clone(),
+                            docs: s
+                                .docs
+                                .iter()
+                                .map(|d| (d.doc_id, d.access_hash, d.alt.clone()))
+                                .collect(),
+                        })
+                        .collect();
+                    let _ = ui_tx.send(UiMessage::StickerSets(bridge_sets));
+                    for set in &demo_stickers {
+                        for d in &set.docs {
+                            let _ = ui_tx.send(UiMessage::StickerThumbReady {
+                                doc_id: d.doc_id,
+                                path: Some(d.path.clone()),
+                            });
+                        }
+                    }
+                }
+                Request::SendSticker { id, doc_id, access_hash: _ } => {
+                    let doc = demo_stickers
+                        .iter()
+                        .flat_map(|s| &s.docs)
+                        .find(|d| d.doc_id == doc_id);
+                    let Some(doc) = doc else { continue };
+                    let nid = next_id;
+                    next_id += 1;
+                    let _ = ui_tx.send(UiMessage::NewMessage {
+                        chat_id: id,
+                        id: nid,
+                        text: String::new(),
+                        date: now,
+                        out: true,
+                        photo: None,
+                        doc: None,
+                        sticker: Some(StickerMeta { alt: doc.alt.clone() }),
+                        reply_to: None,
+                        forwarded_from: None,
+                        sender_name: None,
+                        sender_id: None,
+                    });
+                    let _ = ui_tx.send(UiMessage::StickerPathReady {
+                        chat_id: id,
+                        msg_id: nid,
+                        path: Some(doc.path.clone()),
+                    });
+                }
+                Request::DownloadSticker { chat_id, msg_id } => {
+                    let path = msgs_for(chat_id)
+                        .into_iter()
+                        .find(|m| m.id == msg_id)
+                        .and_then(|m| m.sticker_path);
+                    if let Some(p) = path {
+                        let _ = ui_tx.send(UiMessage::StickerPathReady {
+                            chat_id,
+                            msg_id,
+                            path: Some(p),
+                        });
+                    }
+                }
                 _ => {}
             }
         }
@@ -1028,6 +1284,7 @@ Request::DownloadDoc { chat_id, msg_id } => {
                 out: false,
                 photo: None,
                 doc: None,
+                sticker: None,
                 reply_to: None,
                 forwarded_from: None,
                 sender_name: None,
@@ -1136,11 +1393,18 @@ async fn serve_login(
     }
 }
 
-/// Shared download state: on-disk photo/document paths (keyed by chat/message)
-/// and a concurrency cap for background MTProto transfers.
+/// Shared download state: on-disk photo/document paths (keyed by chat/message),
+/// sticker document references (for re-sending) and a concurrency cap for
+/// background MTProto transfers.
 struct Downloads {
     photos: Mutex<HashMap<(i64, i32), String>>,
     docs: Mutex<HashMap<(i64, i32), String>>,
+    stickers: Mutex<HashMap<(i64, i32), String>>,
+    /// Document references seen in the picker listing:
+    /// `doc_id -> (access_hash, file_reference)`, needed by `SendSticker`.
+    sticker_refs: Mutex<HashMap<i64, (i64, Vec<u8>)>>,
+    /// On-disk picker thumbnails: `doc_id -> path`.
+    thumbs: Mutex<HashMap<i64, String>>,
     sem: Arc<Semaphore>,
 }
 
@@ -1149,6 +1413,9 @@ impl Downloads {
         Self {
             photos: Mutex::new(HashMap::new()),
             docs: Mutex::new(HashMap::new()),
+            stickers: Mutex::new(HashMap::new()),
+            sticker_refs: Mutex::new(HashMap::new()),
+            thumbs: Mutex::new(HashMap::new()),
             sem: Arc::new(Semaphore::new(DOWNLOAD_CONCURRENCY)),
         }
     }
@@ -1168,6 +1435,21 @@ impl Downloads {
     fn insert_doc(&self, chat_id: i64, msg_id: i32, path: String) {
         self.docs.lock().unwrap().insert((chat_id, msg_id), path);
     }
+
+    fn sticker_path(&self, chat_id: i64, msg_id: i32) -> Option<String> {
+        self.stickers
+            .lock()
+            .unwrap()
+            .get(&(chat_id, msg_id))
+            .cloned()
+    }
+
+    fn insert_sticker(&self, chat_id: i64, msg_id: i32, path: String) {
+        self.stickers
+            .lock()
+            .unwrap()
+            .insert((chat_id, msg_id), path);
+    }
 }
 
 /// Sort used by the network loop so `OpenChat` (history loading) is always
@@ -1176,12 +1458,19 @@ fn prioritize(pending: &mut [Request]) {
     pending.sort_by_key(|r| !matches!(r, Request::OpenChat { .. }));
 }
 
-/// Splits a core `MediaKind` into the bridge's photo / document pair.
-fn media_to_row(media: Option<tg::model::MediaKind>) -> (Option<(u32, u32)>, Option<DocMeta>) {
+/// Splits a core `MediaKind` into the bridge's photo / document / sticker
+/// triple.
+fn media_to_row(
+    media: Option<tg::model::MediaKind>,
+) -> (
+    Option<(u32, u32)>,
+    Option<DocMeta>,
+    Option<StickerMeta>,
+) {
     use crate::bridge::DocKind;
     use tg::model::MediaKind as MK;
     match media {
-        Some(MK::Photo { width, height }) => (Some((width, height)), None),
+        Some(MK::Photo { width, height }) => (Some((width, height)), None, None),
         Some(MK::Document { name, size }) => (
             None,
             Some(DocMeta {
@@ -1190,6 +1479,7 @@ fn media_to_row(media: Option<tg::model::MediaKind>) -> (Option<(u32, u32)>, Opt
                 kind: DocKind::File,
                 duration: None,
             }),
+            None,
         ),
         Some(MK::Video { name, size, duration }) => (
             None,
@@ -1199,6 +1489,7 @@ fn media_to_row(media: Option<tg::model::MediaKind>) -> (Option<(u32, u32)>, Opt
                 kind: DocKind::Video,
                 duration: Some(duration),
             }),
+            None,
         ),
         Some(MK::Gif { name, size }) => (
             None,
@@ -1208,6 +1499,7 @@ fn media_to_row(media: Option<tg::model::MediaKind>) -> (Option<(u32, u32)>, Opt
                 kind: DocKind::Gif,
                 duration: None,
             }),
+            None,
         ),
         Some(MK::Audio { name, size, voice }) => (
             None,
@@ -1217,8 +1509,11 @@ fn media_to_row(media: Option<tg::model::MediaKind>) -> (Option<(u32, u32)>, Opt
                 kind: DocKind::Audio { voice },
                 duration: None,
             }),
+            None,
         ),
-        None => (None, None),
+        // Stickers are NOT a document card: frameless image rendering.
+        Some(MK::Sticker { alt, .. }) => (None, None, Some(StickerMeta { alt })),
+        None => (None, None, None),
     }
 }
 
@@ -1231,7 +1526,7 @@ fn msg_row_from_info(
     downloads: &Downloads,
     peers: &HashMap<i64, (String, PeerRef)>,
 ) -> MsgRow {
-    let (photo, doc) = media_to_row(m.media);
+    let (photo, doc, sticker) = media_to_row(m.media);
     let forwarded_from = m.forwarded.and_then(|f| {
         f.name.or_else(|| {
             f.chat_id
@@ -1239,6 +1534,11 @@ fn msg_row_from_info(
                 .map(|(title, _)| title.clone())
         })
     });
+    let sticker_path = if sticker.is_some() {
+        downloads.sticker_path(chat_id, m.id)
+    } else {
+        None
+    };
     MsgRow {
         id: m.id,
         text: m.text,
@@ -1248,6 +1548,8 @@ fn msg_row_from_info(
         photo,
         doc_path: doc.as_ref().and_then(|_| downloads.doc_path(chat_id, m.id)),
         doc,
+        sticker,
+        sticker_path,
         reply_to: m.reply_to,
         forwarded_from,
         uploading: None,
@@ -1415,6 +1717,19 @@ async fn serve(
                                         m.id,
                                     );
                                 }
+                                if matches!(
+                                    m.media,
+                                    Some(tg::model::MediaKind::Sticker { .. })
+                                ) {
+                                    spawn_sticker_download(
+                                        tg.clone(),
+                                        ui_tx.clone(),
+                                        downloads.clone(),
+                                        open,
+                                        *peer_ref,
+                                        m.id,
+                                    );
+                                }
                             }
                         }
                     }
@@ -1454,6 +1769,7 @@ async fn serve(
                                     msg.text(),
                                     &None,
                                     &None,
+                                    &None,
                                 ),
                             );
                         }
@@ -1474,7 +1790,8 @@ fn handle_update(
         Update::NewMessage(msg) => {
             if let Some(peer) = msg.peer() {
                 let chat_id = peer.id().bot_api_dialog_id();
-                let (photo, doc) = media_to_row(tg::client::media_kind(msg.media().as_ref()));
+                let (photo, doc, sticker) =
+                    media_to_row(tg::client::media_kind(msg.media().as_ref()));
                 let forwarded_from = msg.forward_header().as_ref().and_then(|h| {
                     // Same resolution as history rows: the header's plain name
                     // wins, else look up the origin chat in the dialog list.
@@ -1504,6 +1821,7 @@ fn handle_update(
                     out: msg.outgoing(),
                     photo,
                     doc,
+                    sticker,
                     reply_to: msg.reply_to_message_id(),
                     forwarded_from,
                     sender_name,
@@ -1685,6 +2003,16 @@ async fn handle_request(
                                 m.id,
                             );
                         }
+                        if m.sticker.is_some() {
+                            spawn_sticker_download(
+                                tg.clone(),
+                                ui_tx.clone(),
+                                downloads.clone(),
+                                id,
+                                *peer_ref,
+                                m.id,
+                            );
+                        }
                     }
                     // The chat's pinned message, if any (banner + jump target).
                     match tg.get_pinned_message(peer_ref).await {
@@ -1771,6 +2099,78 @@ async fn handle_request(
                 );
             }
         }
+        Request::DownloadSticker { chat_id, msg_id } => {
+            if let Some((_, peer_ref)) = peers.get(&chat_id) {
+                spawn_sticker_download(
+                    tg.clone(),
+                    ui_tx.clone(),
+                    downloads.clone(),
+                    chat_id,
+                    *peer_ref,
+                    msg_id,
+                );
+            }
+        }
+        Request::SendSticker { id, doc_id, access_hash } => match peers.get(&id) {
+            Some((_, peer_ref)) => {
+                let file_reference = downloads
+                    .sticker_refs
+                    .lock()
+                    .unwrap()
+                    .get(&doc_id)
+                    .map(|(_, r)| r.clone())
+                    .unwrap_or_default();
+                if let Err(e) = tg
+                    .send_sticker(peer_ref, doc_id, access_hash, file_reference, None)
+                    .await
+                {
+                    let _ = ui_tx.send(UiMessage::Error(format!("Send failed: {e}")));
+                }
+            }
+            None => {
+                let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+            }
+        },
+        Request::GetStickerSets => match tg.sticker_sets().await {
+            Ok(sets) => {
+                // Remember the document references so picker clicks can
+                // re-send the exact sticker.
+                {
+                    let mut refs = downloads.sticker_refs.lock().unwrap();
+                    refs.clear();
+                    for set in &sets {
+                        for d in &set.docs {
+                            refs.insert(d.id, (d.access_hash, d.file_reference.clone()));
+                        }
+                    }
+                }
+                let bridge_sets: Vec<StickerSetBridge> = sets
+                    .iter()
+                    .map(|s| StickerSetBridge {
+                        title: s.title.clone(),
+                        short_name: s.short_name.clone(),
+                        docs: s
+                            .docs
+                            .iter()
+                            .map(|d| (d.id, d.access_hash, d.alt.clone()))
+                            .collect(),
+                    })
+                    .collect();
+                // Warm every thumbnail in the background; cells show a
+                // placeholder until `StickerThumbReady` streams in.
+                for s in &sets {
+                    for d in &s.docs {
+                        spawn_thumb_download(tg.clone(), ui_tx.clone(), downloads.clone(), d.id);
+                    }
+                }
+                let _ = ui_tx.send(UiMessage::StickerSets(bridge_sets));
+            }
+            Err(e) => {
+                let _ = ui_tx.send(UiMessage::Error(format!(
+                    "Could not load sticker packs: {e}"
+                )));
+            }
+        },
         Request::Search { id, query } => {
             if query.is_empty() {
                 // Nothing typed: clear the results instead of listing "all".
@@ -2153,6 +2553,82 @@ fn spawn_doc_download(
     });
 }
 
+/// Spawns a background sticker download for a message (cached), reporting the
+/// on-disk path through [`UiMessage::StickerPathReady`].
+fn spawn_sticker_download(
+    tg: Arc<Telegram>,
+    ui_tx: mpsc::UnboundedSender<UiMessage>,
+    downloads: Arc<Downloads>,
+    chat_id: i64,
+    peer_ref: PeerRef,
+    msg_id: i32,
+) {
+    if downloads
+        .stickers
+        .lock()
+        .unwrap()
+        .contains_key(&(chat_id, msg_id))
+    {
+        return;
+    }
+    tokio::spawn(async move {
+        let _permit = downloads
+            .sem
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("download semaphore");
+        let dir = cache_dir().join("stickers").join(chat_id.to_string());
+        let path = match tg.download_sticker(&peer_ref, msg_id, &dir).await {
+            Ok(Some(p)) => {
+                let p = p.to_string_lossy().into_owned();
+                downloads.insert_sticker(chat_id, msg_id, p.clone());
+                Some(p)
+            }
+            _ => None,
+        };
+        let _ = ui_tx.send(UiMessage::StickerPathReady { chat_id, msg_id, path });
+    });
+}
+
+/// Spawns a background picker-thumbnail download by document reference
+/// (cached), reporting the on-disk path via [`UiMessage::StickerThumbReady`].
+fn spawn_thumb_download(
+    tg: Arc<Telegram>,
+    ui_tx: mpsc::UnboundedSender<UiMessage>,
+    downloads: Arc<Downloads>,
+    doc_id: i64,
+) {
+    if downloads.thumbs.lock().unwrap().contains_key(&doc_id) {
+        return;
+    }
+    let (access_hash, file_reference) = match downloads.sticker_refs.lock().unwrap().get(&doc_id) {
+        Some((h, r)) => (*h, r.clone()),
+        None => return,
+    };
+    tokio::spawn(async move {
+        let _permit = downloads
+            .sem
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("download semaphore");
+        let dir = cache_dir().join("stickers").join("thumbs");
+        let path = match tg
+            .download_sticker_doc(doc_id, access_hash, file_reference, &dir)
+            .await
+        {
+            Ok(Some(p)) => {
+                let p = p.to_string_lossy().into_owned();
+                downloads.thumbs.lock().unwrap().insert(doc_id, p.clone());
+                Some(p)
+            }
+            _ => None,
+        };
+        let _ = ui_tx.send(UiMessage::StickerThumbReady { doc_id, path });
+    });
+}
+
 /// Sends a desktop notification for a new message, unless it lands in the
 /// currently open chat (that's visible already). Best-effort: any
 /// notify-rust error is silently ignored.
@@ -2194,7 +2670,7 @@ mod tests {
     fn media_to_row_classifies_document_kinds() {
         use crate::bridge::DocKind;
         // Video → DocKind::Video with duration.
-        let (photo, doc) = media_to_row(Some(tg::model::MediaKind::Video {
+        let (photo, doc, _) = media_to_row(Some(tg::model::MediaKind::Video {
             name: "v.mp4".into(),
             size: 10,
             duration: 42.0,
@@ -2203,18 +2679,48 @@ mod tests {
         assert_eq!(doc.as_ref().map(|d| d.kind), Some(DocKind::Video));
         assert_eq!(doc.unwrap().duration, Some(42.0));
         // Voice → DocKind::Audio { voice: true }.
-        let (_, doc) = media_to_row(Some(tg::model::MediaKind::Audio {
+        let (_, doc, _) = media_to_row(Some(tg::model::MediaKind::Audio {
             name: "v.ogg".into(),
             size: 20,
             voice: true,
         }));
         assert_eq!(doc.unwrap().kind, DocKind::Audio { voice: true });
         // Plain file stays a file.
-        let (_, doc) = media_to_row(Some(tg::model::MediaKind::Document {
+        let (_, doc, _) = media_to_row(Some(tg::model::MediaKind::Document {
             name: "f.pdf".into(),
             size: 30,
         }));
         assert_eq!(doc.unwrap().kind, DocKind::File);
+    }
+
+    #[test]
+    fn media_to_row_classifies_stickers_as_frameless_media() {
+        // A sticker is neither a photo nor a document card: it maps to its
+        // own frameless slot carrying the emoji.
+        let (photo, doc, sticker) = media_to_row(Some(tg::model::MediaKind::Sticker {
+            name: String::new(),
+            size: 1234,
+            alt: "🎉".into(),
+        }));
+        assert!(photo.is_none());
+        assert!(doc.is_none(), "stickers must not render as document cards");
+        assert_eq!(sticker.map(|s| s.alt), Some("🎉".to_string()));
+    }
+
+    #[test]
+    fn ensure_demo_stickers_generates_two_packs_of_pngs() {
+        let sets = ensure_demo_stickers();
+        assert_eq!(sets.len(), 2);
+        for set in &sets {
+            assert!(!set.title.is_empty());
+            assert_eq!(set.docs.len(), 10);
+            for d in &set.docs {
+                let bytes = std::fs::read(&d.path).expect("sticker png written");
+                assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "png magic");
+                assert!(!d.alt.is_empty());
+                assert_ne!(d.doc_id, 0);
+            }
+        }
     }
 
     #[test]

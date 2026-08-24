@@ -3,14 +3,27 @@
 //! like the custom `ui` crate's `UiState`, so it can be unit tested headlessly.
 
 use crate::bridge::{
-    ChatDetail, ChatRow, DocMeta, MsgRow, ParticipantRow, Request, SearchHit, UiMessage,
+    ChatDetail, ChatRow, DocMeta, MsgRow, ParticipantRow, Request, SearchHit, StickerMeta,
+    StickerSetBridge, UiMessage,
 };
 
 /// One-line preview of a message for list rows / reply snippets: the text,
 /// or a media placeholder when there is none.
-pub fn preview_text(text: &str, photo: &Option<(u32, u32)>, doc: &Option<DocMeta>) -> String {
+pub fn preview_text(
+    text: &str,
+    photo: &Option<(u32, u32)>,
+    doc: &Option<DocMeta>,
+    sticker: &Option<StickerMeta>,
+) -> String {
     if !text.is_empty() {
         return text.to_string();
+    }
+    if let Some(sticker) = sticker {
+        let alt = sticker.alt.trim();
+        if alt.is_empty() {
+            return "🖼 Sticker".to_string();
+        }
+        return format!("{alt} Sticker");
     }
     if let Some(doc) = doc {
         let name = if doc.name.is_empty() { "File" } else { &doc.name };
@@ -22,6 +35,7 @@ pub fn preview_text(text: &str, photo: &Option<(u32, u32)>, doc: &Option<DocMeta
     String::new()
 }
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
@@ -274,6 +288,16 @@ pub struct State {
     /// [`EMOJI_RECENTS_MAX`]), persisted in the data dir.
     pub emoji_recents: Vec<String>,
 
+    // Stickers (picker + rendering)
+    // -----------------------------------------------------------------
+    /// The sticker picker panel (floating above the composer) is open.
+    pub sticker_picker_open: bool,
+    /// Installed sticker packs (`UiMessage::StickerSets`). Global, kept
+    /// across chats; fetched on first picker open.
+    pub sticker_sets: Vec<StickerSetBridge>,
+    /// Downloaded picker thumbnails keyed by document id.
+    pub sticker_thumbs: HashMap<i64, String>,
+
     /// Absolute Y offset of the message list's viewport (content coordinates),
     /// fed by the scrollable's `on_scroll`. Drives virtualization: only the
     /// rows overlapping `[offset, offset + viewport]` are built each frame.
@@ -376,6 +400,9 @@ impl State {
             muted: false,
             emoji_panel_open: false,
             emoji_recents: Vec::new(),
+            sticker_picker_open: false,
+            sticker_sets: Vec::new(),
+            sticker_thumbs: HashMap::new(),
             scroll_offset: 0.0,
             dialog_scroll_offset: 0.0,
             layout_cache: Mutex::new(None),
@@ -617,6 +644,7 @@ impl State {
                 out,
                 photo,
                 doc,
+                sticker,
                 reply_to,
                 forwarded_from,
                 sender_name,
@@ -632,6 +660,7 @@ impl State {
                         m.out = out;
                         m.photo = photo;
                         m.doc = doc;
+                        m.sticker = sticker;
                         m.reply_to = reply_to;
                         m.forwarded_from = forwarded_from;
                         m.uploading = None;
@@ -644,6 +673,7 @@ impl State {
                         m.out = out;
                         m.photo = photo.or(m.photo.take());
                         m.doc = doc.or(m.doc.take());
+                        m.sticker = sticker.or(m.sticker.take());
                         m.reply_to = reply_to;
                         m.forwarded_from = forwarded_from;
                         m.uploading = None;
@@ -657,6 +687,8 @@ impl State {
                             photo_path: None,
                             doc,
                             doc_path: None,
+                            sticker,
+                            sticker_path: None,
                             reply_to,
                             forwarded_from,
                             uploading: None,
@@ -665,6 +697,20 @@ impl State {
                             sender_name,
                             sender_id,
                             pinned: false,
+                        });
+                    }
+                    // Stickers stream their image separately: ask for any
+                    // sticker row still missing its file (new arrivals and
+                    // just-merged optimistic sends alike).
+                    let missing = rows
+                        .iter()
+                        .filter(|m| m.id > 0 && m.sticker.is_some() && m.sticker_path.is_none())
+                        .map(|m| m.id)
+                        .collect::<Vec<_>>();
+                    for mid in missing {
+                        let _ = self.req_tx.send(Request::DownloadSticker {
+                            chat_id,
+                            msg_id: mid,
                         });
                     }
                     self.scroll_to_bottom = true;
@@ -677,7 +723,7 @@ impl State {
                 // Otherwise: update the list row (preview + unread only for
                 // incoming messages).
                 if let Some(row) = self.dialogs.iter_mut().find(|r| r.id == chat_id) {
-                    row.subtitle = preview_text(&text, &photo, &doc);
+                    row.subtitle = preview_text(&text, &photo, &doc, &sticker);
                     row.date = date;
                     if !out {
                         row.unread += 1;
@@ -767,8 +813,30 @@ impl State {
                     self.invalidate_layout();
                 }
             }
-            UiMessage::UploadProgress { chat_id, token, progress } => {
-                if self.open_chat != Some(chat_id) {
+            UiMessage::StickerPathReady { chat_id, msg_id, path } => {
+                if self.open_chat == Some(chat_id) {
+                    for m in &mut self.messages {
+                        if m.id == msg_id {
+                            m.sticker_path = path;
+                            break;
+                        }
+                    }
+                    self.invalidate_layout();
+                }
+            }
+            UiMessage::StickerThumbReady { doc_id, path } => {
+                if let Some(p) = path {
+                    self.sticker_thumbs.insert(doc_id, p);
+                }
+            }
+            UiMessage::StickerSets(sets) => {
+                // Only refresh when the picker still wants them (stale
+                // responses after a close are dropped).
+                if self.sticker_picker_open || self.sticker_sets.is_empty() {
+                    self.sticker_sets = sets;
+                }
+            }
+            UiMessage::UploadProgress { chat_id, token, progress } => {                if self.open_chat != Some(chat_id) {
                     return;
                 }
                 for m in &mut self.messages {
@@ -1024,7 +1092,7 @@ impl State {
     pub fn context_can_edit(&self) -> bool {
         self.context_menu
             .and_then(|c| self.messages.get(c.row))
-            .is_some_and(|m| m.out && m.doc.is_none())
+            .is_some_and(|m| m.out && m.doc.is_none() && m.sticker.is_none())
     }
 
     /// Dismisses the context menu (a click outside, or opening another one).
@@ -1036,14 +1104,18 @@ impl State {
         self.invalidate_layout();
     }
 
-    /// Escape: closes the topmost overlay — kick confirmation, info panel,
-    /// creation modal, chat-row menu, leave confirmation — then the context
-    /// menu, cancels editing or the reply target.
+    /// Escape: closes the topmost overlay — sticker picker, kick
+    /// confirmation, info panel, creation modal, chat-row menu, leave
+    /// confirmation — then the context menu, cancels editing or the reply.
     pub fn escape(&mut self) {
         // The search UI is active: it hides the chat pane, so Escape (and the
         // back handler) close it before touching the message rows.
         if self.search_open() {
             self.close_search();
+            return;
+        }
+        if self.sticker_picker_open {
+            self.close_sticker_picker();
             return;
         }
         if self.kick_confirm.take().is_some() {
@@ -1092,6 +1164,10 @@ impl State {
     /// Shows/hides the emoji panel above the composer.
     pub fn toggle_emoji_panel(&mut self) {
         self.emoji_panel_open = !self.emoji_panel_open;
+        if self.emoji_panel_open {
+            // One composer panel at a time.
+            self.sticker_picker_open = false;
+        }
     }
 
     /// Hides the emoji panel (Escape or click outside).
@@ -1124,7 +1200,7 @@ impl State {
         let Some(m) = self.messages.get(menu.row) else {
             return;
         };
-        let snippet = preview_text(&m.text, &m.photo, &m.doc);
+        let snippet = preview_text(&m.text, &m.photo, &m.doc, &m.sticker);
         self.reply_target = Some(ReplyTarget {
             msg_id: m.id,
             snippet,
@@ -1418,6 +1494,49 @@ impl State {
         Some(format!("@{username}"))
     }
 
+    // -----------------------------------------------------------------
+    // Stickers (picker + sending)
+    // -----------------------------------------------------------------
+
+    /// Toggles the sticker picker panel. Opening it with no packs loaded yet
+    /// fires a single `GetStickerSets` request.
+    pub fn toggle_sticker_picker(&mut self) {
+        self.sticker_picker_open = !self.sticker_picker_open;
+        if self.sticker_picker_open {
+            // One composer panel at a time.
+            self.emoji_panel_open = false;
+            if self.sticker_sets.is_empty() {
+                let _ = self.req_tx.send(Request::GetStickerSets);
+            }
+        }
+    }
+
+    /// Closes the sticker picker panel.
+    pub fn close_sticker_picker(&mut self) {
+        self.sticker_picker_open = false;
+    }
+
+    /// A picker sticker was clicked: sends it optimistically to the open chat
+    /// and closes the panel. The server echo merges into the local row; the
+    /// image streams in via `StickerPathReady`.
+    pub fn send_sticker(&mut self, set_idx: usize, doc_idx: usize) {
+        let Some(id) = self.open_chat else { return };
+        let Some((doc_id, access_hash, alt)) =
+            self.sticker_sets.get(set_idx).and_then(|s| s.docs.get(doc_idx)).cloned()
+        else {
+            return;
+        };
+        // Optimistic local row (id = 0, merged by the echo).
+        self.messages.push(MsgRow {
+            sticker: Some(StickerMeta { alt }),
+            ..MsgRow::text(0, String::new(), 0, true)
+        });
+        let _ = self.req_tx.send(Request::SendSticker { id, doc_id, access_hash });
+        self.sticker_picker_open = false;
+        self.scroll_to_bottom = true;
+        self.invalidate_layout();
+    }
+
     /// Submit the composer: send (or edit) the current text.
     pub fn submit(&mut self) {
         let text = self.composer.trim().to_string();
@@ -1534,6 +1653,7 @@ impl State {
         self.kick_confirm = None;
         self.muted = false;
         self.emoji_panel_open = false;
+        self.sticker_picker_open = false;
         if self.persist_ui {
             write_last_chat_at(&last_chat_path(), Some(id));
         }
@@ -1556,6 +1676,7 @@ impl State {
         self.kick_confirm = None;
         self.muted = false;
         self.emoji_panel_open = false;
+        self.sticker_picker_open = false;
         if self.persist_ui {
             write_last_chat_at(&last_chat_path(), None);
         }
@@ -1952,6 +2073,7 @@ mod tests {
             forwarded_from: None,
             sender_name: None,
             sender_id: None,
+            sticker: None,
         });
         assert_eq!(state.messages.len(), 3);
         assert!(!state.typing);
@@ -1981,6 +2103,7 @@ mod tests {
             forwarded_from: None,
             sender_name: None,
             sender_id: None,
+            sticker: None,
         });
         // The open chat's rows must be untouched.
         assert_eq!(state.messages.len(), 2);
@@ -2010,6 +2133,7 @@ mod tests {
             forwarded_from: None,
             sender_name: None,
             sender_id: None,
+            sticker: None,
         });
         // The update merged with the optimistic row: no duplicate.
         assert_eq!(state.messages.len(), 3);
@@ -2107,6 +2231,7 @@ mod tests {
             forwarded_from: None,
             sender_name: None,
             sender_id: None,
+            sticker: None,
         });
         assert_eq!(state.dialogs[0].subtitle, "ping");
         assert_eq!(state.dialogs[0].unread, 1);
@@ -2222,6 +2347,7 @@ mod tests {
             forwarded_from: None,
             sender_name: None,
             sender_id: None,
+            sticker: None,
         });
         assert_eq!(state.messages.len(), 3, "echo merges, no duplicate");
         let merged = state.messages.last().unwrap();
@@ -2792,5 +2918,132 @@ mod tests {
         assert!(read_emoji_recents_at(&path).is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sticker_picker_opens_and_requests_sets_once() {
+        let (mut state, mut req_rx) = demo_state();
+        assert!(!state.sticker_picker_open);
+        // First open: the panel shows and the packs are requested.
+        state.toggle_sticker_picker();
+        assert!(state.sticker_picker_open);
+        let reqs = drain(&mut req_rx);
+        assert!(
+            matches!(reqs.last(), Some(Request::GetStickerSets)),
+            "expected GetStickerSets, got {reqs:?}"
+        );
+        // Re-open (close + open) with packs still empty: requested once more
+        // only after a fresh toggle — but once sets arrived, never again.
+        state.escape();
+        assert!(!state.sticker_picker_open, "Escape closes the picker");
+        state.sticker_sets = vec![StickerSetBridge {
+            title: "Happy Blocks".into(),
+            short_name: "happy_blocks".into(),
+            docs: vec![(900_000_000, 42, "🎉".to_string())],
+        }];
+        state.toggle_sticker_picker();
+        let reqs = drain(&mut req_rx);
+        assert!(
+            !reqs.iter().any(|r| matches!(r, Request::GetStickerSets)),
+            "packs must not be re-fetched when already loaded"
+        );
+        // Chat switch closes the picker but keeps the global packs.
+        state.open_chat(43);
+        assert!(!state.sticker_picker_open);
+        assert_eq!(state.sticker_sets.len(), 1, "sets are global");
+    }
+
+    #[test]
+    fn sticker_sets_arrive_and_pick_sends_request() {
+        let (mut state, mut req_rx) = demo_state();
+        state.toggle_sticker_picker();
+        let _ = req_rx.try_recv();
+        state.on_message(UiMessage::StickerSets(vec![StickerSetBridge {
+            title: "Happy Blocks".into(),
+            short_name: "happy_blocks".into(),
+            docs: vec![
+                (900_000_001, 11, "🎉".to_string()),
+                (900_000_002, 22, "⭐".to_string()),
+            ],
+        }]));
+        assert_eq!(state.sticker_sets.len(), 1);
+
+        state.send_sticker(0, 1);
+        let reqs = drain(&mut req_rx);
+        assert!(
+            matches!(
+                reqs.last(),
+                Some(Request::SendSticker { id: 42, doc_id: 900_000_002, access_hash: 22 })
+            ),
+            "expected SendSticker with the picked doc, got {reqs:?}"
+        );
+        assert!(!state.sticker_picker_open, "picker closes on send");
+        // Optimistic local row (id 0) carrying the sticker meta.
+        let last = state.messages.last().expect("optimistic row");
+        assert_eq!(last.id, 0);
+        assert_eq!(last.sticker.as_ref().map(|s| s.alt.as_str()), Some("⭐"));
+
+        // The echo merges into the optimistic row and keeps the sticker.
+        state.on_message(UiMessage::NewMessage {
+            chat_id: 42,
+            id: 777,
+            text: String::new(),
+            date: 500,
+            out: true,
+            photo: None,
+            doc: None,
+            sticker: Some(StickerMeta { alt: "⭐".into() }),
+            reply_to: None,
+            forwarded_from: None,
+            sender_name: None,
+            sender_id: None,
+        });
+        assert!(
+            !state.messages.iter().any(|m| m.id == 0),
+            "optimistic row merged"
+        );
+        let merged = state.messages.iter().find(|m| m.id == 777).expect("echo row");
+        assert_eq!(merged.sticker.as_ref().map(|s| s.alt.as_str()), Some("⭐"));
+        // The merge arms the image download for the merged row.
+        let reqs = drain(&mut req_rx);
+        assert!(
+            matches!(
+                reqs.last(),
+                Some(Request::DownloadSticker { chat_id: 42, msg_id: 777 })
+            ),
+            "expected DownloadSticker for the merged row, got {reqs:?}"
+        );
+
+        // The image path lands on the right row.
+        state.on_message(UiMessage::StickerPathReady {
+            chat_id: 42,
+            msg_id: 777,
+            path: Some("/tmp/sticker.webp".into()),
+        });
+        let with_path = state.messages.iter().find(|m| m.id == 777).unwrap();
+        assert_eq!(with_path.sticker_path.as_deref(), Some("/tmp/sticker.webp"));
+    }
+
+    #[test]
+    fn incoming_sticker_updates_dialog_preview_and_row() {
+        let (mut state, _) = demo_state();
+        state.on_message(UiMessage::NewMessage {
+            chat_id: 42,
+            id: 900,
+            text: String::new(),
+            date: 600,
+            out: false,
+            photo: None,
+            doc: None,
+            sticker: Some(StickerMeta { alt: "🎉".into() }),
+            reply_to: None,
+            forwarded_from: None,
+            sender_name: None,
+            sender_id: None,
+        });
+        let row = state.messages.iter().find(|m| m.id == 900).expect("row pushed");
+        assert_eq!(row.sticker.as_ref().map(|s| s.alt.as_str()), Some("🎉"));
+        assert!(row.doc.is_none(), "stickers are not document cards");
+        assert!(preview_text("", &None, &None, &row.sticker).contains("🎉"));
     }
 }
