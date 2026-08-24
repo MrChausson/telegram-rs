@@ -188,27 +188,9 @@ pub fn spawn_network(demo: bool, big: bool) -> UnboundedSender<Request> {
                 let updates_rx = tg.take_updates();
                 let tg = Arc::new(tg);
 
-                match tg.get_dialogs().await {
-                    Ok(dialogs) => {
-                        let mut peers: HashMap<i64, (String, PeerRef)> = HashMap::new();
-                        let rows: Vec<ChatRow> = dialogs
-                            .iter()
-                            .map(|d| {
-                                peers.insert(
-                                    d.id.bot_api_dialog_id(),
-                                    (d.title.clone(), d.peer_ref),
-                                );
-                                ChatRow {
-                                    id: d.id.bot_api_dialog_id(),
-                                    title: d.title.clone(),
-                                    subtitle: d.last_message.clone().unwrap_or_default(),
-                                    date: d.last_date.unwrap_or(0),
-                                    unread: d.unread_count,
-                                    avatar_path: None,
-                                }
-                            })
-                            .collect();
-                        let _ = ui_tx.send(UiMessage::Dialogs(rows));
+                let mut peers: HashMap<i64, (String, PeerRef)> = HashMap::new();
+                match refresh_dialogs(&tg, &ui_tx, &mut peers).await {
+                    Ok(()) => {
                         // Warm the avatar cache in the background.
                         let net_tx = net_tx.clone();
                         let ui_tx2 = ui_tx.clone();
@@ -225,7 +207,7 @@ pub fn spawn_network(demo: bool, big: bool) -> UnboundedSender<Request> {
                                 });
                             }
                         });
-                        serve(tg, updates_rx, &ui_tx, &mut req_rx, &peers).await;
+                        serve(tg, updates_rx, &ui_tx, &mut req_rx, &mut peers).await;
                     }
                     Err(e) => {
                         let _ = ui_tx.send(UiMessage::Error(format!(
@@ -263,11 +245,12 @@ pub fn network_subscription() -> iced::Subscription<crate::Message> {
     iced::Subscription::run(stream)
 }
 
-/// A canned demo chat.
+/// A canned demo chat. Titles are owned (not `&'static str`) so the
+/// create/rename demo handlers can add or edit chats at runtime.
 struct DemoChat {
     id: i64,
-    title: &'static str,
-    subtitle: &'static str,
+    title: String,
+    subtitle: String,
     /// Seconds ago of the last message.
     last_ago: i32,
     unread: i32,
@@ -426,26 +409,33 @@ async fn serve_demo(
         .as_secs() as i32;
 
     let chats = vec![
-        DemoChat { id: 1001, title: "Camille", subtitle: "Super ! à demain 👋", last_ago: 42, unread: 3, hue: 0.55 },
-        DemoChat { id: 1002, title: "Rust Groupe", subtitle: "Thomas: novelle review du PR ?", last_ago: 7200, unread: 0, hue: 0.1 },
-        DemoChat { id: 1003, title: "Canal Paysages", subtitle: "Coucher de soleil sur la mer 🏖", last_ago: 86400, unread: 0, hue: 0.95 },
-        DemoChat { id: 1004, title: "Groupe Famille", subtitle: "Maman : tu passes quand ?", last_ago: 172800, unread: 12, hue: 0.3 },
-        DemoChat { id: 1005, title: "Paris Bots", subtitle: "New version 2.4.0 released", last_ago: 604800, unread: 0, hue: 0.75 },
+        DemoChat { id: 1001, title: "Camille".into(), subtitle: "Super ! à demain 👋".into(), last_ago: 42, unread: 3, hue: 0.55 },
+        DemoChat { id: 1002, title: "Rust Groupe".into(), subtitle: "Thomas: novelle review du PR ?".into(), last_ago: 7200, unread: 0, hue: 0.1 },
+        DemoChat { id: 1003, title: "Canal Paysages".into(), subtitle: "Coucher de soleil sur la mer 🏖".into(), last_ago: 86400, unread: 0, hue: 0.95 },
+        DemoChat { id: 1004, title: "Groupe Famille".into(), subtitle: "Maman : tu passes quand ?".into(), last_ago: 172800, unread: 12, hue: 0.3 },
+        DemoChat { id: 1005, title: "Paris Bots".into(), subtitle: "New version 2.4.0 released".into(), last_ago: 604800, unread: 0, hue: 0.75 },
     ];
+    // Shared with the request handlers below so create/leave/delete/rename
+    // can mutate the list at runtime (the closures only borrow it).
+    let chats = std::rc::Rc::new(std::cell::RefCell::new(chats));
 
-    let assets = ensure_demo_assets(&chats);
-    let rows: Vec<ChatRow> = chats
-        .iter()
-        .map(|c| ChatRow {
-            id: c.id,
-            title: c.title.to_string(),
-            subtitle: c.subtitle.to_string(),
-            date: now - c.last_ago,
-            unread: c.unread,
-            avatar_path: assets.avatars.get(&c.id).cloned(),
-        })
-        .collect();
-    let _ = ui_tx.send(UiMessage::Dialogs(rows));
+    let assets = ensure_demo_assets(&chats.borrow());
+    // Snapshot of the chat list as dialog rows (also used by the
+    // create/leave/delete handlers to refresh the UI).
+    let build_rows = |chats: &[DemoChat]| -> Vec<ChatRow> {
+        chats
+            .iter()
+            .map(|c| ChatRow {
+                id: c.id,
+                title: c.title.clone(),
+                subtitle: c.subtitle.clone(),
+                date: now - c.last_ago,
+                unread: c.unread,
+                avatar_path: assets.avatars.get(&c.id).cloned(),
+            })
+            .collect()
+    };
+    let _ = ui_tx.send(UiMessage::Dialogs(build_rows(&chats.borrow())));
     // Demo starts signed-in: the chat UI is the surface we want to exercise.
     let _ = ui_tx.send(UiMessage::LoginOk {
         name: "Demo".to_string(),
@@ -453,6 +443,7 @@ async fn serve_demo(
 
     let photo_of = |chat: &DemoChat| assets.photos.get(&chat.id).cloned();
     let msgs_for = |id: i64| -> Vec<MsgRow> {
+        let chats = chats.borrow();
         let chat = chats.iter().find(|c| c.id == id);
         let photo = chat.and_then(&photo_of);
         let doc_row = |id: i32, text: &str, date: i32, name: &str, size: i64| MsgRow {
@@ -593,6 +584,10 @@ async fn serve_demo(
     let mut edits: HashMap<i32, String> = HashMap::new();
     // Next message id handed to optimistic local sends (or the echo below).
     let mut next_id = 10000i32;
+    // Id of the next chat created through CreateChannel (1006+), and the
+    // currently-open demo chat (renames refresh its conversation header).
+    let mut next_chat_id = 1006i64;
+    let mut demo_open: Option<i64> = None;
     // Simulate the peer replying in Camille's chat every ~12 s: a typing
     // burst of ~3 s followed by the message.
     let mut incoming_idx = 0usize;
@@ -612,6 +607,7 @@ async fn serve_demo(
         for req in pending.drain(..) {
             match req {
                 Request::OpenChat { id } => {
+                    demo_open = Some(id);
                     let rows = msgs_for(id)
                         .into_iter()
                         .map(|mut m| {
@@ -622,9 +618,10 @@ async fn serve_demo(
                         })
                         .collect();
                     let title = chats
+                        .borrow()
                         .iter()
                         .find(|c| c.id == id)
-                        .map(|c| c.title.to_string())
+                        .map(|c| c.title.clone())
                         .unwrap_or_else(|| "Chat".to_string());
                     let _ = ui_tx.send(UiMessage::Messages { id, title, rows });
                     // Demo pinned message: the group pins its topic message.
@@ -660,6 +657,7 @@ async fn serve_demo(
                     // as the "uploaded" image).
                     let ui_tx = ui_tx.clone();
                     let photo = chats
+                        .borrow()
                         .iter()
                         .find(|c| c.id == id)
                         .and_then(|c| assets.photos.get(&c.id).cloned());
@@ -724,9 +722,10 @@ async fn serve_demo(
                         .find(|m| m.id == msg_id);
                     let Some(origin) = origin else { continue };
                     let from_title = chats
+                        .borrow()
                         .iter()
                         .find(|c| c.id == from_chat)
-                        .map(|c| c.title.to_string())
+                        .map(|c| c.title.clone())
                         .unwrap_or_default();
                     let nid = next_id;
                     next_id += 1;
@@ -788,9 +787,10 @@ Request::DownloadDoc { chat_id, msg_id } => {
                     let hits: Vec<SearchHit> = if let Some(chat_id) = id {
                         // In-chat: filter the chat's canned history.
                         let chat_title = chats
+                            .borrow()
                             .iter()
                             .find(|c| c.id == chat_id)
-                            .map(|c| c.title.to_string())
+                            .map(|c| c.title.clone())
                             .unwrap_or_else(|| "Chat".to_string());
                         msgs_for(chat_id)
                             .into_iter()
@@ -801,7 +801,7 @@ Request::DownloadDoc { chat_id, msg_id } => {
                     } else {
                         // Global: match dialog titles + message bodies.
                         let mut hits = Vec::new();
-                        for c in &chats {
+                        for c in chats.borrow().iter() {
                             let mut found = false;
                             if !q.is_empty() && c.title.to_lowercase().contains(&q) {
                                 found = true;
@@ -847,6 +847,43 @@ Request::DownloadDoc { chat_id, msg_id } => {
                         chat_id: id,
                         msg_id: pin.then_some(msg_id),
                     });
+                }
+                Request::CreateChannel { title, about: _, megagroup: _, members: _ } => {
+                    let id = next_chat_id;
+                    next_chat_id += 1;
+                    // Deterministic hue from the id so the letter-circle
+                    // avatar (no file is generated for runtime chats) gets a
+                    // stable palette color.
+                    let hue = ((id as f32 * 0.618_034) % 1.0 + 1.0) % 1.0;
+                    chats.borrow_mut().push(DemoChat {
+                        id,
+                        title,
+                        subtitle: String::new(),
+                        last_ago: 0,
+                        unread: 0,
+                        hue,
+                    });
+                    let _ = ui_tx.send(UiMessage::Dialogs(build_rows(&chats.borrow())));
+                    let _ = ui_tx.send(UiMessage::ChatCreated { id });
+                }
+                Request::LeaveChat { id } | Request::DeleteChat { id } => {
+                    chats.borrow_mut().retain(|c| c.id != id);
+                    let _ = ui_tx.send(UiMessage::Dialogs(build_rows(&chats.borrow())));
+                    let _ = ui_tx.send(UiMessage::ChatGone { id });
+                }
+                Request::EditChatTitle { id, title } => {
+                    if let Some(c) = chats
+                        .borrow_mut()
+                        .iter_mut()
+                        .find(|c| c.id == id)
+                    {
+                        c.title = title.clone();
+                    }
+                    let _ = ui_tx.send(UiMessage::Dialogs(build_rows(&chats.borrow())));
+                    if demo_open == Some(id) {
+                        let rows = msgs_for(id);
+                        let _ = ui_tx.send(UiMessage::Messages { id, title, rows });
+                    }
                 }
                 Request::MarkRead { id } => {
                     let _ = ui_tx.send(UiMessage::ChatRead { id });
@@ -1117,6 +1154,35 @@ fn msg_row_from_info(
     }
 }
 
+/// Reloads the dialog list from the server, refreshes the id→peer map and
+/// pushes the updated list to the UI. Used at boot and after any chat-list
+/// mutation (create / leave / delete / rename), so both the UI rows and the
+/// peer cache stay consistent.
+async fn refresh_dialogs(
+    tg: &Telegram,
+    ui_tx: &mpsc::UnboundedSender<UiMessage>,
+    peers: &mut HashMap<i64, (String, PeerRef)>,
+) -> anyhow::Result<()> {
+    let dialogs = tg.get_dialogs().await?;
+    peers.clear();
+    let rows: Vec<ChatRow> = dialogs
+        .iter()
+        .map(|d| {
+            peers.insert(d.id.bot_api_dialog_id(), (d.title.clone(), d.peer_ref));
+            ChatRow {
+                id: d.id.bot_api_dialog_id(),
+                title: d.title.clone(),
+                subtitle: d.last_message.clone().unwrap_or_default(),
+                date: d.last_date.unwrap_or(0),
+                unread: d.unread_count,
+                avatar_path: None,
+            }
+        })
+        .collect();
+    let _ = ui_tx.send(UiMessage::Dialogs(rows));
+    Ok(())
+}
+
 /// Network loop: handles UI requests and real-time updates.
 ///
 /// Interactive work (OpenChat, sends, edits…) is done inline with a priority
@@ -1129,7 +1195,7 @@ async fn serve(
     updates_rx: tokio::sync::mpsc::UnboundedReceiver<UpdatesLike>,
     ui_tx: &mpsc::UnboundedSender<UiMessage>,
     req_rx: &mut mpsc::UnboundedReceiver<Request>,
-    peers: &HashMap<i64, (String, PeerRef)>,
+    peers: &mut HashMap<i64, (String, PeerRef)>,
 ) {
     let mut updates = tg
         .client()
@@ -1439,7 +1505,7 @@ async fn handle_request(
     tg: &Arc<Telegram>,
     ui_tx: &mpsc::UnboundedSender<UiMessage>,
     req: Request,
-    peers: &HashMap<i64, (String, PeerRef)>,
+    peers: &mut HashMap<i64, (String, PeerRef)>,
     downloads: &Arc<Downloads>,
 ) {
     match req {
@@ -1666,6 +1732,77 @@ async fn handle_request(
                     }
                 }
             }
+            None => {
+                let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+            }
+        },
+        Request::CreateChannel { title, about, megagroup, members } => {
+            // Groups with picked members go through messages.createChat
+            // (initial invites); everything else — and any failed invite —
+            // creates a channel/supergroup via channels.createChannel.
+            let result: anyhow::Result<i64> = if megagroup {
+                let refs: Vec<PeerRef> = members
+                    .iter()
+                    .filter_map(|m| peers.get(m).map(|(_, p)| *p))
+                    .collect();
+                if refs.is_empty() {
+                    tg.create_channel(&title, &about, true).await
+                } else {
+                    match tg.create_group(&title, &refs).await {
+                        Ok(id) => Ok(id),
+                        Err(_) => tg.create_channel(&title, &about, true).await,
+                    }
+                }
+            } else {
+                tg.create_channel(&title, &about, false).await
+            };
+            match result {
+                Ok(id) => {
+                    // The new chat must be resolvable before the UI opens it.
+                    let _ = refresh_dialogs(tg, ui_tx, peers).await;
+                    let _ = ui_tx.send(UiMessage::ChatCreated { id });
+                }
+                Err(e) => {
+                    let _ = ui_tx.send(UiMessage::Error(format!("Could not create chat: {e}")));
+                }
+            }
+        }
+        Request::LeaveChat { id } | Request::DeleteChat { id } => {
+            let leave = matches!(req, Request::LeaveChat { .. });
+            let result = match peers.get(&id) {
+                Some((_, peer_ref)) => {
+                    if leave {
+                        tg.leave_chat(peer_ref).await
+                    } else {
+                        tg.delete_chat(peer_ref).await
+                    }
+                }
+                None => Err(anyhow::anyhow!("unknown chat")),
+            };
+            match result {
+                Ok(()) => {
+                    peers.remove(&id);
+                    // Keep the list in sync (subtitle/date of the gone chat).
+                    let _ = refresh_dialogs(tg, ui_tx, peers).await;
+                    let _ = ui_tx.send(UiMessage::ChatGone { id });
+                }
+                Err(e) => {
+                    let _ = ui_tx.send(UiMessage::Error(format!(
+                        "Could not remove the chat: {e}"
+                    )));
+                }
+            }
+        }
+        Request::EditChatTitle { id, title } => match peers.get(&id) {
+            Some((_, peer_ref)) => match tg.edit_chat_title(peer_ref, &title).await {
+                Ok(()) => {
+                    // Refreshed list carries the new title.
+                    let _ = refresh_dialogs(tg, ui_tx, peers).await;
+                }
+                Err(e) => {
+                    let _ = ui_tx.send(UiMessage::Error(format!("Rename failed: {e}")));
+                }
+            },
             None => {
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
             }

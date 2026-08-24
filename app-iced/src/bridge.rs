@@ -146,6 +146,21 @@ pub enum Request {
     PinMessage { id: i64, msg_id: i32, pin: bool },
     /// Downloads a chat's profile photo thumbnail.
     DownloadAvatar { chat_id: i64 },
+    /// Creates a group (`megagroup=true`) or channel. `members` carries the
+    /// bot-api ids of the initial members (groups only; empty = create
+    /// without inviting anyone).
+    CreateChannel {
+        title: String,
+        about: String,
+        megagroup: bool,
+        members: Vec<i64>,
+    },
+    /// Leaves a group/channel (membership ends, dialog disappears).
+    LeaveChat { id: i64 },
+    /// Deletes a chat from the account (leaves it and clears history).
+    DeleteChat { id: i64 },
+    /// Renames a group/channel.
+    EditChatTitle { id: i64, title: String },
     /// Downloads a message's document into the cache.
     DownloadDoc { chat_id: i64, msg_id: i32 },
     /// Searches messages (`id: None` = global, `Some` = that chat). The
@@ -231,6 +246,11 @@ pub enum UiMessage {
     MessageDeleted { ids: Vec<i32> },
     /// The open chat's pinned message changed (`None` = no pin left).
     PinnedMessage { chat_id: i64, msg_id: Option<i32> },
+    /// A group/channel was just created (id = the new chat); the refreshed
+    /// dialog list arrives first.
+    ChatCreated { id: i64 },
+    /// A chat was left/deleted (id = the gone chat).
+    ChatGone { id: i64 },
     /// The server acknowledged the phone number: ask the user for the code.
     LoginCodeRequired,
     /// The account has a 2FA password: ask for it (hint = if any).
