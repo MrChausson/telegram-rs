@@ -7,12 +7,41 @@
 use ksni::TrayMethods;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 /// Flags the iced shell reacts to.
 #[derive(Debug, Default)]
 pub struct TrayActions {
     pub open: AtomicBool,
     pub quit: AtomicBool,
+}
+
+/// The app logo as `ksni::Icon`s (32 px + 64 px), rendered once.
+///
+/// `ksni::Icon` wants ARGB32 in network byte order; our pixmaps are
+/// little-endian RGBA8, so each pixel is rotated right by one byte
+/// (rgba → argb). Rendering at 2× keeps the mark crisp on HiDPI panels.
+fn tray_icons() -> Vec<ksni::Icon> {
+    static ICONS: OnceLock<Vec<ksni::Icon>> = OnceLock::new();
+    ICONS
+        .get_or_init(|| {
+            [32, 64]
+                .into_iter()
+                .map(|px| {
+                    let pixmap = crate::icons::render_logo_rgba(px);
+                    let mut data = pixmap.data().to_vec();
+                    for px in data.as_chunks_mut::<4>().0 {
+                        px.rotate_right(1);
+                    }
+                    ksni::Icon {
+                        width: px as i32,
+                        height: px as i32,
+                        data,
+                    }
+                })
+                .collect()
+        })
+        .clone()
 }
 
 struct TgTray {
@@ -26,8 +55,15 @@ impl ksni::Tray for TgTray {
     fn title(&self) -> String {
         "tg".into()
     }
-    fn icon_name(&self) -> String {
-        "telegram".into()
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        tray_icons()
+    }
+    fn tool_tip(&self) -> ksni::ToolTip {
+        ksni::ToolTip {
+            title: "tg".into(),
+            description: "Telegram client".into(),
+            ..Default::default()
+        }
     }
     fn menu(&self) -> Vec<ksni::menu::MenuItem<Self>> {
         use ksni::menu::{MenuItem, StandardItem};
