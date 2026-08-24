@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.6.1] - 2026-08-24
+
 ### Fixed
 - **Long unbreakable words (URLs) no longer overflow their bubble**: message
   text wraps at the glyph level when a single word exceeds the bubble width
