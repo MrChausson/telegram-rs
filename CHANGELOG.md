@@ -12,6 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   overlay, search views, byte sizes, demo content) is now English.
 
 ### Added
+- **Stickers**: incoming and outgoing stickers render frameless (no bubble) as
+  a centered ~180 px image with a discreet timestamp. A sticker button next to
+  the attach 📎 opens a floating picker panel above the composer: installed
+  packs (title + 4-column thumbnail grid, images cached on disk); clicking a
+  sticker sends it by document reference. Stickers classify ahead of other
+  document attributes (`DocumentAttributeSticker`), download through the
+  shared concurrency-capped pipeline into `cache/stickers/`, and the demo
+  ships two generated packs plus incoming/outgoing sticker messages in Rust
+  Group.
 - **Group & channel creation**: a "+" button in the chat-list header opens a
   New Group / New Channel picker; the modal takes a title (+ description for
   channels) and, for groups, a checkable member list seeded from your known
@@ -41,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   author's name above the bubble, in a deterministic per-sender color from
   Telegram's 7-hue palette (private chats are unaffected). The virtualized
   row-height estimate accounts for the extra line.
+- **Emoji picker in the composer**: a smiley button left of the input opens a
+  floating panel above it — "Recents" (persisted across sessions, capped at
+  24, with a starter set until first use) plus standard grouped sets (Smileys
+  & People, Animals & Nature, Food & Drink, Activities, Objects, Symbols).
+  Picking an emoji appends it to the composer without sending; a click
+  outside or Escape closes the panel.
 
 ## [v0.6.1] - 2026-08-24
 

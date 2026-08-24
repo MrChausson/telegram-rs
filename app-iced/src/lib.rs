@@ -9,6 +9,7 @@
 
 pub mod audio;
 pub mod bridge;
+pub mod emoji;
 pub mod tray;
 pub mod icons;
 pub mod network;
@@ -210,6 +211,12 @@ pub enum Message {
     AttachFile,
     /// The file dialog returned a path (None = cancelled).
     FilePicked(Option<String>),
+    /// The sticker button was pressed: toggle the picker panel.
+    ToggleStickerPicker,
+    /// A sticker thumbnail was clicked in the picker: `(set index, doc index)`.
+    StickerPicked(usize, usize),
+    /// The sticker picker panel was closed (✕).
+    CloseStickerPicker,
     /// The context menu was dismissed.
     DismissMenu,
     /// Escape: close the context menu, cancel editing or close the viewer.
@@ -232,6 +239,12 @@ pub enum Message {
     OpenUrl(String),
     /// Composer text changed.
     ComposerChanged(String),
+    /// The composer's smiley button toggled the emoji panel.
+    EmojiToggle,
+    /// An emoji was picked in the panel: append it to the composer.
+    EmojiPicked(String),
+    /// A click outside the emoji panel dismissed it.
+    EmojiDismiss,
     /// Composer submitted (send / edit).
     Submit,
     /// Viewer close / back.
@@ -370,6 +383,9 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             }
         }
         Message::FilePicked(None) => {}
+        Message::ToggleStickerPicker => state.toggle_sticker_picker(),
+        Message::StickerPicked(set, doc) => state.send_sticker(set, doc),
+        Message::CloseStickerPicker => state.close_sticker_picker(),
         Message::DismissMenu => state.dismiss_menu(),
         Message::Escape => {
             if state.search_open() {
@@ -418,13 +434,24 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
                 let _ = state.req_tx.send(Request::Typing { id, typing: true });
             }
         }
+        Message::EmojiToggle => state.toggle_emoji_panel(),
+        Message::EmojiPicked(e) => state.pick_emoji(e),
+        Message::EmojiDismiss => state.close_emoji_panel(),
         Message::Submit => {
             if let Some(id) = state.open_chat {
                 let _ = state.req_tx.send(Request::Typing { id, typing: false });
             }
             state.submit();
         }
-        Message::CloseViewer => state.back(),
+        Message::CloseViewer => {
+            state.back();
+            // Re-sync the list scroll: the widget may have been recreated
+            // while the viewer was up (GL drivers stall on the full-screen
+            // swap), so pin it back to the position we remember.
+            let y = state.scroll_offset.max(0.0);
+            use iced::widget::operation::{scroll_to, AbsoluteOffset};
+            return scroll_to::<Message>(MSG_LIST_ID, AbsoluteOffset { x: 0.0, y });
+        }
         Message::LoginChanged(text) => state.login_input = text,
         Message::LoginSubmit => submit_login(state),
         Message::LoginBack => login_back(state),
@@ -545,9 +572,10 @@ fn view(state: &State) -> Element<'_> {
     RENDERED.fetch_add(1, Ordering::SeqCst);
     // Entry into the redraw path: bump the display-fps rolling window.
     let _ = rendered_per_second();
-    if state.viewer.is_some() {
-        return viewer_view(state);
-    }
+    // NOTE: the viewer is NOT a top-level view swap — on GL/NVIDIA, swapping
+    // the whole window content for a full-screen image and back stalls
+    // surface presentation (last frame stays on screen). It renders as an
+    // overlay layer inside `conversation_pane` instead.
     if !state.authenticated {
         return login_view(state);
     }
@@ -625,7 +653,7 @@ fn search_view(state: &State) -> Element<'_> {
 
 /// A tappable search-result line: avatar, chat title + snippet, timestamp.
 fn search_hit_row( hit: &bridge::SearchHit, _query: &str, idx: usize) -> Element<'static> {
-    let snippet = state::preview_text(&hit.row.text, &hit.row.photo, &hit.row.doc);
+    let snippet = state::preview_text(&hit.row.text, &hit.row.photo, &hit.row.doc, &hit.row.sticker);
     let title = hit.chat_title.clone();
     let ts = if hit.row.date > 0 {
         theme::cached_time(hit.row.date)
@@ -689,24 +717,33 @@ fn viewer_view(state: &State) -> Element<'_> {
         .on_press(Message::CloseViewer)
         .padding(8)
         .style(flat_button);
-    column![
-        row![close]
-            .padding(8)
-            .width(Length::Fill),
-        container(
-            mouse_area(
-                image(image::Handle::from_path(path))
-                    .width(Length::Fill)
-                    .content_fit(iced::ContentFit::Contain),
+    // Opaque layer: covers the conversation pane (sidebar stays visible).
+    container(
+        column![
+            row![close]
+                .padding(8)
+                .width(Length::Fill),
+            container(
+                mouse_area(
+                    image(image::Handle::from_path(path))
+                        .width(Length::Fill)
+                        .content_fit(iced::ContentFit::Contain),
+                )
+                .on_press(Message::CloseViewer),
             )
-            .on_press(Message::CloseViewer),
-        )
-        .center_x(Length::Fill)
-        .width(Length::Fill)
-        .height(Length::Fill),
-    ]
-    .spacing(8)
-    .padding(16)
+            .center_x(Length::Fill)
+            .width(Length::Fill)
+            .height(Length::Fill),
+        ]
+        .spacing(8)
+        .padding(16),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(|_| container::Style {
+        background: Some(iced::Background::Color(Color::BLACK)),
+        ..container::Style::default()
+    })
     .into()
 }
 
@@ -824,17 +861,59 @@ fn login_view(state: &State) -> Element<'_> {
 /// harness can drive the exact per-frame view headlessly. The creation modal
 /// and the leave/delete confirmation float over everything.
 pub fn chat_view(state: &State) -> Element<'_> {
-    let base: Element<'_> = row![list_pane(state), conversation_pane(state)].into();
-    let base = if state.create_dialog.is_some() {
-        create_overlay(state, base)
+    // ONE flat always-present stack holds every overlay (viewer, forward,
+    // create, confirm, info): closed overlays contribute an empty spacer so
+    // toggling never rewrites the tree shape, and NO stack nests another
+    // (nested stacks break GL compositing — dimmed layers render over black).
+    let viewer_layer: Element<'_> = if state.viewer.is_some() {
+        viewer_view(state)
     } else {
-        base
+        horizontal_spacer()
     };
-    if state.confirm_leave.is_some() {
-        confirm_overlay(state, base)
+    let fwd_layer: Element<'_> = if state.forward_pick.is_some() {
+        forward_layer(state)
     } else {
-        base
+        horizontal_spacer()
+    };
+    iced::widget::stack![
+        row![list_pane(state), conversation_pane(state)],
+        viewer_layer,
+        fwd_layer,
+        create_layer(state),
+        confirm_layer(state),
+        info_layer(state),
+    ]
+    .into()
+}
+
+/// Chat info as a floating right sheet over a dimmed app (pattern of the
+/// create modal): the conversation stays visible behind it.
+fn info_layer<'a>(state: &'a State) -> Element<'a> {
+    if !(state.info_open && state.open_chat.is_some()) {
+        return horizontal_spacer();
     }
+    // NOTE: no translucent scrim here — semi-transparent stack layers
+    // composite against the window clear color (black) on wgpu/GL, hiding
+    // the app behind them. The sheet carries its own border instead.
+    let sheet = container(info_panel(state))
+        .width(INFO_W)
+        .height(Length::Fill)
+        .padding([12.0, 0.0])
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(rgb(theme::LIST_BG))),
+            border: iced::Border {
+                radius: 0.0.into(),
+                width: 1.0,
+                color: rgb(theme::MENU_BORDER),
+            },
+            ..container::Style::default()
+        });
+    container(sheet)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::End)
+        .align_y(Alignment::Start)
+        .into()
 }
 
 /// Estimated dialog-row height (logical px): avatar diameter + the button's
@@ -1147,6 +1226,42 @@ fn conversation_pane(state: &State) -> Element<'_> {
         .into()
     };
 
+    // Emoji picker floats over the conversation area while open: clicks
+    // outside it land on the backdrop layer and close it; scrolling still
+    // reaches the underlying list (the backdrop only captures buttons), and
+    // the composer below the stack stays fully interactive.
+    // Composer panels float over the message list only (never over header or
+    // composer): a body-level stack keeps the chrome interactive and visible.
+    let body: Element<'_> = if state.sticker_picker_open {
+        iced::widget::Stack::with_children(vec![
+            body,
+            mouse_area(
+                iced::widget::Space::new()
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .on_press(Message::CloseStickerPicker)
+            .into(),
+            sticker_picker_card(state),
+        ])
+        .into()
+    } else if state.emoji_panel_open {
+        iced::widget::Stack::with_children(vec![
+            body,
+            mouse_area(
+                iced::widget::Space::new()
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .on_press(Message::EmojiDismiss)
+            .into(),
+            emoji_panel_floated(state),
+        ])
+        .into()
+    } else {
+        body
+    };
+
     let composer = composer_bar(state);
 
     let pane = column![
@@ -1166,25 +1281,7 @@ fn conversation_pane(state: &State) -> Element<'_> {
 
     let pane = pane.push(top).push(body).push(composer).height(Length::Fill);
 
-    let pane: Element<'_> = if state.forward_pick.is_some() {
-        forward_overlay(state, pane.into())
-    } else {
-        pane.into()
-    };
-
-    // Right-hand info panel, when open: [conversation | divider | info].
-    if state.info_open && state.open_chat.is_some() {
-        return row![
-            pane,
-            container(iced::widget::Space::new())
-                .width(1.0)
-                .height(Length::Fill)
-                .style(divider),
-            info_panel(state),
-        ]
-        .into();
-    }
-    pane
+    pane.into()
 }
 
 /// Width of the right-hand chat-info side panel.
@@ -1417,10 +1514,120 @@ fn role_badge(role: bridge::ParticipantRole) -> Element<'static> {
         .into()
 }
 
+/// Size of a rendered sticker in a conversation (logical px).
+const STICKER_SIZE: f32 = 180.0;
+/// Picker panel geometry (floating above the composer).
+const STICKER_PICKER_W: f32 = 360.0;
+const STICKER_PICKER_H: f32 = 420.0;
+/// Thumb cell size inside the picker grid (4 columns).
+const STICKER_THUMB: f32 = 64.0;
+
+/// Floating sticker picker anchored above the composer (left side): the
+/// installed packs, each with its title and a 4-column thumbnail grid.
+/// Clicking a thumbnail sends the sticker and closes the panel.
+fn sticker_picker_card<'a>(state: &'a State) -> Element<'a> {
+    let close = button(icon(Icon::Close, theme::ICON, 14.0))
+        .on_press(Message::CloseStickerPicker)
+        .padding(6)
+        .style(flat_button);
+
+    let mut body: iced::widget::Column<'a, Message> = column![].spacing(10);
+    if state.sticker_sets.is_empty() {
+        body = body.push(
+            container(
+                text("Loading packs…")
+                    .size(theme::font::MESSAGE)
+                    .color(rgb(theme::TEXT_SECONDARY)),
+            )
+            .width(Length::Fill)
+            .padding(24),
+        );
+    }
+    for (si, set) in state.sticker_sets.iter().enumerate() {
+        body = body.push(
+            text(format!("{} ({})", set.title, set.docs.len()))
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(theme::ICON))
+                .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+        );
+        for (row_i, chunk) in set.docs.chunks(4).enumerate() {
+            let mut cells: iced::widget::Row<'a, Message> = row![].spacing(6);
+            for (col_i, (doc_id, _, _alt)) in chunk.iter().enumerate() {
+                let di = row_i * 4 + col_i;
+                let cell: Element<'a> = match state.sticker_thumbs.get(doc_id) {
+                    Some(path) => button(
+                        container(
+                            image(image::Handle::from_path(path))
+                                .width(Length::Fixed(STICKER_THUMB))
+                                .height(Length::Fixed(STICKER_THUMB))
+                                .content_fit(iced::ContentFit::Contain),
+                        )
+                        .width(STICKER_THUMB)
+                        .height(STICKER_THUMB)
+                        .style(|_| container::Style {
+                            background: Some(iced::Background::Color(rgb(theme::INPUT_FILL))),
+                            border: iced::Border { radius: 12.0.into(), ..Default::default() },
+                            ..container::Style::default()
+                        }),
+                    )
+                    .on_press(Message::StickerPicked(si, di))
+                    .padding(2)
+                    .style(flat_button)
+                    .into(),
+                    None => container(
+                        icon(Icon::Sticker, theme::DIVIDER, 22.0),
+                    )
+                    .width(STICKER_THUMB)
+                    .height(STICKER_THUMB)
+                    .align_x(iced::alignment::Horizontal::Center)
+                    .align_y(iced::alignment::Vertical::Center)
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(rgb(theme::INPUT_FILL))),
+                        border: iced::Border { radius: 12.0.into(), ..Default::default() },
+                        ..container::Style::default()
+                    })
+                    .into(),
+                };
+                cells = cells.push(cell);
+            }
+            body = body.push(cells);
+        }
+    }
+
+    let card = container(
+        column![
+            row![
+                text("Stickers")
+                    .size(theme::font::NAME)
+                    .color(Color::WHITE)
+                    .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+                horizontal_spacer(),
+                close,
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            scrollable(body).height(Length::Fill),
+        ]
+        .spacing(10),
+    )
+    .width(STICKER_PICKER_W)
+    .height(STICKER_PICKER_H)
+    .padding(14)
+    .style(menu_bg);
+
+    container(card)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::Start)
+        .align_y(Alignment::End)
+        .padding([0.0, 12.0])
+        .into()
+}
+
 /// Full-pane modal listing the chats as forward destinations. Rendered on
 /// top of the conversation pane when a "Forward" is armed; Escape or the
 /// header ✕ cancels.
-fn forward_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
+fn forward_layer<'a>(state: &'a State) -> Element<'a> {
     let mut rows = column![].spacing(2);
     for d in &state.dialogs {
         rows = rows.push(
@@ -1465,25 +1672,20 @@ fn forward_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
     .padding(14)
     .style(menu_bg);
 
-    // Dim + center the card over the conversation pane.
-    let _ = under;
+    // Centered card, no scrim (GL: translucent layers hide the app).
     container(card)
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
         .center_y(Length::Fill)
-        .style(|_| container::Style {
-            background: Some(iced::Background::Color(Color::from_rgba8(0, 0, 0, 160.0))),
-            ..container::Style::default()
-        })
         .into()
 }
 
 /// Centered modal creating a group or channel: title (+ description for
 /// channels), checkable member list for groups, Create/Cancel buttons.
-fn create_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
+fn create_layer<'a>(state: &'a State) -> Element<'a> {
     let Some(kind) = state.create_dialog else {
-        return under;
+        return horizontal_spacer();
     };
     let title = match kind {
         state::CreateKind::Group => "New Group",
@@ -1586,13 +1788,13 @@ fn create_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
         .align_y(Alignment::Center),
     );
 
-    dim_centered(card.width(340.0).padding(16), under)
+    centered_over(card.width(340.0).padding(16))
 }
 
 /// Centered confirmation dialog before leaving/deleting a chat.
-fn confirm_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
+fn confirm_layer<'a>(state: &'a State) -> Element<'a> {
     let Some((kind, _)) = state.confirm_leave else {
-        return under;
+        return horizontal_spacer();
     };
     let (question, action) = match kind {
         state::ConfirmKind::Leave => ("Leave chat?", "Leave"),
@@ -1622,21 +1824,17 @@ fn confirm_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
         .align_y(Alignment::End),
     ]
     .spacing(14);
-    dim_centered(card.width(280.0).padding(18), under)
+    centered_over(card.width(280.0).padding(18))
 }
 
-/// Dims `under` and centers `card` over it (shared modal chrome).
-fn dim_centered<'a>(card: impl Into<Element<'a>>, under: Element<'a>) -> Element<'a> {
-    let _ = under;
+/// Centers a modal card over the app (no translucent scrim — see the GL
+/// note on `info_layer`). The card's own surface separates it from the UI.
+fn centered_over<'a>(card: impl Into<Element<'a>>) -> Element<'a> {
     container(card.into())
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
         .center_y(Length::Fill)
-        .style(|_| container::Style {
-            background: Some(iced::Background::Color(Color::from_rgba8(0, 0, 0, 160.0))),
-            ..container::Style::default()
-        })
         .into()
 }
 
@@ -1691,10 +1889,8 @@ fn chat_header(
 
     container(
         row![
-            button(icon(Icon::Back, theme::ICON, 18.0))
-                .on_press(Message::BackToChats)
-                .padding(8)
-                .style(flat_button),
+            // No back button: like Telegram Desktop, a chat always stays
+            // open (the first one auto-opens at startup).
             // Avatar + name open/close the info panel (same as the ℹ️ icon).
             button(
                 row![
@@ -1729,6 +1925,112 @@ fn chat_header(
     .into()
 }
 
+// ---------------------------------------------------------------------------
+// Emoji picker panel (composer)
+// ---------------------------------------------------------------------------
+
+/// Size of the floating emoji panel (logical px).
+const EMOJI_PANEL_W: f32 = 340.0;
+const EMOJI_PANEL_H: f32 = 280.0;
+/// Emoji grid columns.
+const EMOJI_COLS: usize = 8;
+/// Rendered size of one emoji glyph in the grid.
+const EMOJI_FONT_SIZE: f32 = 22.0;
+
+/// Anchors the panel above the composer's left edge inside the stack layer.
+fn emoji_panel_floated(state: &State) -> Element<'_> {
+    container(emoji_panel(state))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::Start)
+        .align_y(Alignment::End)
+        .padding([0.0, 12.0])
+        .into()
+}
+
+/// The emoji picker card: "Recents" (or a starter set until anything was
+/// picked) followed by the standard groups, scrollable when tall.
+fn emoji_panel(state: &State) -> Element<'_> {
+    let mut content = column![].spacing(6);
+
+    let recents = if state.emoji_recents.is_empty() {
+        crate::emoji::RECENTS_FALLBACK.to_string()
+    } else {
+        state.emoji_recents.join(" ")
+    };
+    content = content.push(emoji_section_label("Recents"));
+    content = content.push(emoji_grid(&recents));
+
+    for (title, set) in crate::emoji::SETS {
+        content = content.push(emoji_section_label(title));
+        content = content.push(emoji_grid(set));
+    }
+
+    container(
+        scrollable(content)
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .width(EMOJI_PANEL_W)
+    .height(EMOJI_PANEL_H)
+    .padding(10)
+    .style(menu_bg)
+    .into()
+}
+
+fn emoji_section_label(title: &str) -> Element<'_> {
+    text(title.to_string())
+        .size(theme::font::TIMESTAMP)
+        .color(rgb(theme::TEXT_SECONDARY))
+        .into()
+}
+
+/// Font used to render emoji glyphs in color.
+///
+/// The system color-emoji font is requested by family name; if absent the
+/// engine falls back to whatever covers the codepoints (monochrome).
+fn emoji_font() -> iced::Font {
+    #[cfg(target_os = "macos")]
+    {
+        iced::Font::with_name("Apple Color Emoji")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        iced::Font::with_name("Segoe UI Emoji")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        iced::Font::with_name("Noto Color Emoji")
+    }
+}
+
+/// One 8-column grid of emoji buttons (transparent, light hover).
+///
+/// Cells explicitly request the system color-emoji font: the default
+/// font chain resolves some codepoints (❤ ⚠ ✂ …) to monochrome outlines
+/// in text fonts like DejaVu before reaching Noto Color Emoji.
+fn emoji_grid(emojis: &str) -> Element<'static> {
+    let mut grid = column![].spacing(2);
+    for line in emojis.split_whitespace().collect::<Vec<_>>().chunks(EMOJI_COLS) {
+        let mut r = row![].spacing(2);
+        for e in line {
+            r = r.push(
+                button(
+                    text(e.to_string())
+                        .size(EMOJI_FONT_SIZE)
+                        .font(emoji_font()),
+                )
+                .on_press(Message::EmojiPicked((*e).to_string()))
+                .width(Length::Fixed(38.0))
+                .height(Length::Fixed(32.0))
+                .style(|t, s| menu_item_style(t, s, false)),
+            );
+        }
+        grid = grid.push(r);
+    }
+    grid.into()
+}
+
 /// Composer bar: rounded field + attach (or edit check) + send button, with
 /// the reply preview bar stacked above when a reply is armed.
 fn composer_bar(state: &State) -> Element<'_> {
@@ -1753,7 +2055,14 @@ fn composer_bar(state: &State) -> Element<'_> {
             .style(accent_circle_button)
     };
 
+    // Smiley opens the emoji panel; it sits left of the field.
+    let emoji_btn = button(icon(Icon::Smile, theme::ICON, 20.0))
+        .on_press(Message::EmojiToggle)
+        .padding(8)
+        .style(flat_button);
+
     let bar = row![
+        emoji_btn,
         container(field)
             .width(Length::Fill)
             .height(theme::layout::INPUT_H)
@@ -1803,15 +2112,26 @@ fn composer_bar(state: &State) -> Element<'_> {
     }
     col = col.push(bar);
 
-    // The attach button sits left of the field (hidden while editing).
+    // The attach + sticker buttons sit left of the field (hidden while
+    // editing). The sticker button toggles the floating picker panel.
     let with_attach: Element<'_> = if state.editing.is_some() {
         col.into()
     } else {
+        let sticker_btn: Element<'_> = if state.open_chat.is_some() {
+            button(icon(Icon::Sticker, theme::ICON, 20.0))
+                .on_press(Message::ToggleStickerPicker)
+                .padding(8)
+                .style(flat_button)
+                .into()
+        } else {
+            horizontal_spacer()
+        };
         row![
             button(icon(Icon::Paperclip, theme::ICON, 20.0))
                 .on_press(Message::AttachFile)
                 .padding(8)
                 .style(flat_button),
+            sticker_btn,
             col,
         ]
         .spacing(4)
@@ -1834,6 +2154,10 @@ fn composer_bar(state: &State) -> Element<'_> {
 /// `pane_w` is the conversation pane width used to size the bubble (received:
 /// 70% of the pane, sent: 60%, matching the winit client).
 fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> Element<'a> {
+    // Stickers render frameless (no bubble): centered image + timestamp.
+    if m.sticker.is_some() {
+        return sticker_message_row(idx, m);
+    }
     // Bubble width (received: 70% of the pane, sent: 60%).
     let bubble_w = if m.out { pane_w * 0.6 } else { pane_w * 0.7 };
 
@@ -1843,7 +2167,7 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
             .messages
             .iter()
             .find(|r| r.id == reply_id)
-            .map(|r| crate::state::preview_text(&r.text, &r.photo, &r.doc))
+            .map(|r| crate::state::preview_text(&r.text, &r.photo, &r.doc, &r.sticker))
             .unwrap_or_else(|| "Original message".to_string());
         Some(quote_block("Reply", snippet))
     } else {
@@ -2129,6 +2453,79 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
         .into()
 }
 
+/// Frameless sticker row: centered image (no bubble, no background), the
+/// group sender name above it and a discreet timestamp below.
+fn sticker_message_row<'a>(idx: usize, m: &'a MsgRow) -> Element<'a> {
+    // Sender name only for incoming group messages that show names anyway.
+    let sender_line: Option<Element<'a>> = if !m.out {
+        m.sender_name.as_ref().map(|name| {
+            text(name.clone())
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(sender_color(m.sender_id)))
+                .font(iced::Font { weight: iced::font::Weight::Semibold, ..iced::Font::DEFAULT })
+                .into()
+        })
+    } else {
+        None
+    };
+
+    let img: Element<'a> = match &m.sticker_path {
+        Some(path) => image(image::Handle::from_path(path))
+            .width(Length::Fixed(STICKER_SIZE))
+            .height(Length::Fixed(STICKER_SIZE))
+            .content_fit(iced::ContentFit::Contain)
+            .into(),
+        None => container(
+            text("…")
+                .size(theme::font::NAME)
+                .color(rgb(theme::TEXT_SECONDARY)),
+        )
+        .width(STICKER_SIZE)
+        .height(STICKER_SIZE)
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center)
+        .into(),
+    };
+
+    let ts = if m.date > 0 {
+        theme::cached_time(m.date)
+    } else {
+        String::new()
+    };
+    let meta: Element<'_> = if m.out {
+        let tick: Element<'_> = if m.read {
+            icon(Icon::Tick { read: true }, theme::ACCENT, 15.0)
+        } else {
+            icon(Icon::Tick { read: false }, theme::TEXT_SECONDARY, 15.0)
+        };
+        row![tick, text(ts).size(theme::font::TIMESTAMP).color(rgb(theme::TEXT_SECONDARY))]
+            .spacing(6)
+            .into()
+    } else {
+        text(ts)
+            .size(theme::font::TIMESTAMP)
+            .color(rgb(theme::TEXT_SECONDARY))
+            .into()
+    };
+
+    let mut stack: iced::widget::Column<'a, Message> = column![];
+    if let Some(s) = sender_line {
+        stack = stack.push(container(s).width(Length::Fill).align_x(iced::alignment::Horizontal::Center));
+    }
+    stack = stack.push(img);
+    stack = stack.push(container(meta).width(Length::Fill).align_x(iced::alignment::Horizontal::Center));
+    stack = stack.spacing(4);
+
+    let wrapped = mouse_area(stack)
+        .on_press(Message::RowClicked(idx))
+        .on_right_press(Message::RowContext(idx));
+
+    container(wrapped)
+        .padding([0.0, theme::layout::MSG_PAD_X])
+        .width(Length::Fill)
+        .into()
+}
+
 /// The quoted block inside a bubble (reply preview / forward origin): an
 /// accent bar + two lines of small text.
 fn quote_block(label: &str, content: String) -> Element<'static> {
@@ -2254,7 +2651,7 @@ const PINNED_BANNER_H: f32 = 34.0;
 /// Thin banner showing the pinned message: pin icon + label + snippet.
 /// Clicking jumps to the message in the list.
 fn pinned_banner(m: &MsgRow) -> Element<'static> {
-    let snippet = crate::ellipsize(&state::preview_text(&m.text, &m.photo, &m.doc), 48);
+    let snippet = crate::ellipsize(&state::preview_text(&m.text, &m.photo, &m.doc, &m.sticker), 48);
     button(
         row![
             icon(Icon::Pin, theme::ACCENT, 14.0),
@@ -2630,6 +3027,15 @@ fn build_layout(state: &State, pane_w: f32, view_h: f32) -> crate::state::MsgLay
 /// width with `Contain`, caption gets a 6 px gap, bubble padding is
 /// [`theme::layout::BUBBLE_PAD_X`]/[`theme::layout::BUBBLE_PAD_Y`]).
 fn est_row_height(m: &MsgRow, pane_w: f32) -> f32 {
+    // Stickers: fixed-size frameless block (image + timestamp + gaps).
+    if m.sticker.is_some() {
+        let sender_h = if m.sender_name.is_some() && !m.out {
+            theme::font::TIMESTAMP * 1.3 + 4.0
+        } else {
+            0.0
+        };
+        return STICKER_SIZE + sender_h + theme::font::TIMESTAMP * 1.3 + 12.0;
+    }
     let bubble_w = if m.out { pane_w * 0.6 } else { pane_w * 0.7 };
     let inner = (bubble_w - 2.0 * theme::layout::BUBBLE_PAD_X).max(1.0);
     let font_h = theme::font::MESSAGE;
@@ -3111,6 +3517,66 @@ mod tests {
     }
 
     #[test]
+    fn sticker_rows_render_headlessly_with_fixed_height() {
+        use crate::bridge::StickerMeta;
+
+        let (req_tx, _req_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::new(req_tx);
+        state.authenticated = true;
+        state.open_chat = Some(42);
+        state.messages = vec![
+            MsgRow {
+                sticker: Some(StickerMeta { alt: "🎉".into() }),
+                sticker_path: Some("/nonexistent/sticker.webp".into()),
+                sender_name: Some("Léo".into()),
+                sender_id: Some(7),
+                ..MsgRow::text(1, String::new(), 100, false)
+            },
+            MsgRow {
+                sticker: Some(StickerMeta { alt: "⭐".into() }),
+                // Not downloaded yet: placeholder branch.
+                ..MsgRow::text(2, String::new(), 101, true)
+            },
+            MsgRow::text(3, "plain text neighbour", 102, false),
+        ];
+
+        // The exact per-frame entry point must build every variant without
+        // touching the image file (decoding happens at raster time).
+        let el = std::hint::black_box(messages_list(&state, 820.0, 610.0));
+        let _ = el;
+
+        // Height estimate: fixed-size block, independent of the pane width.
+        let h_narrow = est_row_height(&state.messages[0], 400.0);
+        let h_wide = est_row_height(&state.messages[0], 1200.0);
+        assert_eq!(h_narrow, h_wide, "sticker rows have a fixed height");
+        assert!(h_wide > 180.0 && h_wide < 320.0, "sane magnitude, got {h_wide}");
+        // Sender name adds a line for incoming group stickers only.
+        let out_h = est_row_height(&state.messages[1], 800.0);
+        assert!(out_h < h_wide, "no sender line on outgoing stickers");
+    }
+
+    #[test]
+    fn sticker_picker_overlay_renders_in_all_states() {
+        use crate::bridge::StickerSetBridge;
+
+        let (req_tx, _req_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::new(req_tx);
+        state.authenticated = true;
+        state.open_chat = Some(42);
+        // Empty (loading) picker.
+        state.sticker_picker_open = true;
+        let _ = std::hint::black_box(chat_view(&state));
+        // Loaded packs + thumbnails.
+        state.sticker_sets = vec![StickerSetBridge {
+            title: "Happy Blocks".into(),
+            short_name: "happy_blocks".into(),
+            docs: (0..8).map(|i| (900_000_000 + i, 10 * i, format!("{i}"))).collect(),
+        }];
+        state.sticker_thumbs.insert(900_000_000, "/nonexistent/thumb.webp".into());
+        let _ = std::hint::black_box(chat_view(&state));
+    }
+
+    #[test]
     fn dialog_list_virtualizes_without_panicking() {
         use crate::bridge::UiMessage;
 
@@ -3179,6 +3645,22 @@ mod tests {
         state.ask_confirm(ConfirmKind::Delete, 1);
         let _ = std::hint::black_box(chat_view(&state));
         state.cancel_confirm();
+    }
+
+    #[test]
+    fn emoji_panel_renders_without_panicking() {
+        let (req_tx, _req_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::new(req_tx);
+        state.authenticated = true;
+        state.open_chat = Some(42);
+        state.chat_title = "Test".into();
+        state.messages = vec![MsgRow::text(1, "hello", 100, false)];
+        // Panel open, with and without persisted recents.
+        state.toggle_emoji_panel();
+        let _ = std::hint::black_box(chat_view(&state));
+        state.pick_emoji("🎉".into());
+        state.pick_emoji("😀".into());
+        let _ = std::hint::black_box(chat_view(&state));
     }
 
     #[test]

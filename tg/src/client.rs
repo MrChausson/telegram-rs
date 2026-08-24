@@ -10,7 +10,7 @@ use grammers_client::tl;
 use grammers_mtsender::SenderPool;
 use grammers_session::updates::UpdatesLike;
 
-use crate::model::{ChatDetail, ChatInfo, ChatKind, ForwardInfo, GlobalHit, MediaKind, MessageInfo, ParticipantRow, ParticipantRole};
+use crate::model::{ChatDetail, ChatInfo, ChatKind, ForwardInfo, GlobalHit, MediaKind, MessageInfo, ParticipantRow, ParticipantRole, StickerDoc, StickerSetInfo};
 use crate::session::FileSession;
 
 /// Wrapped Telegram client with the network runtime running in the background.
@@ -456,6 +456,216 @@ impl Telegram {
         Ok(Some(cached))
     }
 
+    /// Downloads a message's sticker into `dir` (`{msg_id}.webp`), returning
+    /// the saved path, or `None` if the message carries no sticker. Cached on
+    /// disk by message id like photos/documents.
+    pub async fn download_sticker(
+        &self,
+        peer_ref: &grammers_session::types::PeerRef,
+        msg_id: i32,
+        dir: &std::path::Path,
+    ) -> Result<Option<std::path::PathBuf>> {
+        std::fs::create_dir_all(dir)?;
+        let cached = dir.join(format!("{msg_id}.webp"));
+        if cached.exists() {
+            return Ok(Some(cached));
+        }
+        let msgs = self
+            .client
+            .get_messages_by_id(*peer_ref, &[msg_id])
+            .await
+            .context("fetching message")?;
+        let Some(Some(msg)) = msgs.into_iter().next() else {
+            return Ok(None);
+        };
+        let Some(Media::Document(doc)) = msg.media().clone() else {
+            return Ok(None);
+        };
+        // Only cache actual stickers here (keeps the sticker cache clean when
+        // a caller races with a re-classified document).
+        if !matches!(
+            media_kind_of_document(&doc),
+            Some(MediaKind::Sticker { .. })
+        ) {
+            return Ok(None);
+        }
+        let mut it = self.client.iter_download(&doc);
+        let mut bytes = Vec::new();
+        while let Some(chunk) = it.next().await? {
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let tmp = dir.join(format!("{msg_id}.tmp"));
+        std::fs::write(&tmp, &bytes)?;
+        std::fs::rename(&tmp, &cached)?;
+        Ok(Some(cached))
+    }
+
+    /// Sends an existing sticker (by its document id + access hash) to a chat,
+    /// optionally as a reply. Returns the id of the sent message.
+    ///
+    /// The document reference is rebuilt from the picker listing; Telegram
+    /// resolves it back to the original sticker (attribute preserved).
+    pub async fn send_sticker(
+        &self,
+        peer: &grammers_session::types::PeerRef,
+        doc_id: i64,
+        access_hash: i64,
+        file_reference: Vec<u8>,
+        reply_to: Option<i32>,
+    ) -> Result<i32> {
+        use grammers_client::message::InputMessage;
+        let input_doc = tl::enums::InputDocument::Document(tl::types::InputDocument {
+            id: doc_id,
+            access_hash,
+            file_reference,
+        });
+        let media = tl::enums::InputMedia::Document(tl::types::InputMediaDocument {
+            spoiler: false,
+            id: input_doc,
+            video_cover: None,
+            video_timestamp: None,
+            ttl_seconds: None,
+            query: None,
+        });
+        let input = InputMessage::new().reply_to(reply_to).media(media);
+        let sent = self
+            .client
+            .send_message(*peer, input)
+            .await
+            .context("sending sticker")?;
+        Ok(sent.id())
+    }
+
+    /// Downloads a sticker picker thumbnail by reference into `dir`,
+    /// returning the saved path. Prefers the small server-side thumbnail
+    /// (`thumb_size="s"` — always a decodable jpeg/webp); animated formats
+    /// (.tgs/.webm) only exist as full documents, which this pipeline cannot
+    /// decode, so the thumbnail is the reliable source. Cached on disk.
+    pub async fn download_sticker_doc(
+        &self,
+        doc_id: i64,
+        access_hash: i64,
+        file_reference: Vec<u8>,
+        dir: &std::path::Path,
+    ) -> Result<Option<std::path::PathBuf>> {
+        std::fs::create_dir_all(dir)?;
+        // Cache probe first (both extensions we may have written).
+        let cached_webp = dir.join(format!("{doc_id}.webp"));
+        let cached_jpg = dir.join(format!("{doc_id}.jpg"));
+        if cached_webp.exists() {
+            return Ok(Some(cached_webp));
+        }
+        if cached_jpg.exists() {
+            return Ok(Some(cached_jpg));
+        }
+        let location_for = |thumb: &str| {
+            tl::enums::InputFileLocation::InputDocumentFileLocation(
+                tl::types::InputDocumentFileLocation {
+                    id: doc_id,
+                    access_hash,
+                    file_reference: file_reference.clone(),
+                    thumb_size: thumb.to_string(),
+                },
+            )
+        };
+        for size in ["s", ""] {
+            let mut it = self.client.iter_download(&RawPhoto(location_for(size)));
+            let mut bytes = Vec::new();
+            while let Some(chunk) = it.next().await? {
+                bytes.extend_from_slice(&chunk);
+            }
+            if !Self::decodable_image(&bytes) {
+                continue;
+            }
+            let ext = if bytes.starts_with(b"\xff\xd8") { "jpg" } else { "webp" };
+            let cached = dir.join(format!("{doc_id}.{ext}"));
+            let tmp = dir.join(format!("{doc_id}.tmp"));
+            std::fs::write(&tmp, &bytes)?;
+            std::fs::rename(&tmp, &cached)?;
+            return Ok(Some(cached));
+        }
+        Ok(None)
+    }
+
+    /// True when the payload is an image this app can decode (jpeg or webp
+    /// raster). Animated sticker payloads (.tgs gzip / .webm container) are
+    /// rejected here so callers keep showing placeholders instead of broken
+    /// images.
+    fn decodable_image(bytes: &[u8]) -> bool {
+        bytes.starts_with(b"\xff\xd8")                       // jpeg
+            || bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
+    }
+
+    /// Lists the installed sticker packs with their documents (picker data).
+    ///
+    /// `messages.getAllStickers` returns only pack metadata; the actual
+    /// sticker documents come from one `messages.getStickerSet` call per pack
+    /// (capped at [`STICKER_SETS_LIMIT`] packs to bound round-trips). Packs
+    /// whose fetch fails are skipped — a partial picker beats an error page.
+    pub async fn sticker_sets(&self) -> Result<Vec<StickerSetInfo>> {
+        const SETS_LIMIT: usize = 12;
+        const DOCS_LIMIT: usize = 60;
+        let all = self
+            .client
+            .invoke(&tl::functions::messages::GetAllStickers { hash: 0 })
+            .await
+            .context("listing sticker sets")?;
+        let sets = match all {
+            tl::enums::messages::AllStickers::Stickers(a) => a.sets,
+            tl::enums::messages::AllStickers::NotModified => return Ok(Vec::new()),
+        };
+        let mut out = Vec::new();
+        for set_enum in sets.into_iter().take(SETS_LIMIT) {
+            let tl::enums::StickerSet::Set(set) = set_enum;
+            let req = tl::functions::messages::GetStickerSet {
+                stickerset: tl::enums::InputStickerSet::ShortName(
+                    tl::types::InputStickerSetShortName {
+                        short_name: set.short_name.clone(),
+                    },
+                ),
+                hash: 0,
+            };
+            let Ok(res) = self.client.invoke(&req).await else {
+                continue;
+            };
+            let tl::enums::messages::StickerSet::Set(s) = res else {
+                continue;
+            };
+            // `s.set` is itself a single-constructor enum wrapper.
+            let tl::enums::StickerSet::Set(meta) = s.set;
+            let docs: Vec<StickerDoc> = s
+                .documents
+                .into_iter()
+                .take(DOCS_LIMIT)
+                .filter_map(|d| match d {
+                    tl::enums::Document::Document(raw) => {
+                        let alt = raw.attributes.iter().find_map(|a| match a {
+                            tl::enums::DocumentAttribute::Sticker(st) => Some(st.alt.clone()),
+                            _ => None,
+                        })?;
+                        Some(StickerDoc {
+                            id: raw.id,
+                            access_hash: raw.access_hash,
+                            alt,
+                            file_reference: raw.file_reference.clone(),
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+            out.push(StickerSetInfo {
+                title: meta.title,
+                short_name: meta.short_name,
+                count: docs.len(),
+                docs,
+            });
+        }
+        Ok(out)
+    }
+
     /// Uploads a file with progress reporting: `on_progress(bytes_sent,
     /// total)` is called at least every [`UPLOAD_PROGRESS_STEP`] bytes.
     ///
@@ -730,7 +940,10 @@ impl Telegram {
                         (
                             if name.is_empty() { "Unknown".to_string() } else { name },
                             username,
-                            u.phone.clone().filter(|p| !p.is_empty()),
+                            u.phone
+                                .clone()
+                                .filter(|p: &String| !p.is_empty())
+                                .map(|p| format!("+{p}")),
                             u.bot,
                         )
                     }
@@ -1130,6 +1343,15 @@ pub fn media_kind_of_document(doc: &grammers_client::media::Document) -> Option<
     use grammers_client::tl::enums::DocumentAttribute as Attr;
     for attr in &attributes {
         match attr {
+            // Sticker check MUST come first: animated stickers carry both a
+            // sticker and an Animated attribute, and they stay stickers.
+            Attr::Sticker(s) => {
+                return Some(MediaKind::Sticker {
+                    name,
+                    size,
+                    alt: s.alt.clone(),
+                })
+            }
             Attr::Video(v) => {
                 return Some(MediaKind::Video {
                     name,

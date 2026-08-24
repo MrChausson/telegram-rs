@@ -28,6 +28,24 @@ pub struct DocMeta {
     pub duration: Option<f64>,
 }
 
+/// Sticker attachment of a message (rendered frameless, no bubble).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StickerMeta {
+    /// Emoji associated with the sticker.
+    pub alt: String,
+}
+
+/// One sticker inside a picker set: `(doc_id, access_hash, alt)`.
+pub type StickerDocRef = (i64, i64, String);
+
+/// A sticker pack for the picker panel.
+#[derive(Debug, Clone)]
+pub struct StickerSetBridge {
+    pub title: String,
+    pub short_name: String,
+    pub docs: Vec<StickerDocRef>,
+}
+
 /// The kind of document attachment, mirrored from the UI so `app-iced`
 /// doesn't depend on the tg types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +76,10 @@ pub struct MsgRow {
     pub doc: Option<DocMeta>,
     /// On-disk path of the downloaded document, once fetched.
     pub doc_path: Option<String>,
+    /// Sticker attachment (rendered without a bubble), if any.
+    pub sticker: Option<StickerMeta>,
+    /// On-disk path of the downloaded sticker image, once fetched.
+    pub sticker_path: Option<String>,
     /// Id of the message this one replies to, if any.
     pub reply_to: Option<i32>,
     /// Display name of the forward origin, if the message was forwarded
@@ -91,6 +113,8 @@ impl MsgRow {
             photo_path: None,
             doc: None,
             doc_path: None,
+            sticker: None,
+            sticker_path: None,
             reply_to: None,
             forwarded_from: None,
             uploading: None,
@@ -211,6 +235,12 @@ pub enum Request {
     KickParticipant { id: i64, user_id: i64 },
     /// Downloads a message's document into the cache.
     DownloadDoc { chat_id: i64, msg_id: i32 },
+    /// Downloads a message's sticker image into the cache.
+    DownloadSticker { chat_id: i64, msg_id: i32 },
+    /// Sends an existing sticker (by document reference) to a chat.
+    SendSticker { id: i64, doc_id: i64, access_hash: i64 },
+    /// Lists the installed sticker packs (picker panel).
+    GetStickerSets,
     /// Searches messages (`id: None` = global, `Some` = that chat). The
     /// network layer throttles re-runs so typing doesn't flood MTProto.
     Search { id: Option<i64>, query: String },
@@ -243,6 +273,9 @@ pub enum UiMessage {
         out: bool,
         photo: Option<(u32, u32)>,
         doc: Option<DocMeta>,
+        /// Sticker attachment (emoji only; the image streams in via
+        /// `StickerPathReady`).
+        sticker: Option<StickerMeta>,
         reply_to: Option<i32>,
         forwarded_from: Option<String>,
         sender_name: Option<String>,
@@ -267,6 +300,17 @@ pub enum UiMessage {
         msg_id: i32,
         path: Option<String>,
     },
+    /// A sticker image was downloaded (path = on-disk location, `None` when
+    /// the fetch failed or the sticker can't be rendered).
+    StickerPathReady {
+        chat_id: i64,
+        msg_id: i32,
+        path: Option<String>,
+    },
+    /// A picker thumbnail was downloaded (`doc_id` keys it; path = location).
+    StickerThumbReady { doc_id: i64, path: Option<String> },
+    /// The installed sticker packs arrived (picker panel data).
+    StickerSets(Vec<StickerSetBridge>),
     /// Search results for `query`; `id` mirrors the `Request::Search` that
     /// produced them (`None` = global results).
     SearchResults {
