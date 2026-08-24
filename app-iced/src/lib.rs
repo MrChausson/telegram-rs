@@ -861,28 +861,59 @@ fn login_view(state: &State) -> Element<'_> {
 /// harness can drive the exact per-frame view headlessly. The creation modal
 /// and the leave/delete confirmation float over everything.
 pub fn chat_view(state: &State) -> Element<'_> {
-    // The photo viewer overlays the conversation pane only (sidebar stays
-    // visible): a full-window swap stalls GL presentation on close. The
-    // stack is ALWAYS present with an empty top layer when closed, so the
-    // message-list subtree keeps its identity across open/close cycles.
+    // ONE flat always-present stack holds every overlay (viewer, forward,
+    // create, confirm, info): closed overlays contribute an empty spacer so
+    // toggling never rewrites the tree shape, and NO stack nests another
+    // (nested stacks break GL compositing — dimmed layers render over black).
     let viewer_layer: Element<'_> = if state.viewer.is_some() {
         viewer_view(state)
     } else {
         horizontal_spacer()
     };
-    let conversation: Element<'_> =
-        iced::widget::stack![conversation_pane(state), viewer_layer].into();
-    let base: Element<'_> = row![list_pane(state), conversation].into();
-    let base = if state.create_dialog.is_some() {
-        create_overlay(state, base)
+    let fwd_layer: Element<'_> = if state.forward_pick.is_some() {
+        forward_layer(state)
     } else {
-        base
+        horizontal_spacer()
     };
-    if state.confirm_leave.is_some() {
-        confirm_overlay(state, base)
-    } else {
-        base
+    iced::widget::stack![
+        row![list_pane(state), conversation_pane(state)],
+        viewer_layer,
+        fwd_layer,
+        create_layer(state),
+        confirm_layer(state),
+        info_layer(state),
+    ]
+    .into()
+}
+
+/// Chat info as a floating right sheet over a dimmed app (pattern of the
+/// create modal): the conversation stays visible behind it.
+fn info_layer<'a>(state: &'a State) -> Element<'a> {
+    if !(state.info_open && state.open_chat.is_some()) {
+        return horizontal_spacer();
     }
+    // NOTE: no translucent scrim here — semi-transparent stack layers
+    // composite against the window clear color (black) on wgpu/GL, hiding
+    // the app behind them. The sheet carries its own border instead.
+    let sheet = container(info_panel(state))
+        .width(INFO_W)
+        .height(Length::Fill)
+        .padding([12.0, 0.0])
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(rgb(theme::LIST_BG))),
+            border: iced::Border {
+                radius: 0.0.into(),
+                width: 1.0,
+                color: rgb(theme::MENU_BORDER),
+            },
+            ..container::Style::default()
+        });
+    container(sheet)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::End)
+        .align_y(Alignment::Start)
+        .into()
 }
 
 /// Estimated dialog-row height (logical px): avatar diameter + the button's
@@ -1250,25 +1281,7 @@ fn conversation_pane(state: &State) -> Element<'_> {
 
     let pane = pane.push(top).push(body).push(composer).height(Length::Fill);
 
-    let pane: Element<'_> = if state.forward_pick.is_some() {
-        forward_overlay(state, pane.into())
-    } else {
-        pane.into()
-    };
-
-    // Right-hand info panel, when open: [conversation | divider | info].
-    if state.info_open && state.open_chat.is_some() {
-        return row![
-            pane,
-            container(iced::widget::Space::new())
-                .width(1.0)
-                .height(Length::Fill)
-                .style(divider),
-            info_panel(state),
-        ]
-        .into();
-    }
-    pane
+    pane.into()
 }
 
 /// Width of the right-hand chat-info side panel.
@@ -1614,7 +1627,7 @@ fn sticker_picker_card<'a>(state: &'a State) -> Element<'a> {
 /// Full-pane modal listing the chats as forward destinations. Rendered on
 /// top of the conversation pane when a "Forward" is armed; Escape or the
 /// header ✕ cancels.
-fn forward_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
+fn forward_layer<'a>(state: &'a State) -> Element<'a> {
     let mut rows = column![].spacing(2);
     for d in &state.dialogs {
         rows = rows.push(
@@ -1659,24 +1672,20 @@ fn forward_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
     .padding(14)
     .style(menu_bg);
 
-    // Dim + center the card over the conversation pane (pane stays visible).
-    let dim = container(card)
+    // Centered card, no scrim (GL: translucent layers hide the app).
+    container(card)
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
         .center_y(Length::Fill)
-        .style(|_| container::Style {
-            background: Some(iced::Background::Color(Color::from_rgba8(0, 0, 0, 160.0))),
-            ..container::Style::default()
-        });
-    iced::widget::stack![under, dim].into()
+        .into()
 }
 
 /// Centered modal creating a group or channel: title (+ description for
 /// channels), checkable member list for groups, Create/Cancel buttons.
-fn create_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
+fn create_layer<'a>(state: &'a State) -> Element<'a> {
     let Some(kind) = state.create_dialog else {
-        return under;
+        return horizontal_spacer();
     };
     let title = match kind {
         state::CreateKind::Group => "New Group",
@@ -1779,13 +1788,13 @@ fn create_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
         .align_y(Alignment::Center),
     );
 
-    dim_centered(card.width(340.0).padding(16), under)
+    centered_over(card.width(340.0).padding(16))
 }
 
 /// Centered confirmation dialog before leaving/deleting a chat.
-fn confirm_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
+fn confirm_layer<'a>(state: &'a State) -> Element<'a> {
     let Some((kind, _)) = state.confirm_leave else {
-        return under;
+        return horizontal_spacer();
     };
     let (question, action) = match kind {
         state::ConfirmKind::Leave => ("Leave chat?", "Leave"),
@@ -1815,22 +1824,18 @@ fn confirm_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
         .align_y(Alignment::End),
     ]
     .spacing(14);
-    dim_centered(card.width(280.0).padding(18), under)
+    centered_over(card.width(280.0).padding(18))
 }
 
-/// Dims `under` and centers `card` over it (shared modal chrome). The pane
-/// stays visible under the dim layer.
-fn dim_centered<'a>(card: impl Into<Element<'a>>, under: Element<'a>) -> Element<'a> {
-    let dim = container(card.into())
+/// Centers a modal card over the app (no translucent scrim — see the GL
+/// note on `info_layer`). The card's own surface separates it from the UI.
+fn centered_over<'a>(card: impl Into<Element<'a>>) -> Element<'a> {
+    container(card.into())
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
         .center_y(Length::Fill)
-        .style(|_| container::Style {
-            background: Some(iced::Background::Color(Color::from_rgba8(0, 0, 0, 160.0))),
-            ..container::Style::default()
-        });
-    iced::widget::stack![under, dim].into()
+        .into()
 }
 
 /// Chat header: back, avatar, name + status, search/info icons (+ FPS badge).
@@ -1884,10 +1889,8 @@ fn chat_header(
 
     container(
         row![
-            button(icon(Icon::Back, theme::ICON, 18.0))
-                .on_press(Message::BackToChats)
-                .padding(8)
-                .style(flat_button),
+            // No back button: like Telegram Desktop, a chat always stays
+            // open (the first one auto-opens at startup).
             // Avatar + name open/close the info panel (same as the ℹ️ icon).
             button(
                 row![

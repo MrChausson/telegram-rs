@@ -940,7 +940,10 @@ impl Telegram {
                         (
                             if name.is_empty() { "Unknown".to_string() } else { name },
                             username,
-                            u.phone.clone().filter(|p| !p.is_empty()),
+                            u.phone
+                                .clone()
+                                .filter(|p: &String| !p.is_empty())
+                                .map(|p| format!("+{p}")),
                             u.bot,
                         )
                     }
