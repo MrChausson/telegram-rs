@@ -6,7 +6,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **UI language switched to English**: every user-facing string (context menu,
+  pinned banner, composer, upload bar, media placeholders/actions, forward
+  overlay, search views, byte sizes, demo content) is now English.
+
 ### Added
+- **Group & channel creation**: a "+" button in the chat-list header opens a
+  New Group / New Channel picker; the modal takes a title (+ description for
+  channels) and, for groups, a checkable member list seeded from your known
+  contacts. Groups go through `messages.createChat` (initial invites), groups
+  without members and channels through `channels.createChannel`; the new chat
+  opens as soon as the server confirms.
+- **Leave or delete chats**: right-click a chat row for a Leave / Delete mini
+  menu with a confirmation dialog. Leaving ends membership (`channels.leaveChannel`
+  / `messages.deleteChatUser`), deleting removes the dialog from the account;
+  the list refreshes and the open chat closes if it was the one removed.
+- **Rename plumbing**: `EditChatTitle` request + network handler (channels via
+  `channels.editTitle`, basic groups via `messages.editChatTitle`), ready to be
+  wired to UI later.
 - **Chat info panel**: clicking the chat header (or the ℹ️ icon) opens a
   right-hand side panel with the chat's details — avatar, title, members
   count / presence, @username (click to copy), bio and phone. Quick actions
@@ -15,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   panel with role badges ("Owner" / "Admin") and an inline remove action
   (kick) with an in-panel confirmation step.
 - **Pinned messages**: pin/unpin any message from its context menu; a banner
-  under the chat header shows the pinned snippet ("Épinglé") and clicking it
+  under the chat header shows the pinned snippet ("Pinned") and clicking it
   jumps straight to the message in the list. Pin state syncs live across
   devices (`updatePinnedMessages`), and deleting the pinned message clears the
   banner.

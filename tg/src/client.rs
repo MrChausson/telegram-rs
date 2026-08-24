@@ -482,6 +482,119 @@ impl Telegram {
             .map_err(|e| anyhow::anyhow!("upload failed: {e}"))
     }
 
+    /// Creates a basic group chat titled `title`, inviting `users`.
+    ///
+    /// The caller supplies the resolved [`PeerRef`]s of the initial members
+    /// (the network layer keeps them for every known dialog); each one is
+    /// turned into an `InputUser` here using the access hash cached in the
+    /// session. An empty slice creates the group without members — more can
+    /// be invited later.
+    ///
+    /// Returns the bot-api id of the created chat (parsed from the updates
+    /// the server answers with).
+    pub async fn create_group(&self, title: &str, users: &[grammers_session::types::PeerRef]) -> Result<i64> {
+        let input_users: Vec<tl::enums::InputUser> = users
+            .iter()
+            .map(|p| {
+                tl::enums::InputUser::User(tl::types::InputUser {
+                    user_id: p.id.bare_id(),
+                    access_hash: p.auth.hash(),
+                })
+            })
+            .collect();
+        let res = self
+            .client
+            .invoke(&tl::functions::messages::CreateChat {
+                users: input_users,
+                title: title.to_string(),
+                ttl_period: None,
+            })
+            .await
+            .context("creating group")?;
+        // messages.createChat answers with messages.invitedUsers wrapping the
+        // Updates that carry the new chat.
+        let updates = match res {
+            tl::enums::messages::InvitedUsers::Users(i) => i.updates,
+        };
+        created_chat_id(updates).context("created chat not found in response")
+    }
+
+    /// Creates a channel (`megagroup=false`) or a supergroup
+    /// (`megagroup=true`) titled `title`, and returns its bot-api id.
+    pub async fn create_channel(&self, title: &str, about: &str, megagroup: bool) -> Result<i64> {
+        let res = self
+            .client
+            .invoke(&tl::functions::channels::CreateChannel {
+                broadcast: !megagroup,
+                megagroup,
+                for_import: false,
+                forum: false,
+                title: title.to_string(),
+                about: about.to_string(),
+                geo_point: None,
+                address: None,
+                ttl_period: None,
+            })
+            .await
+            .context("creating channel")?;
+        created_chat_id(res).context("created channel not found in response")
+    }
+
+    /// Leaves a chat: channels/supergroups via `channels.leaveChannel`,
+    /// basic groups via `messages.deleteChatUser` (with ourselves as user).
+    /// grammers' shared helper picks the right request per peer kind.
+    pub async fn leave_chat(&self, peer: &grammers_session::types::PeerRef) -> Result<()> {
+        self.client
+            .delete_dialog(*peer)
+            .await
+            .context("leaving chat")?;
+        Ok(())
+    }
+
+    /// Deletes a chat from the account (clears history and leaves it).
+    /// Same mechanics as leaving — this is Telegram's "delete dialog".
+    pub async fn delete_chat(&self, peer: &grammers_session::types::PeerRef) -> Result<()> {
+        self.client
+            .delete_dialog(*peer)
+            .await
+            .context("deleting chat")?;
+        Ok(())
+    }
+
+    /// Renames a chat: `channels.editTitle` for channels/supergroups,
+    /// `messages.editChatTitle` for basic groups.
+    pub async fn edit_chat_title(
+        &self,
+        peer: &grammers_session::types::PeerRef,
+        title: &str,
+    ) -> Result<()> {
+        match peer.id.kind() {
+            grammers_session::types::PeerKind::Channel => {
+                self.client
+                    .invoke(&tl::functions::channels::EditTitle {
+                        channel: tl::enums::InputChannel::Channel(tl::types::InputChannel {
+                            channel_id: peer.id.bare_id(),
+                            access_hash: peer.auth.hash(),
+                        }),
+                        title: title.to_string(),
+                    })
+                    .await
+                    .context("renaming channel")?;
+            }
+            grammers_session::types::PeerKind::Chat => {
+                self.client
+                    .invoke(&tl::functions::messages::EditChatTitle {
+                        chat_id: peer.id.bare_id(),
+                        title: title.to_string(),
+                    })
+                    .await
+                    .context("renaming chat")?;
+            }
+            _ => anyhow::bail!("only groups and channels can be renamed"),
+        }
+        Ok(())
+    }
+
     /// Stops the network runtime.
     pub async fn shutdown(self) {
         drop(self.client);
@@ -929,6 +1042,20 @@ impl Telegram {
         std::fs::rename(&tmp, cached)?;
         Ok(true)
     }
+}
+
+/// Extracts the bot-api id of the chat a creation call created: the server
+/// answers with `Updates` whose `chats` vector holds exactly the new
+/// group/channel.
+fn created_chat_id(updates: tl::enums::Updates) -> Option<i64> {
+    let tl::enums::Updates::Updates(u) = updates else {
+        return None;
+    };
+    u.chats.into_iter().find_map(|chat| match chat {
+        tl::enums::Chat::Chat(c) => Some(grammers_session::types::PeerId::chat(c.id).bot_api_dialog_id()),
+        tl::enums::Chat::Channel(c) => Some(grammers_session::types::PeerId::channel(c.id).bot_api_dialog_id()),
+        _ => None,
+    })
 }
 
 /// Downloadable wrapper over a raw Telegram photo location.

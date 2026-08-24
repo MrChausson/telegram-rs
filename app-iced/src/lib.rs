@@ -149,18 +149,45 @@ pub enum Message {
     RowClicked(usize),
     /// A message row was right-clicked (open context menu).
     RowContext(usize),
-    /// "Modifier" pressed in the context menu.
+    /// "Edit" pressed in the context menu.
     ContextEdit,
-    /// "Copier" pressed in the context menu.
+    /// "Copy" pressed in the context menu.
     ContextCopy,
-    /// "Supprimer" pressed in the context menu.
+    /// "Delete" pressed in the context menu.
     ContextDelete,
-    /// "Répondre" pressed in the context menu.
+    /// "Reply" pressed in the context menu.
     ContextReply,
-    /// "Épingler"/"Désépingler" pressed in the context menu.
+    /// "Pin"/"Unpin" pressed in the context menu.
     ContextPin,
     /// The pinned-message banner was clicked: jump to the message.
     PinnedClicked,
+    // -----------------------------------------------------------------
+    // Group/channel creation + chat management
+    // -----------------------------------------------------------------
+    /// The list header's "+" button: toggle the New Group/Channel picker.
+    OpenCreateMenu,
+    /// Picker item: create a group.
+    CreateGroup,
+    /// Picker item: create a channel.
+    CreateChannel,
+    /// The creation modal's title field changed.
+    CreateTitleChanged(String),
+    /// The creation modal's description field changed (channels).
+    CreateAboutChanged(String),
+    /// A contact checkbox in the member picker was toggled.
+    ToggleMember(usize),
+    /// The creation modal's "Create" button.
+    SubmitCreate,
+    /// The creation modal was cancelled (✕ / Escape).
+    CancelCreate,
+    /// A chat-list row was right-clicked: open its Leave/Delete mini menu.
+    RowMenu(i64),
+    /// A Leave/Delete confirmation was requested for a chat.
+    AskConfirm(state::ConfirmKind, i64),
+    /// The confirmation dialog's destructive button was pressed.
+    ConfirmYes,
+    /// The confirmation dialog was cancelled.
+    ConfirmNo,
     /// The chat header (or ℹ️) was clicked: toggle the right info panel.
     ToggleInfo,
     /// The info panel's ✕ was pressed.
@@ -175,7 +202,7 @@ pub enum Message {
     ConfirmKick,
     /// The reply bar's ✕ was pressed (cancel the armed reply).
     CancelReply,
-    /// "Transférer" pressed in the context menu (opens the chat picker).
+    /// "Forward" pressed in the context menu (opens the chat picker).
     ContextForward,
     /// A destination chat was picked in the forward overlay.
     ForwardTo(i64),
@@ -290,6 +317,18 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::ContextReply => state.context_reply(),
         Message::ContextPin => state.context_pin(),
         Message::PinnedClicked => state.jump_to_pinned(),
+        Message::OpenCreateMenu => state.toggle_create_menu(),
+        Message::CreateGroup => state.open_create(state::CreateKind::Group),
+        Message::CreateChannel => state.open_create(state::CreateKind::Channel),
+        Message::CreateTitleChanged(t) => state.create_title = t,
+        Message::CreateAboutChanged(a) => state.create_about = a,
+        Message::ToggleMember(idx) => state.toggle_member(idx),
+        Message::SubmitCreate => state.submit_create(),
+        Message::CancelCreate => state.cancel_create(),
+        Message::RowMenu(id) => state.open_row_menu(id),
+        Message::AskConfirm(kind, id) => state.ask_confirm(kind, id),
+        Message::ConfirmYes => state.confirm_yes(),
+        Message::ConfirmNo => state.cancel_confirm(),
         Message::ToggleInfo => {
             if state.info_open {
                 state.close_info();
@@ -327,7 +366,7 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             if std::path::Path::new(&path).exists() {
                 state.send_media(path);
             } else {
-                state.status = format!("Fichier introuvable : {path}");
+                state.status = format!("File not found: {path}");
             }
         }
         Message::FilePicked(None) => {}
@@ -526,9 +565,9 @@ fn view(state: &State) -> Element<'_> {
 /// a header with the back ✕ + query field, and the results list below.
 fn search_view(state: &State) -> Element<'_> {
     let mode_label = match state.search_mode {
-        Some(SearchMode::Global) => "Recherche dans tous les chats…",
-        Some(SearchMode::InChat) => "Rechercher dans ce chat…",
-        None => "Recherche…",
+        Some(SearchMode::Global) => "Search all chats…",
+        Some(SearchMode::InChat) => "Search this chat…",
+        None => "Search…",
     };
     let field = text_input(mode_label, &state.search_query)
         .on_input(Message::SearchChanged)
@@ -537,12 +576,12 @@ fn search_view(state: &State) -> Element<'_> {
 
     let mut results = column![].spacing(2);
     if state.search_query.trim().is_empty() {
-        results = results.push(search_hint("Tapez un mot-clé pour lancer la recherche…"));
+        results = results.push(search_hint("Type a keyword to start searching…"));
     } else if state.search_hits.is_empty() {
         if state.search_pending {
-            results = results.push(search_hint("Recherche…"));
+            results = results.push(search_hint("Searching…"));
         } else {
-            results = results.push(search_hint("Aucun résultat"));
+            results = results.push(search_hint("No results"));
         }
     } else {
         let highlighted = &state.search_query;
@@ -782,9 +821,20 @@ fn login_view(state: &State) -> Element<'_> {
 // ---------------------------------------------------------------------------
 
 /// Full chat UI (list pane + conversation pane). `pub` so the `benches/`
-/// harness can drive the exact per-frame view headlessly.
+/// harness can drive the exact per-frame view headlessly. The creation modal
+/// and the leave/delete confirmation float over everything.
 pub fn chat_view(state: &State) -> Element<'_> {
-    row![list_pane(state), conversation_pane(state)].into()
+    let base: Element<'_> = row![list_pane(state), conversation_pane(state)].into();
+    let base = if state.create_dialog.is_some() {
+        create_overlay(state, base)
+    } else {
+        base
+    };
+    if state.confirm_leave.is_some() {
+        confirm_overlay(state, base)
+    } else {
+        base
+    }
 }
 
 /// Estimated dialog-row height (logical px): avatar diameter + the button's
@@ -793,35 +843,39 @@ pub fn chat_view(state: &State) -> Element<'_> {
 /// cache needed.
 const DIALOG_ROW_H: f32 = theme::layout::AVATAR_LIST + 20.0;
 
-/// Left pane: "Chats" header + scrollable, virtualized, dialog list.
+/// Left pane: "Chats" header (+ "new group/channel" picker and the chat-row
+/// right-click menu as floating overlays) + scrollable, virtualized dialog
+/// list.
 fn list_pane(state: &State) -> Element<'_> {
     // The scrollable only knows its own height at layout time; `responsive`
     // hands it the viewport height used to pick the visible rows.
     let list = iced::widget::responsive(move |size| dialog_list(state, size.height));
 
-    column![
-        // Header bar: app logo + "Chats" + search. `align_y(Center)` keeps the
-        // row away from the top edge (the default is top-aligned, which made
-        // the left items hug the window border). The non-functional
-        // compose/dots glyphs were dropped: dead chrome reads as broken.
-        container(
-            row![
-                icon(Icon::Logo, theme::ACCENT, 26.0),
-                text("Chats").size(theme::font::TITLE).color(Color::WHITE),
-                horizontal_spacer(),
-                button(icon(Icon::Search, theme::ICON, 18.0))
-                    .on_press(Message::OpenGlobalSearch)
-                    .padding(7)
-                    .style(icon_button_style),
-            ]
-            .spacing(12)
-            .align_y(Alignment::Center)
-        )
-        .width(Length::Fill)
-        .height(theme::layout::LIST_HEADER_H)
-        .padding([0, 14])
-        .align_y(Alignment::Center)
-        .style(list_bg),
+    let header = container(
+        row![
+            icon(Icon::Logo, theme::ACCENT, 26.0),
+            text("Chats").size(theme::font::TITLE).color(Color::WHITE),
+            horizontal_spacer(),
+            button(icon(Icon::Plus, theme::ICON, 18.0))
+                .on_press(Message::OpenCreateMenu)
+                .padding(7)
+                .style(icon_button_style),
+            button(icon(Icon::Search, theme::ICON, 18.0))
+                .on_press(Message::OpenGlobalSearch)
+                .padding(7)
+                .style(icon_button_style),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .height(theme::layout::LIST_HEADER_H)
+    .padding([0, 14])
+    .align_y(Alignment::Center)
+    .style(list_bg);
+
+    let pane: Element<'_> = column![
+        header,
         container(list)
             .width(theme::layout::LIST_W)
             .height(Length::Fill)
@@ -829,7 +883,87 @@ fn list_pane(state: &State) -> Element<'_> {
     ]
     .width(theme::layout::LIST_W)
     .height(Length::Fill)
-    .into()
+    .into();
+
+    // Floating overlays anchored under the header (iced has no absolute
+    // positioning; a stack layer with top padding is the closest match).
+    if state.create_menu_open {
+        iced::widget::stack![pane, create_menu_layer()].into()
+    } else if state.row_menu.is_some() {
+        iced::widget::stack![pane, row_menu_layer(state)].into()
+    } else {
+        pane
+    }
+}
+
+/// The "+" picker menu: New Group / New Channel, floated under the header,
+/// right-aligned like a dropdown.
+fn create_menu_layer() -> Element<'static> {
+    let menu = container(
+        column![
+            menu_item(Message::CreateGroup, Icon::Compose, "New Group", false),
+            menu_item(
+                Message::CreateChannel,
+                Icon::Forward,
+                "New Channel",
+                false
+            ),
+        ]
+        .spacing(2),
+    )
+    .width(theme::layout::CONTEXT_W)
+    .padding(CONTEXT_MENU_PAD)
+    .style(menu_bg);
+
+    container(menu)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Right)
+        .padding(iced::Padding {
+            top: theme::layout::LIST_HEADER_H + 6.0,
+            right: 10.0,
+            ..Default::default()
+        })
+        .into()
+}
+
+/// The chat-row mini menu (Leave / Delete), floated under the header on the
+/// right side of the list pane.
+fn row_menu_layer(state: &State) -> Element<'static> {
+    let Some(id) = state.row_menu else {
+        return horizontal_spacer();
+    };
+    let menu = container(
+        column![
+            menu_item(
+                Message::AskConfirm(state::ConfirmKind::Leave, id),
+                Icon::Forward,
+                "Leave",
+                false
+            ),
+            menu_item(
+                Message::AskConfirm(state::ConfirmKind::Delete, id),
+                Icon::Trash,
+                "Delete",
+                true
+            ),
+        ]
+        .spacing(2),
+    )
+    .width(theme::layout::CONTEXT_W)
+    .padding(CONTEXT_MENU_PAD)
+    .style(menu_bg);
+
+    container(menu)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Right)
+        .padding(iced::Padding {
+            top: theme::layout::LIST_HEADER_H + 6.0,
+            right: 10.0,
+            ..Default::default()
+        })
+        .into()
 }
 
 /// Virtualized dialog list: only the rows intersecting the scrollable's
@@ -922,7 +1056,7 @@ fn chat_row_button<'a>(row: &'a ChatRow, selected: bool, title: &'a str, sub: &'
         horizontal_spacer()
     };
 
-    button(
+    let row_button = button(
         row![
             avatar,
             column![name, sub_text].spacing(2).width(Length::Fill),
@@ -934,8 +1068,13 @@ fn chat_row_button<'a>(row: &'a ChatRow, selected: bool, title: &'a str, sub: &'
     .on_press(Message::OpenChat(row.id))
     .width(Length::Fill)
     .padding([10, 14])
-    .style(move |theme, status| row_style(theme, status, selected))
-    .into()
+    .style(move |theme, status| row_style(theme, status, selected));
+
+    // Right-click opens the row's Leave/Delete mini menu; left clicks stay
+    // on the inner button.
+    mouse_area(row_button)
+        .on_right_press(Message::RowMenu(row.id))
+        .into()
 }
 
 /// Right pane: chat header + messages + composer (+ context menu overlay),
@@ -1279,7 +1418,7 @@ fn role_badge(role: bridge::ParticipantRole) -> Element<'static> {
 }
 
 /// Full-pane modal listing the chats as forward destinations. Rendered on
-/// top of the conversation pane when a "Transférer" is armed; Escape or the
+/// top of the conversation pane when a "Forward" is armed; Escape or the
 /// header ✕ cancels.
 fn forward_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
     let mut rows = column![].spacing(2);
@@ -1308,7 +1447,7 @@ fn forward_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
         column![
             row![
                 icon(Icon::Forward, theme::ACCENT, 16.0),
-                text("Transférer vers…").size(theme::font::NAME).color(Color::WHITE),
+                text("Forward to…").size(theme::font::NAME).color(Color::WHITE),
                 horizontal_spacer(),
                 button(icon(Icon::Close, theme::ICON, 14.0))
                     .on_press(Message::Escape)
@@ -1329,6 +1468,167 @@ fn forward_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
     // Dim + center the card over the conversation pane.
     let _ = under;
     container(card)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(Color::from_rgba8(0, 0, 0, 160.0))),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// Centered modal creating a group or channel: title (+ description for
+/// channels), checkable member list for groups, Create/Cancel buttons.
+fn create_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
+    let Some(kind) = state.create_dialog else {
+        return under;
+    };
+    let title = match kind {
+        state::CreateKind::Group => "New Group",
+        state::CreateKind::Channel => "New Channel",
+    };
+
+    let title_field = text_input("Title", &state.create_title)
+        .on_input(Message::CreateTitleChanged)
+        .on_submit(Message::SubmitCreate)
+        .padding(12)
+        .style(text_input_style);
+
+    let mut card = column![
+        row![
+            text(title).size(theme::font::NAME).color(Color::WHITE),
+            horizontal_spacer(),
+            button(icon(Icon::Close, theme::ICON, 14.0))
+                .on_press(Message::CancelCreate)
+                .padding(6)
+                .style(flat_button),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+        container(title_field)
+            .width(Length::Fill)
+            .height(40.0)
+            .style(field_rounded),
+    ]
+    .spacing(12);
+
+    if kind == state::CreateKind::Channel {
+        let about_field = text_input("Description", &state.create_about)
+            .on_input(Message::CreateAboutChanged)
+            .on_submit(Message::SubmitCreate)
+            .padding(12)
+            .style(text_input_style);
+        card = card.push(
+            container(about_field)
+                .width(Length::Fill)
+                .height(40.0)
+                .style(field_rounded),
+        );
+    } else {
+        // Groups: pick the initial members from the known contacts.
+        let mut members = column![
+            text("Members")
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(theme::TEXT_SECONDARY))
+        ]
+        .spacing(2);
+        for (i, (_, name, on)) in state.member_pick.iter().enumerate() {
+            let check: Element<'_> = if *on {
+                icon(Icon::Tick { read: true }, theme::ACCENT, 16.0)
+            } else {
+                horizontal_spacer()
+            };
+            members = members.push(
+                button(
+                    row![
+                        avatar_circle(None, name, 28.0),
+                        text(name)
+                            .size(theme::font::MESSAGE)
+                            .color(Color::WHITE)
+                            .wrapping(iced::widget::text::Wrapping::None),
+                        horizontal_spacer(),
+                        check,
+                    ]
+                    .spacing(10)
+                    .align_y(Alignment::Center),
+                )
+                .on_press(Message::ToggleMember(i))
+                .width(Length::Fill)
+                .padding([6, 8])
+                .style(|t, s| menu_item_style(t, s, false)),
+            );
+        }
+        card = card.push(
+            container(scrollable(members).height(Length::Fill))
+                .height(180.0)
+                .width(Length::Fill),
+        );
+    }
+
+    card = card.push(
+        row![
+            button(text("Cancel").size(theme::font::MESSAGE).color(rgb(theme::ICON)))
+                .on_press(Message::CancelCreate)
+                .padding([10, 18])
+                .style(flat_button),
+            button(
+                text("Create")
+                    .size(theme::font::MESSAGE)
+                    .color(Color::WHITE),
+            )
+            .on_press(Message::SubmitCreate)
+            .padding([10, 22])
+            .style(accent_button),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center),
+    );
+
+    dim_centered(card.width(340.0).padding(16), under)
+}
+
+/// Centered confirmation dialog before leaving/deleting a chat.
+fn confirm_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
+    let Some((kind, _)) = state.confirm_leave else {
+        return under;
+    };
+    let (question, action) = match kind {
+        state::ConfirmKind::Leave => ("Leave chat?", "Leave"),
+        state::ConfirmKind::Delete => ("Delete chat?", "Delete"),
+    };
+    let card = column![
+        text(question).size(theme::font::NAME).color(Color::WHITE),
+        row![
+            button(
+                text("Cancel")
+                    .size(theme::font::MESSAGE)
+                    .color(rgb(theme::ICON))
+            )
+            .on_press(Message::ConfirmNo)
+            .padding([10, 18])
+            .style(flat_button),
+            button(
+                text(action.to_string())
+                    .size(theme::font::MESSAGE)
+                    .color(rgb(theme::ERROR))
+            )
+            .on_press(Message::ConfirmYes)
+            .padding([10, 18])
+            .style(move |t, s| menu_item_style(t, s, true)),
+        ]
+        .spacing(10)
+        .align_y(Alignment::End),
+    ]
+    .spacing(14);
+    dim_centered(card.width(280.0).padding(18), under)
+}
+
+/// Dims `under` and centers `card` over it (shared modal chrome).
+fn dim_centered<'a>(card: impl Into<Element<'a>>, under: Element<'a>) -> Element<'a> {
+    let _ = under;
+    container(card.into())
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
@@ -1433,7 +1733,7 @@ fn chat_header(
 /// the reply preview bar stacked above when a reply is armed.
 fn composer_bar(state: &State) -> Element<'_> {
     let placeholder = if state.editing.is_some() {
-        "Modifier le message…"
+        "Edit message…"
     } else {
         "Message…"
     };
@@ -1470,7 +1770,7 @@ fn composer_bar(state: &State) -> Element<'_> {
                 row![
                     icon(Icon::Reply, theme::ACCENT, 16.0),
                     column![
-                        text("Réponse à")
+                        text("Reply to")
                             .size(theme::font::TIMESTAMP)
                             .color(rgb(theme::ACCENT)),
                         text(&reply.snippet)
@@ -1544,12 +1844,12 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
             .iter()
             .find(|r| r.id == reply_id)
             .map(|r| crate::state::preview_text(&r.text, &r.photo, &r.doc))
-            .unwrap_or_else(|| "Message original".to_string());
-        Some(quote_block("Réponse", snippet))
+            .unwrap_or_else(|| "Original message".to_string());
+        Some(quote_block("Reply", snippet))
     } else {
         m.forwarded_from
             .as_ref()
-            .map(|from| quote_block("Transféré", from.clone()))
+            .map(|from| quote_block("Forwarded", from.clone()))
     };
 
     // Bubble content: media card (video / gif / audio / voice / file), photo
@@ -1557,10 +1857,10 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
     let body: Element<'a> = if let Some(doc) = &m.doc {
         let doc_name = if doc.name.is_empty() {
             match doc.kind {
-                bridge::DocKind::Video => "Vidéo",
+                bridge::DocKind::Video => "Video",
                 bridge::DocKind::Gif => "GIF",
                 bridge::DocKind::Audio { .. } => "Audio",
-                bridge::DocKind::File => "Fichier",
+                bridge::DocKind::File => "File",
             }
             .to_string()
         } else {
@@ -1578,16 +1878,16 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
             meta.push_str(" · ");
         }
         let status = if m.uploading.is_some() {
-            "Envoi…".to_string()
+            "Uploading…".to_string()
         } else if m.doc_path.is_some() {
             match doc.kind {
-                bridge::DocKind::Audio { voice: true } => "Lire".to_string(),
-                _ => "Ouvrir".to_string(),
+                bridge::DocKind::Audio { voice: true } => "Play".to_string(),
+                _ => "Open".to_string(),
             }
         } else {
             match doc.kind {
-                bridge::DocKind::Audio { voice: true } => "Écouter".to_string(),
-                _ => "Télécharger".to_string(),
+                bridge::DocKind::Audio { voice: true } => "Listen".to_string(),
+                _ => "Download".to_string(),
             }
         };
         meta.push_str(&status);
@@ -1724,7 +2024,7 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
             .spacing(6)
             .into()
         } else {
-            placeholder_strip("Chargement de l'image…")
+            placeholder_strip("Loading image…")
         }
     } else {
         message_body(&m.text)
@@ -1864,7 +2164,7 @@ fn quote_block(label: &str, content: String) -> Element<'static> {
 fn uploading_bar(p: f32) -> Element<'static> {
     let pct = (p.clamp(0.0, 1.0) * 100.0).round();
     column![
-        text(format!("Envoi… {} %", pct))
+        text(format!("Uploading… {}%", pct))
             .size(theme::font::TIMESTAMP)
             .color(rgb(theme::TEXT_SECONDARY)),
         container(
@@ -1917,20 +2217,20 @@ fn placeholder_strip(label: &str) -> Element<'static> {
     .into()
 }
 
-/// Human-readable byte size ("1.5 Mo" style).
+/// Human-readable byte size ("1.5 MB" style).
 fn fmt_size(bytes: i64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * KB;
     const GB: f64 = MB * KB;
     let b = bytes.max(0) as f64;
     if b >= GB {
-        format!("{:.1} Go", b / GB)
+        format!("{:.1} GB", b / GB)
     } else if b >= MB {
-        format!("{:.1} Mo", b / MB)
+        format!("{:.1} MB", b / MB)
     } else if b >= KB {
-        format!("{:.0} Ko", b / KB)
+        format!("{:.0} KB", b / KB)
     } else {
-        format!("{bytes} o")
+        format!("{bytes} B")
     }
 }
 
@@ -1954,11 +2254,11 @@ const PINNED_BANNER_H: f32 = 34.0;
 /// Thin banner showing the pinned message: pin icon + label + snippet.
 /// Clicking jumps to the message in the list.
 fn pinned_banner(m: &MsgRow) -> Element<'static> {
-    let snippet = state::preview_text(&m.text, &m.photo, &m.doc);
+    let snippet = crate::ellipsize(&state::preview_text(&m.text, &m.photo, &m.doc), 48);
     button(
         row![
             icon(Icon::Pin, theme::ACCENT, 14.0),
-            text("Épinglé")
+            text("Pinned")
                 .size(theme::font::TIMESTAMP)
                 .color(rgb(theme::ACCENT)),
             text(snippet)
@@ -2013,7 +2313,7 @@ fn sender_color(id: Option<i64>) -> (u8, u8, u8) {
 }
 
 // ---------------------------------------------------------------------------
-// Context menu (Répondre / Transférer / Épingler / Modifier / Copier / Supprimer)
+// Context menu (Reply / Forward / Pin / Edit / Copy / Delete)
 // ---------------------------------------------------------------------------
 
 /// Height of one context-menu item (10 px padding per side + ~17 px text).
@@ -2071,27 +2371,27 @@ fn context_menu_bar(state: &State) -> Element<'static> {
         .is_some_and(|m| !m.text.is_empty());
 
     let mut items = column![].spacing(2);
-    items = items.push(menu_item(Message::ContextReply, Icon::Reply, "Répondre", false));
+    items = items.push(menu_item(Message::ContextReply, Icon::Reply, "Reply", false));
     items = items.push(menu_item(
         Message::ContextForward,
         Icon::Forward,
-        "Transférer",
+        "Forward",
         false,
     ));
     let pinned_label = if state.context_row_pinned() {
-        "Désépingler"
+        "Unpin"
     } else {
-        "Épingler"
+        "Pin"
     };
     items = items.push(menu_item(Message::ContextPin, Icon::Pin, pinned_label, false));
     if can_edit {
-        items = items.push(menu_item(Message::ContextEdit, Icon::Edit, "Modifier", false));
+        items = items.push(menu_item(Message::ContextEdit, Icon::Edit, "Edit", false));
     }
     if has_text {
-        items = items.push(menu_item(Message::ContextCopy, Icon::Copy, "Copier", false));
+        items = items.push(menu_item(Message::ContextCopy, Icon::Copy, "Copy", false));
     }
     if can_edit {
-        items = items.push(menu_item(Message::ContextDelete, Icon::Trash, "Supprimer", true));
+        items = items.push(menu_item(Message::ContextDelete, Icon::Trash, "Delete", true));
     }
 
     let menu_el = container(items)
@@ -2839,6 +3139,46 @@ mod tests {
         state.dialog_scroll_offset = 17_000.0;
         let el = std::hint::black_box(dialog_list(&state, 610.0));
         let _ = el;
+    }
+
+    #[test]
+    fn group_management_surfaces_render_without_panicking() {
+        use crate::bridge::UiMessage;
+        use crate::state::{ConfirmKind, CreateKind};
+
+        let (req_tx, _req_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::new(req_tx);
+        state.on_message(UiMessage::Dialogs(vec![ChatRow {
+            id: 1,
+            title: "Camille".into(),
+            subtitle: String::new(),
+            date: 0,
+            unread: 0,
+            avatar_path: None,
+        }]));
+
+        // Creation modals (group with member list, channel with description).
+        state.open_create(CreateKind::Group);
+        let _ = std::hint::black_box(chat_view(&state));
+        state.toggle_member(0);
+        let _ = std::hint::black_box(chat_view(&state));
+        state.open_create(CreateKind::Channel);
+        let _ = std::hint::black_box(chat_view(&state));
+        state.cancel_create();
+
+        // Header "+" picker.
+        state.toggle_create_menu();
+        let _ = std::hint::black_box(chat_view(&state));
+        state.toggle_create_menu();
+
+        // Chat-row mini menu then both confirmation variants.
+        state.open_row_menu(1);
+        let _ = std::hint::black_box(chat_view(&state));
+        state.ask_confirm(ConfirmKind::Leave, 1);
+        let _ = std::hint::black_box(chat_view(&state));
+        state.ask_confirm(ConfirmKind::Delete, 1);
+        let _ = std::hint::black_box(chat_view(&state));
+        state.cancel_confirm();
     }
 
     #[test]

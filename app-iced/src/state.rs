@@ -13,7 +13,7 @@ pub fn preview_text(text: &str, photo: &Option<(u32, u32)>, doc: &Option<DocMeta
         return text.to_string();
     }
     if let Some(doc) = doc {
-        let name = if doc.name.is_empty() { "Fichier" } else { &doc.name };
+        let name = if doc.name.is_empty() { "File" } else { &doc.name };
         return format!("📄 {name}");
     }
     if photo.is_some() {
@@ -61,6 +61,22 @@ pub enum LoginStep {
 pub struct ContextMenu {
     /// Index of the message row the menu is over.
     pub row: usize,
+}
+
+/// What the creation modal is currently creating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateKind {
+    Group,
+    Channel,
+}
+
+/// Destructive chat action awaiting user confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmKind {
+    /// Leave the group/channel.
+    Leave,
+    /// Delete the chat from the account.
+    Delete,
 }
 
 /// Where the search UI is currently searching.
@@ -127,6 +143,25 @@ pub struct State {
     pub context_menu: Option<ContextMenu>,
     /// Message id being edited; its old text lives in `composer`.
     pub editing: Option<i32>,
+
+    // -----------------------------------------------------------------
+    // Group/channel creation + chat management
+    // -----------------------------------------------------------------
+    /// The header "+" picker menu (New Group / New Channel) is open.
+    pub create_menu_open: bool,
+    /// Open creation modal, if any.
+    pub create_dialog: Option<CreateKind>,
+    /// Title typed in the creation modal.
+    pub create_title: String,
+    /// Description typed for a channel.
+    pub create_about: String,
+    /// Checkable contacts shown when creating a group: `(id, name, checked)`,
+    /// seeded from the known dialogs.
+    pub member_pick: Vec<(i64, String, bool)>,
+    /// Right-click mini menu over a chat-list row (id of that chat).
+    pub row_menu: Option<i64>,
+    /// Destructive action pending confirmation: (kind, chat id).
+    pub confirm_leave: Option<(ConfirmKind, i64)>,
     /// Message the composer is replying to, if any.
     pub reply_target: Option<ReplyTarget>,
     /// Index of the message being forwarded (chat-picker overlay open).
@@ -263,6 +298,13 @@ impl State {
             typing: false,
             context_menu: None,
             editing: None,
+            create_menu_open: false,
+            create_dialog: None,
+            create_title: String::new(),
+            create_about: String::new(),
+            member_pick: Vec::new(),
+            row_menu: None,
+            confirm_leave: None,
             reply_target: None,
             forward_pick: None,
             open_file: None,
@@ -636,6 +678,23 @@ impl State {
                     self.invalidate_layout();
                 }
             }
+            UiMessage::ChatCreated { id } => {
+                // The refreshed dialog list arrived first; jump into the new
+                // chat right away.
+                self.create_menu_open = false;
+                self.open_chat(id);
+            }
+            UiMessage::ChatGone { id } => {
+                if self.open_chat == Some(id) {
+                    self.close_chat();
+                }
+                if self.row_menu == Some(id) {
+                    self.row_menu = None;
+                }
+                if self.confirm_leave.map(|(_, cid)| cid) == Some(id) {
+                    self.confirm_leave = None;
+                }
+            }
             UiMessage::PhotoReady { chat_id, msg_id, path } => {
                 if self.open_chat == Some(chat_id) {
                     for m in &mut self.messages {
@@ -931,9 +990,9 @@ impl State {
         self.invalidate_layout();
     }
 
-    /// Escape: closes the context menu, cancels editing, the reply target or
-    /// the forward picker. The info panel (and its inline kick confirmation)
-    /// sit above those: they are dismissed first.
+    /// Escape: closes the topmost overlay — kick confirmation, info panel,
+    /// creation modal, chat-row menu, leave confirmation — then the context
+    /// menu, cancels editing or the reply target.
     pub fn escape(&mut self) {
         // The search UI is active: it hides the chat pane, so Escape (and the
         // back handler) close it before touching the message rows.
@@ -946,6 +1005,19 @@ impl State {
         }
         if self.info_open {
             self.close_info();
+            return;
+        }
+        if self.create_dialog.take().is_some() {
+            self.create_title.clear();
+            self.create_about.clear();
+            self.member_pick.clear();
+            self.invalidate_layout();
+            return;
+        }
+        if self.row_menu.take().is_some() {
+            return;
+        }
+        if self.confirm_leave.take().is_some() {
             return;
         }
         self.context_menu = None;
@@ -962,7 +1034,7 @@ impl State {
         self.invalidate_layout();
     }
 
-    /// Click on the context menu's "Répondre" item.
+    /// Click on the context menu's "Reply" item.
     pub fn context_reply(&mut self) {
         let Some(menu) = self.context_menu.take() else {
             return;
@@ -978,7 +1050,7 @@ impl State {
         // Replying is a composer state change, not a row-height change.
     }
 
-    /// Click on the context menu's "Transférer" item: opens the chat picker.
+    /// Click on the context menu's "Forward" item: opens the chat picker.
     pub fn context_forward(&mut self) {
         let Some(menu) = self.context_menu.take() else {
             return;
@@ -1009,7 +1081,7 @@ impl State {
         self.invalidate_layout();
     }
 
-    /// Click on the context menu's "Modifier" item.
+    /// Click on the context menu's "Edit" item.
     pub fn context_edit(&mut self) {
         if let Some(menu) = self.context_menu.take() {
             self.invalidate_layout();
@@ -1020,7 +1092,7 @@ impl State {
         }
     }
 
-    /// Click on the context menu's "Copier" item: returns the copied text (or
+    /// Click on the context menu's "Copy" item: returns the copied text (or
     /// `None`), which the caller writes to the system clipboard.
     pub fn context_copy(&mut self) -> Option<String> {
         let menu = self.context_menu.take()?;
@@ -1035,7 +1107,7 @@ impl State {
         Some(text)
     }
 
-    /// Click on the context menu's "Supprimer" item.
+    /// Click on the context menu's "Delete" item.
     pub fn context_delete(&mut self) {
         let Some(menu) = self.context_menu.take() else {
             return;
@@ -1057,7 +1129,7 @@ impl State {
         self.invalidate_layout();
     }
 
-    /// Click on the context menu's "Épingler"/"Désépingler" item.
+    /// Click on the context menu's "Pin"/"Unpin" item.
     pub fn context_pin(&mut self) {
         let Some(menu) = self.context_menu.take() else {
             return;
@@ -1109,6 +1181,107 @@ impl State {
     }
 
     // -------------------------------------------------------------------
+    // Group/channel creation + chat management
+    // -------------------------------------------------------------------
+
+    /// Toggles the header "+" picker menu (New Group / New Channel).
+    pub fn toggle_create_menu(&mut self) {
+        self.create_menu_open = !self.create_menu_open;
+        self.row_menu = None;
+    }
+
+    /// Opens the creation modal pre-filled with the known dialogs as the
+    /// checkable member list.
+    pub fn open_create(&mut self, kind: CreateKind) {
+        self.create_menu_open = false;
+        self.create_dialog = Some(kind);
+        self.create_title.clear();
+        self.create_about.clear();
+        // Contacts: every other known dialog (users and chats alike),
+        // unchecked by default.
+        self.member_pick = self
+            .dialogs
+            .iter()
+            .map(|d| (d.id, d.title.clone(), false))
+            .collect();
+    }
+
+    /// Closes the creation modal and drops its draft input.
+    pub fn cancel_create(&mut self) {
+        if self.create_dialog.take().is_none() {
+            return;
+        }
+        self.create_title.clear();
+        self.create_about.clear();
+        self.member_pick.clear();
+    }
+
+    /// Toggles a contact's checkbox in the member picker.
+    pub fn toggle_member(&mut self, idx: usize) {
+        if let Some(entry) = self.member_pick.get_mut(idx) {
+            entry.2 = !entry.2;
+        }
+    }
+
+    /// Submits the creation modal: sends the create request (groups carry the
+    /// checked members) and closes the modal. Empty titles are ignored.
+    pub fn submit_create(&mut self) {
+        let Some(kind) = self.create_dialog else { return };
+        let title = self.create_title.trim().to_string();
+        if title.is_empty() {
+            return;
+        }
+        let about = self.create_about.trim().to_string();
+        let members: Vec<i64> = self
+            .member_pick
+            .iter()
+            .filter(|(_, _, on)| *on)
+            .map(|(id, _, _)| *id)
+            .collect();
+        let _ = self.req_tx.send(Request::CreateChannel {
+            title,
+            about,
+            megagroup: kind == CreateKind::Group,
+            members,
+        });
+        self.cancel_create();
+    }
+
+    /// Right-click over a chat-list row: open its Leave/Delete mini menu.
+    pub fn open_row_menu(&mut self, chat_id: i64) {
+        self.row_menu = Some(chat_id);
+        self.create_menu_open = false;
+    }
+
+    /// Dismisses the chat-row mini menu (click elsewhere).
+    pub fn dismiss_row_menu(&mut self) {
+        self.row_menu = None;
+    }
+
+    /// Asks for confirmation before leaving/deleting a chat (closes the row
+    /// menu that raised it).
+    pub fn ask_confirm(&mut self, kind: ConfirmKind, chat_id: i64) {
+        self.row_menu = None;
+        self.confirm_leave = Some((kind, chat_id));
+    }
+
+    /// Cancels the pending confirmation.
+    pub fn cancel_confirm(&mut self) {
+        self.confirm_leave = None;
+    }
+
+    /// Confirms the pending leave/delete: sends the request and closes the
+    /// dialog. The list itself refreshes when the network answers with
+    /// `Dialogs` + `ChatGone`.
+    pub fn confirm_yes(&mut self) {
+        let Some((kind, id)) = self.confirm_leave.take() else { return };
+        let req = match kind {
+            ConfirmKind::Leave => Request::LeaveChat { id },
+            ConfirmKind::Delete => Request::DeleteChat { id },
+        };
+        let _ = self.req_tx.send(req);
+    }
+
     // Info panel (chat details + members)
     // -------------------------------------------------------------------
 
@@ -2165,16 +2338,147 @@ mod tests {
         assert!(state.messages.is_empty());
     }
 
+    fn seed_dialogs(state: &mut State) {
+        state.on_message(UiMessage::Dialogs(vec![
+            ChatRow { id: 1001, title: "Camille".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
+            ChatRow { id: 1002, title: "Rust Group".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
+            ChatRow { id: 1003, title: "Landscape Channel".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
+        ]));
+    }
+
+    #[test]
+    fn create_modal_opens_with_contacts_and_cancels() {
+        let (mut state, mut req_rx) = demo_state();
+        seed_dialogs(&mut state);
+
+        state.toggle_create_menu();
+        assert!(state.create_menu_open, "+ picker menu opens");
+        state.open_create(CreateKind::Group);
+        assert_eq!(state.create_dialog, Some(CreateKind::Group));
+        assert!(!state.create_menu_open, "picker closes when the modal opens");
+        // Contacts seeded from the known dialogs, all unchecked.
+        assert_eq!(state.member_pick.len(), 3);
+        assert!(state.member_pick.iter().all(|(_, _, on)| !on));
+
+        // Escape cancels and clears the draft.
+        state.create_title = "draft".into();
+        state.escape();
+        assert!(state.create_dialog.is_none());
+        assert!(state.create_title.is_empty());
+        assert!(state.member_pick.is_empty());
+        drain(&mut req_rx);
+    }
+
+    #[test]
+    fn submit_channel_sends_request_and_closes() {
+        let (mut state, mut req_rx) = demo_state();
+        state.open_create(CreateKind::Channel);
+        state.create_title = "  My Channel  ".into();
+        state.create_about = "about it".into();
+        state.submit_create();
+
+        assert!(state.create_dialog.is_none(), "modal closes after submit");
+        let reqs = drain(&mut req_rx);
+        assert!(
+            matches!(
+                reqs.last(),
+                Some(Request::CreateChannel { title, about, megagroup: false, members })
+                    if title == "My Channel" && about == "about it" && members.is_empty()
+            ),
+            "expected CreateChannel request, got {reqs:?}"
+        );
+
+        // Empty titles are not submitted.
+        state.open_create(CreateKind::Channel);
+        state.submit_create();
+        assert!(state.create_dialog.is_some());
+        assert!(drain(&mut req_rx).is_empty());
+    }
+
+    #[test]
+    fn submit_group_carries_checked_members() {
+        let (mut state, mut req_rx) = demo_state();
+        seed_dialogs(&mut state);
+        state.open_create(CreateKind::Group);
+        state.toggle_member(0);
+        state.toggle_member(2);
+        state.create_title = "Team".into();
+        state.submit_create();
+
+        let reqs = drain(&mut req_rx);
+        match reqs.last() {
+            Some(Request::CreateChannel { megagroup: true, members, .. }) => {
+                assert_eq!(members, &[1001, 1003]);
+            }
+            other => panic!("expected group CreateChannel, got {other:?}"),
+        }
+    }
+
     fn group_detail(id: i64) -> ChatDetail {
         ChatDetail {
             id,
-            title: "Rust Groupe".into(),
+            title: "Rust Group".into(),
             kind: crate::bridge::ChatKind::Group,
             username: None,
             bio: Some("Weekly reviews".into()),
             phone: None,
             members_count: Some(3),
         }
+    }
+
+    #[test]
+    fn chat_created_opens_the_new_chat() {
+        let (mut state, mut req_rx) = demo_state();
+        state.on_message(UiMessage::ChatCreated { id: 1006 });
+        assert_eq!(state.open_chat, Some(1006), "the new chat opens right away");
+        assert!(state.loading);
+        let reqs = drain(&mut req_rx);
+        assert!(matches!(reqs.first(), Some(Request::OpenChat { id: 1006 })));
+    }
+
+    #[test]
+    fn chat_gone_closes_only_that_chat() {
+        let (mut state, _) = demo_state();
+        // Gone chat is not the open one: nothing changes.
+        state.on_message(UiMessage::ChatGone { id: 7 });
+        assert_eq!(state.open_chat, Some(42));
+
+        state.on_message(UiMessage::ChatGone { id: 42 });
+        assert_eq!(state.open_chat, None, "the open chat closes");
+        assert!(state.messages.is_empty());
+    }
+
+    #[test]
+    fn leave_and_delete_go_through_confirmation() {
+        let (mut state, mut req_rx) = demo_state();
+        state.open_row_menu(42);
+        assert_eq!(state.row_menu, Some(42));
+
+        state.ask_confirm(ConfirmKind::Leave, 42);
+        assert!(state.row_menu.is_none(), "row menu closes");
+        assert_eq!(state.confirm_leave, Some((ConfirmKind::Leave, 42)));
+
+        // Cancel clears without sending anything.
+        state.cancel_confirm();
+        assert!(state.confirm_leave.is_none());
+        assert!(drain(&mut req_rx).is_empty());
+
+        // Confirming a delete sends DeleteChat.
+        state.ask_confirm(ConfirmKind::Delete, 42);
+        state.confirm_yes();
+        let reqs = drain(&mut req_rx);
+        assert!(matches!(reqs.last(), Some(Request::DeleteChat { id: 42 })));
+        assert!(state.confirm_leave.is_none());
+    }
+
+    #[test]
+    fn escape_closes_row_menu_before_other_overlays() {
+        let (mut state, _) = demo_state();
+        state.row_menu = Some(42);
+        state.editing = Some(2);
+        state.escape();
+        assert!(state.row_menu.is_none());
+        assert_eq!(state.editing, Some(2), "deeper overlays are untouched");
     }
 
     #[test]
