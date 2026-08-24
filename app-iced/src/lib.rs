@@ -116,7 +116,8 @@ fn linkify(s: &str) -> Option<Vec<iced::widget::text::Span<'_, String>>> {
 }
 
 /// Message body / caption text: plain `text` when there is no URL, clickable
-/// rich spans otherwise.
+/// rich spans otherwise. `WordOrGlyph` wrapping: a word longer than the
+/// bubble (a long URL) breaks at glyph level instead of overflowing.
 fn message_body<'a>(t: &'a str) -> Element<'a> {
     match linkify(t) {
         Some(spans) => {
@@ -124,9 +125,14 @@ fn message_body<'a>(t: &'a str) -> Element<'a> {
                 .on_link_click(Message::OpenUrl)
                 .size(theme::font::MESSAGE)
                 .color(Color::WHITE)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
                 .into()
         }
-        None => text(t).size(theme::font::MESSAGE).color(Color::WHITE).into(),
+        None => text(t)
+            .size(theme::font::MESSAGE)
+            .color(Color::WHITE)
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+            .into(),
     }
 }
 
@@ -1712,7 +1718,7 @@ fn context_menu_bar(state: &State) -> Element<'static> {
 /// one-frame-late `on_scroll` offset) never reveals a blank gap.
 const LIST_OVERSCAN: usize = 16;
 
-/// Number of items the open context menu shows (drives its cached height).
+/// Number of items the open context menu shows.
 fn context_menu_items(state: &State) -> usize {
     let can_edit = state.context_can_edit();
     let has_text = state
@@ -1720,6 +1726,13 @@ fn context_menu_items(state: &State) -> usize {
         .and_then(|c| state.messages.get(c.row))
         .is_some_and(|m| !m.text.is_empty());
     2 + usize::from(can_edit) + usize::from(has_text) + usize::from(can_edit)
+}
+
+/// Rendered height of the open context menu (items + spacing + padding) —
+/// used to clamp the overlay position inside the content area.
+fn context_menu_h(state: &State) -> f32 {
+    let n = context_menu_items(state) as f32;
+    CONTEXT_ITEM_H * n + (n - 1.0).max(0.0) * 2.0 + 2.0 * CONTEXT_MENU_PAD
 }
 
 /// Virtualized message list: only the rows intersecting the scrollable's
@@ -1773,7 +1786,6 @@ pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
     }
     let cache = cache_guard.as_ref().expect("rebuilt in the step above");
     let heights = &cache.heights;
-    let menu_h = &cache.menu_h;
     let tops = &cache.tops;
     let total = cache.total;
 
@@ -1782,11 +1794,11 @@ pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
     let mut end = n;
     if !no_virt {
         let offset = state.scroll_offset.max(0.0);
-        // `tops` grows monotonically, so does `tops[i] + heights[i] + menu_h[i]`
-        // (`tops[i+1] = tops[i] + heights[i] + menu_h[i] + gap`): binary-search
-        // the first row whose bottom edge reaches the viewport instead of a
-        // linear scan from 0 (O(all rows) per frame on big chats).
-        let bottom_edge = |i: usize| tops[i] + heights[i] + menu_h[i];
+        // `tops` grows monotonically (`tops[i+1] = tops[i] + heights[i] +
+        // gap`): binary-search the first row whose bottom edge reaches the
+        // viewport instead of a linear scan from 0 (O(all rows) per frame on
+        // big chats).
+        let bottom_edge = |i: usize| tops[i] + heights[i];
         let mut lo = 0usize;
         let mut hi = n;
         while lo < hi {
@@ -1830,15 +1842,43 @@ pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
                 cols.push(iced::widget::Space::new().height(gap_between(prev_out.unwrap_or(m.out), m.out)));
         }
         cols = cols.push(message_row(i, m, pane_w, state));
-        if state.context_menu.map(|c| c.row) == Some(i) {
-            cols = cols.push(context_menu_bar(state));
-        }
         prev_out = Some(m.out);
     }
 
+    // Context menu as a floating overlay: a `stack` layer anchored under (or,
+    // near the bottom, above) the target row, right-aligned. It no longer
+    // participates in the column layout — opening it must not push the
+    // messages down. It floats even if its row is currently virtualized out
+    // (`tops` covers every row).
+    let content = if let Some(menu) = state.context_menu {
+        let row = menu.row.min(n.saturating_sub(1));
+        let below = tops[row] + heights[row] - top_pad + 3.0;
+        let menu_h = context_menu_h(state);
+        let stack_h = total - top_pad;
+        let y = if below + menu_h > stack_h {
+            // Not enough room below: float above the row instead.
+            (tops[row] - menu_h - 3.0 - top_pad).max(0.0)
+        } else {
+            below
+        };
+        let layer = container(
+            row![horizontal_spacer(), context_menu_bar(state)]
+                .padding([0.0, theme::layout::MSG_PAD_X]),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(iced::Padding {
+            top: y,
+            ..Default::default()
+        });
+        Element::from(iced::widget::stack![cols, layer])
+    } else {
+        cols.into()
+    };
+
     scrollable(column![
         iced::widget::Space::new().height(top_pad),
-        cols,
+        content,
         iced::widget::Space::new().height(bottom_pad),
     ])
     .id(MSG_LIST_ID)
@@ -1852,7 +1892,9 @@ pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
 
 /// Computes and returns the per-row heights / top offsets / total height cache
 /// for the current message list. Called only when the cache is stale (message
-/// or context-menu change, or a pane resize).
+/// change or a pane resize). The context menu no longer contributes: it is
+/// rendered as an overlay (`stack`) that floats above the rows instead of
+/// pushing the content down.
 fn build_layout(state: &State, pane_w: f32, view_h: f32) -> crate::state::MsgLayoutCache {
     let n = state.messages.len();
     let out_at = |i: usize| state.messages[i].out;
@@ -1863,26 +1905,12 @@ fn build_layout(state: &State, pane_w: f32, view_h: f32) -> crate::state::MsgLay
         .iter()
         .map(|m| est_row_height(m, pane_w))
         .collect();
-    let menu_row = state.context_menu.map(|c| c.row);
-    let n_items = context_menu_items(state) as f32;
-    // Item heights + 2 px inter-item spacing + the container's inner padding.
-    let menu_h_total =
-        CONTEXT_ITEM_H * n_items + (n_items - 1.0).max(0.0) * 2.0 + 2.0 * CONTEXT_MENU_PAD;
-    let menu_h: Vec<f32> = (0..n)
-        .map(|i| {
-            if menu_row == Some(i) {
-                menu_h_total
-            } else {
-                0.0
-            }
-        })
-        .collect();
 
     let mut tops = Vec::with_capacity(n);
     let mut y = view_h; // pin spacer keeps bubbles at the bottom when short.
-    for i in 0..n {
+    for (i, h) in heights.iter().enumerate() {
         tops.push(y);
-        y += heights[i] + menu_h[i];
+        y += h;
         if i + 1 < n {
             y += gap_between(out_at(i), out_at(i + 1));
         }
@@ -1894,7 +1922,6 @@ fn build_layout(state: &State, pane_w: f32, view_h: f32) -> crate::state::MsgLay
         view_h,
         epoch: state.layout_epoch,
         heights,
-        menu_h,
         tops,
         total,
     }

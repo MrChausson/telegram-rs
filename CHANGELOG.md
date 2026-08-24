@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Long unbreakable words (URLs) no longer overflow their bubble**: message
+  text wraps at the glyph level when a single word exceeds the bubble width
+  (`WordOrGlyph` wrapping).
+- **The context menu no longer pushes the conversation down**: it now floats
+  as an overlay anchored under the right-clicked message (above it when there
+  is no room below), without participating in the list layout. It also stays
+  anchored while its row is scrolled out of the virtualized window.
+
 ### Added
 - **Clickable links**: http(s)/`www.` URLs inside messages render in the
   accent color, underlined, and open in the system browser on click. Messages

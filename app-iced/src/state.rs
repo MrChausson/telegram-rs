@@ -92,8 +92,6 @@ pub(crate) struct MsgLayoutCache {
     pub(crate) epoch: u64,
     /// Per-row estimated heights.
     pub(crate) heights: Vec<f32>,
-    /// Per-row extra height for an open context menu.
-    pub(crate) menu_h: Vec<f32>,
     /// Cumulative top offset of each row (content coordinates, starting at
     /// `view_h` for the bottom-anchoring spacer).
     pub(crate) tops: Vec<f32>,
