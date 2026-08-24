@@ -12,6 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   overlay, search views, byte sizes, demo content) is now English.
 
 ### Added
+- **Group & channel creation**: a "+" button in the chat-list header opens a
+  New Group / New Channel picker; the modal takes a title (+ description for
+  channels) and, for groups, a checkable member list seeded from your known
+  contacts. Groups go through `messages.createChat` (initial invites), groups
+  without members and channels through `channels.createChannel`; the new chat
+  opens as soon as the server confirms.
+- **Leave or delete chats**: right-click a chat row for a Leave / Delete mini
+  menu with a confirmation dialog. Leaving ends membership (`channels.leaveChannel`
+  / `messages.deleteChatUser`), deleting removes the dialog from the account;
+  the list refreshes and the open chat closes if it was the one removed.
+- **Rename plumbing**: `EditChatTitle` request + network handler (channels via
+  `channels.editTitle`, basic groups via `messages.editChatTitle`), ready to be
+  wired to UI later.
 - **Pinned messages**: pin/unpin any message from its context menu; a banner
   under the chat header shows the pinned snippet ("Pinned") and clicking it
   jumps straight to the message in the list. Pin state syncs live across

@@ -116,6 +116,8 @@ batches — each release moves the needle, not dribbles.
 - 📋 **Context menu** — reply, forward, pin, edit, copy or delete messages
 - 📌 **Pinned messages** — banner under the header; click to jump to the message
 - 👥 **Group senders** — author names above bubbles, one color per sender
+- ➕ **Create groups & channels** — "+" in the chat list; groups invite picked contacts, channels take a description
+- 🚪 **Leave / delete chats** — right-click a chat row and confirm
 
 > 📋 **Copy / paste note:** message text can be copied from the message's
 > context menu (right-click → “Copier”), and text pastes into the composer

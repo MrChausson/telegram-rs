@@ -45,6 +45,8 @@ pub enum Icon {
     Pause,
     /// Push pin (message "Pin" / pinned banner).
     Pin,
+    /// Plus sign (chat-list header "new group/channel" button).
+    Plus,
 }
 
 fn rgb(c: (u8, u8, u8)) -> Color {
@@ -540,6 +542,12 @@ fn draw_icon(pixmap: &mut Pixmap, kind: Icon, cx: f32, cy: f32, size: f32, color
                 w,
             );
         }
+        Icon::Plus => {
+            // Material "add": two centered bars.
+            let w = size * 0.12;
+            polyline(pixmap, &[(cx - half * 0.7, cy), (cx + half * 0.7, cy)], color, w);
+            polyline(pixmap, &[(cx, cy - half * 0.7), (cx, cy + half * 0.7)], color, w);
+        }
         Icon::Tick { read } => {
             let w = size * 0.09;
             let x0 = cx - half;
@@ -668,6 +676,7 @@ mod tests {
             Icon::Trash,
             Icon::Play,
             Icon::Pause,
+            Icon::Plus,
         ] {
             let mut c = canvas();
             draw_icon(&mut c, kind, 40.0, 40.0, 24.0, (255, 255, 255));
