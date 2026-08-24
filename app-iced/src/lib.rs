@@ -149,15 +149,15 @@ pub enum Message {
     RowClicked(usize),
     /// A message row was right-clicked (open context menu).
     RowContext(usize),
-    /// "Modifier" pressed in the context menu.
+    /// "Edit" pressed in the context menu.
     ContextEdit,
-    /// "Copier" pressed in the context menu.
+    /// "Copy" pressed in the context menu.
     ContextCopy,
-    /// "Supprimer" pressed in the context menu.
+    /// "Delete" pressed in the context menu.
     ContextDelete,
-    /// "Répondre" pressed in the context menu.
+    /// "Reply" pressed in the context menu.
     ContextReply,
-    /// "Épingler"/"Désépingler" pressed in the context menu.
+    /// "Pin"/"Unpin" pressed in the context menu.
     ContextPin,
     /// The pinned-message banner was clicked: jump to the message.
     PinnedClicked,
@@ -190,7 +190,7 @@ pub enum Message {
     ConfirmNo,
     /// The reply bar's ✕ was pressed (cancel the armed reply).
     CancelReply,
-    /// "Transférer" pressed in the context menu (opens the chat picker).
+    /// "Forward" pressed in the context menu (opens the chat picker).
     ContextForward,
     /// A destination chat was picked in the forward overlay.
     ForwardTo(i64),
@@ -338,7 +338,7 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             if std::path::Path::new(&path).exists() {
                 state.send_media(path);
             } else {
-                state.status = format!("Fichier introuvable : {path}");
+                state.status = format!("File not found: {path}");
             }
         }
         Message::FilePicked(None) => {}
@@ -537,9 +537,9 @@ fn view(state: &State) -> Element<'_> {
 /// a header with the back ✕ + query field, and the results list below.
 fn search_view(state: &State) -> Element<'_> {
     let mode_label = match state.search_mode {
-        Some(SearchMode::Global) => "Recherche dans tous les chats…",
-        Some(SearchMode::InChat) => "Rechercher dans ce chat…",
-        None => "Recherche…",
+        Some(SearchMode::Global) => "Search all chats…",
+        Some(SearchMode::InChat) => "Search this chat…",
+        None => "Search…",
     };
     let field = text_input(mode_label, &state.search_query)
         .on_input(Message::SearchChanged)
@@ -548,12 +548,12 @@ fn search_view(state: &State) -> Element<'_> {
 
     let mut results = column![].spacing(2);
     if state.search_query.trim().is_empty() {
-        results = results.push(search_hint("Tapez un mot-clé pour lancer la recherche…"));
+        results = results.push(search_hint("Type a keyword to start searching…"));
     } else if state.search_hits.is_empty() {
         if state.search_pending {
-            results = results.push(search_hint("Recherche…"));
+            results = results.push(search_hint("Searching…"));
         } else {
-            results = results.push(search_hint("Aucun résultat"));
+            results = results.push(search_hint("No results"));
         }
     } else {
         let highlighted = &state.search_query;
@@ -1146,7 +1146,7 @@ fn conversation_pane(state: &State) -> Element<'_> {
 }
 
 /// Full-pane modal listing the chats as forward destinations. Rendered on
-/// top of the conversation pane when a "Transférer" is armed; Escape or the
+/// top of the conversation pane when a "Forward" is armed; Escape or the
 /// header ✕ cancels.
 fn forward_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
     let mut rows = column![].spacing(2);
@@ -1175,7 +1175,7 @@ fn forward_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
         column![
             row![
                 icon(Icon::Forward, theme::ACCENT, 16.0),
-                text("Transférer vers…").size(theme::font::NAME).color(Color::WHITE),
+                text("Forward to…").size(theme::font::NAME).color(Color::WHITE),
                 horizontal_spacer(),
                 button(icon(Icon::Close, theme::ICON, 14.0))
                     .on_press(Message::Escape)
@@ -1448,7 +1448,7 @@ fn chat_header(
 /// the reply preview bar stacked above when a reply is armed.
 fn composer_bar(state: &State) -> Element<'_> {
     let placeholder = if state.editing.is_some() {
-        "Modifier le message…"
+        "Edit message…"
     } else {
         "Message…"
     };
@@ -1485,7 +1485,7 @@ fn composer_bar(state: &State) -> Element<'_> {
                 row![
                     icon(Icon::Reply, theme::ACCENT, 16.0),
                     column![
-                        text("Réponse à")
+                        text("Reply to")
                             .size(theme::font::TIMESTAMP)
                             .color(rgb(theme::ACCENT)),
                         text(&reply.snippet)
@@ -1559,12 +1559,12 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
             .iter()
             .find(|r| r.id == reply_id)
             .map(|r| crate::state::preview_text(&r.text, &r.photo, &r.doc))
-            .unwrap_or_else(|| "Message original".to_string());
-        Some(quote_block("Réponse", snippet))
+            .unwrap_or_else(|| "Original message".to_string());
+        Some(quote_block("Reply", snippet))
     } else {
         m.forwarded_from
             .as_ref()
-            .map(|from| quote_block("Transféré", from.clone()))
+            .map(|from| quote_block("Forwarded", from.clone()))
     };
 
     // Bubble content: media card (video / gif / audio / voice / file), photo
@@ -1572,10 +1572,10 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
     let body: Element<'a> = if let Some(doc) = &m.doc {
         let doc_name = if doc.name.is_empty() {
             match doc.kind {
-                bridge::DocKind::Video => "Vidéo",
+                bridge::DocKind::Video => "Video",
                 bridge::DocKind::Gif => "GIF",
                 bridge::DocKind::Audio { .. } => "Audio",
-                bridge::DocKind::File => "Fichier",
+                bridge::DocKind::File => "File",
             }
             .to_string()
         } else {
@@ -1593,16 +1593,16 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
             meta.push_str(" · ");
         }
         let status = if m.uploading.is_some() {
-            "Envoi…".to_string()
+            "Uploading…".to_string()
         } else if m.doc_path.is_some() {
             match doc.kind {
-                bridge::DocKind::Audio { voice: true } => "Lire".to_string(),
-                _ => "Ouvrir".to_string(),
+                bridge::DocKind::Audio { voice: true } => "Play".to_string(),
+                _ => "Open".to_string(),
             }
         } else {
             match doc.kind {
-                bridge::DocKind::Audio { voice: true } => "Écouter".to_string(),
-                _ => "Télécharger".to_string(),
+                bridge::DocKind::Audio { voice: true } => "Listen".to_string(),
+                _ => "Download".to_string(),
             }
         };
         meta.push_str(&status);
@@ -1739,7 +1739,7 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
             .spacing(6)
             .into()
         } else {
-            placeholder_strip("Chargement de l'image…")
+            placeholder_strip("Loading image…")
         }
     } else {
         message_body(&m.text)
@@ -1879,7 +1879,7 @@ fn quote_block(label: &str, content: String) -> Element<'static> {
 fn uploading_bar(p: f32) -> Element<'static> {
     let pct = (p.clamp(0.0, 1.0) * 100.0).round();
     column![
-        text(format!("Envoi… {} %", pct))
+        text(format!("Uploading… {}%", pct))
             .size(theme::font::TIMESTAMP)
             .color(rgb(theme::TEXT_SECONDARY)),
         container(
@@ -1932,20 +1932,20 @@ fn placeholder_strip(label: &str) -> Element<'static> {
     .into()
 }
 
-/// Human-readable byte size ("1.5 Mo" style).
+/// Human-readable byte size ("1.5 MB" style).
 fn fmt_size(bytes: i64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * KB;
     const GB: f64 = MB * KB;
     let b = bytes.max(0) as f64;
     if b >= GB {
-        format!("{:.1} Go", b / GB)
+        format!("{:.1} GB", b / GB)
     } else if b >= MB {
-        format!("{:.1} Mo", b / MB)
+        format!("{:.1} MB", b / MB)
     } else if b >= KB {
-        format!("{:.0} Ko", b / KB)
+        format!("{:.0} KB", b / KB)
     } else {
-        format!("{bytes} o")
+        format!("{bytes} B")
     }
 }
 
@@ -1973,7 +1973,7 @@ fn pinned_banner(m: &MsgRow) -> Element<'static> {
     button(
         row![
             icon(Icon::Pin, theme::ACCENT, 14.0),
-            text("Épinglé")
+            text("Pinned")
                 .size(theme::font::TIMESTAMP)
                 .color(rgb(theme::ACCENT)),
             text(snippet)
@@ -2028,7 +2028,7 @@ fn sender_color(id: Option<i64>) -> (u8, u8, u8) {
 }
 
 // ---------------------------------------------------------------------------
-// Context menu (Répondre / Transférer / Épingler / Modifier / Copier / Supprimer)
+// Context menu (Reply / Forward / Pin / Edit / Copy / Delete)
 // ---------------------------------------------------------------------------
 
 /// Height of one context-menu item (10 px padding per side + ~17 px text).
@@ -2086,27 +2086,27 @@ fn context_menu_bar(state: &State) -> Element<'static> {
         .is_some_and(|m| !m.text.is_empty());
 
     let mut items = column![].spacing(2);
-    items = items.push(menu_item(Message::ContextReply, Icon::Reply, "Répondre", false));
+    items = items.push(menu_item(Message::ContextReply, Icon::Reply, "Reply", false));
     items = items.push(menu_item(
         Message::ContextForward,
         Icon::Forward,
-        "Transférer",
+        "Forward",
         false,
     ));
     let pinned_label = if state.context_row_pinned() {
-        "Désépingler"
+        "Unpin"
     } else {
-        "Épingler"
+        "Pin"
     };
     items = items.push(menu_item(Message::ContextPin, Icon::Pin, pinned_label, false));
     if can_edit {
-        items = items.push(menu_item(Message::ContextEdit, Icon::Edit, "Modifier", false));
+        items = items.push(menu_item(Message::ContextEdit, Icon::Edit, "Edit", false));
     }
     if has_text {
-        items = items.push(menu_item(Message::ContextCopy, Icon::Copy, "Copier", false));
+        items = items.push(menu_item(Message::ContextCopy, Icon::Copy, "Copy", false));
     }
     if can_edit {
-        items = items.push(menu_item(Message::ContextDelete, Icon::Trash, "Supprimer", true));
+        items = items.push(menu_item(Message::ContextDelete, Icon::Trash, "Delete", true));
     }
 
     let menu_el = container(items)

@@ -11,7 +11,7 @@ pub fn preview_text(text: &str, photo: &Option<(u32, u32)>, doc: &Option<DocMeta
         return text.to_string();
     }
     if let Some(doc) = doc {
-        let name = if doc.name.is_empty() { "Fichier" } else { &doc.name };
+        let name = if doc.name.is_empty() { "File" } else { &doc.name };
         return format!("📄 {name}");
     }
     if photo.is_some() {
@@ -984,7 +984,7 @@ impl State {
         self.invalidate_layout();
     }
 
-    /// Click on the context menu's "Répondre" item.
+    /// Click on the context menu's "Reply" item.
     pub fn context_reply(&mut self) {
         let Some(menu) = self.context_menu.take() else {
             return;
@@ -1000,7 +1000,7 @@ impl State {
         // Replying is a composer state change, not a row-height change.
     }
 
-    /// Click on the context menu's "Transférer" item: opens the chat picker.
+    /// Click on the context menu's "Forward" item: opens the chat picker.
     pub fn context_forward(&mut self) {
         let Some(menu) = self.context_menu.take() else {
             return;
@@ -1031,7 +1031,7 @@ impl State {
         self.invalidate_layout();
     }
 
-    /// Click on the context menu's "Modifier" item.
+    /// Click on the context menu's "Edit" item.
     pub fn context_edit(&mut self) {
         if let Some(menu) = self.context_menu.take() {
             self.invalidate_layout();
@@ -1042,7 +1042,7 @@ impl State {
         }
     }
 
-    /// Click on the context menu's "Copier" item: returns the copied text (or
+    /// Click on the context menu's "Copy" item: returns the copied text (or
     /// `None`), which the caller writes to the system clipboard.
     pub fn context_copy(&mut self) -> Option<String> {
         let menu = self.context_menu.take()?;
@@ -1057,7 +1057,7 @@ impl State {
         Some(text)
     }
 
-    /// Click on the context menu's "Supprimer" item.
+    /// Click on the context menu's "Delete" item.
     pub fn context_delete(&mut self) {
         let Some(menu) = self.context_menu.take() else {
             return;
@@ -1079,7 +1079,7 @@ impl State {
         self.invalidate_layout();
     }
 
-    /// Click on the context menu's "Épingler"/"Désépingler" item.
+    /// Click on the context menu's "Pin"/"Unpin" item.
     pub fn context_pin(&mut self) {
         let Some(menu) = self.context_menu.take() else {
             return;

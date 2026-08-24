@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **UI language switched to English**: every user-facing string (context menu,
+  pinned banner, composer, upload bar, media placeholders/actions, forward
+  overlay, search views, byte sizes, demo content) is now English.
+
 ### Added
 - **Group & channel creation**: a "+" button in the chat-list header opens a
   New Group / New Channel picker; the modal takes a title (+ description for
@@ -21,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `channels.editTitle`, basic groups via `messages.editChatTitle`), ready to be
   wired to UI later.
 - **Pinned messages**: pin/unpin any message from its context menu; a banner
-  under the chat header shows the pinned snippet ("Épinglé") and clicking it
+  under the chat header shows the pinned snippet ("Pinned") and clicking it
   jumps straight to the message in the list. Pin state syncs live across
   devices (`updatePinnedMessages`), and deleting the pinned message clears the
   banner.

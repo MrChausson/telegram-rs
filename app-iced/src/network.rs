@@ -319,7 +319,7 @@ fn demo_voice_wav(path: &std::path::Path) -> String {
         bytes.extend_from_slice(&v.to_le_bytes());
     }
     let _ = std::fs::create_dir_all(path);
-    let wav = path.join("voix.wav");
+    let wav = path.join("voice.wav");
     let _ = std::fs::write(&wav, bytes);
     wav.to_string_lossy().into_owned()
 }
@@ -409,10 +409,10 @@ async fn serve_demo(
         .as_secs() as i32;
 
     let chats = vec![
-        DemoChat { id: 1001, title: "Camille".into(), subtitle: "Super ! à demain 👋".into(), last_ago: 42, unread: 3, hue: 0.55 },
-        DemoChat { id: 1002, title: "Rust Groupe".into(), subtitle: "Thomas: novelle review du PR ?".into(), last_ago: 7200, unread: 0, hue: 0.1 },
-        DemoChat { id: 1003, title: "Canal Paysages".into(), subtitle: "Coucher de soleil sur la mer 🏖".into(), last_ago: 86400, unread: 0, hue: 0.95 },
-        DemoChat { id: 1004, title: "Groupe Famille".into(), subtitle: "Maman : tu passes quand ?".into(), last_ago: 172800, unread: 12, hue: 0.3 },
+        DemoChat { id: 1001, title: "Camille".into(), subtitle: "Great! see you tomorrow 👋".into(), last_ago: 42, unread: 3, hue: 0.55 },
+        DemoChat { id: 1002, title: "Rust Group".into(), subtitle: "Thomas: novel review of the PR?".into(), last_ago: 7200, unread: 0, hue: 0.1 },
+        DemoChat { id: 1003, title: "Landscape Channel".into(), subtitle: "Sunset over the sea 🏖".into(), last_ago: 86400, unread: 0, hue: 0.95 },
+        DemoChat { id: 1004, title: "Family Group".into(), subtitle: "Mom: when are you coming over?".into(), last_ago: 172800, unread: 12, hue: 0.3 },
         DemoChat { id: 1005, title: "Paris Bots".into(), subtitle: "New version 2.4.0 released".into(), last_ago: 604800, unread: 0, hue: 0.75 },
     ];
     // Shared with the request handlers below so create/leave/delete/rename
@@ -460,10 +460,10 @@ async fn serve_demo(
                     .map(|i| {
                     let id = i as i32;
                     let body = if i % 7 == 0 {
-                        "Un message plus long pour forcer le retour à la ligne et tester le calcul de hauteur des bulles sur plusieurs lignes, avec quelques emojis 🎉 et un peu de texte, encore un peu plus de texte pour mesurer le wrap.".to_string()
+                        "A longer message to force line wrapping and test the bubble height calculation over several lines, with a few emojis 🎉 and some text, plus a little more text to measure wrapping.".to_string()
                     } else {
                         format!(
-                            "Message {id} de la grande conversation de test — le lent fox saute par-dessus le chien paresseux {id}"
+                            "Message {id} of the big test conversation — the quick brown fox jumps over the lazy dog {id}"
                         )
                     };
                     MsgRow {
@@ -481,7 +481,7 @@ async fn serve_demo(
                 .collect()
             },
             1001 => vec![
-                MsgRow::text(1, "Salut ! tu as vu ma nouvelle photo ?", now - 700, false),
+                MsgRow::text(1, "Hi! did you see my new photo?", now - 700, false),
                 MsgRow {
                     photo: Some((640, 480)),
                     photo_path: photo.clone(),
@@ -489,26 +489,26 @@ async fn serve_demo(
                 },
                 MsgRow {
                     reply_to: Some(1),
-                    ..MsgRow::text(3, "Magnifique ! prise ce matin ?", now - 600, true)
+                    ..MsgRow::text(3, "Stunning! taken this morning?", now - 600, true)
                 },
                 MsgRow {
                     doc: Some(DocMeta {
-                        name: "coucher-de-soleil.mp4".into(),
+                        name: "sunset.mp4".into(),
                         size: 8_423_168,
                         kind: DocKind::Video,
                         duration: Some(47.0),
                     }),
-                    ..MsgRow::text(4, "Un petit film du coucher 🌅", now - 575, true)
+                    ..MsgRow::text(4, "A short clip of the sunset 🌅", now - 575, true)
                 },
                 MsgRow {
-                    forwarded_from: Some("Canal Paysages".into()),
+                    forwarded_from: Some("Landscape Channel".into()),
                     photo: Some((640, 480)),
                     photo_path: photo.clone(),
-                    ..MsgRow::text(5, "Regarde celle-là 😍", now - 550, false)
+                    ..MsgRow::text(5, "Look at this one 😍", now - 550, false)
                 },
                 MsgRow {
                     doc: Some(DocMeta {
-                        name: "voix-memoire.ogg".into(),
+                        name: "voice-memo.ogg".into(),
                         size: 310_000,
                         kind: DocKind::Audio { voice: true },
                         duration: Some(12.0),
@@ -516,48 +516,48 @@ async fn serve_demo(
                     ..MsgRow::text(6, "", now - 520, false)
                 },
                 MsgRow {
-                    doc: Some(DocMeta { name: "plan-trimestre.xlsx".into(), size: 96_470, kind: DocKind::File, duration: None }),
+                    doc: Some(DocMeta { name: "quarterly-plan.xlsx".into(), size: 96_470, kind: DocKind::File, duration: None }),
                     ..MsgRow::text(7, "", now - 500, true)
                 },
-                MsgRow::text(8, "Génial, on y va samedi ? 😎", now - 300, false),
+                MsgRow::text(8, "Awesome, going there Saturday? 😎", now - 300, false),
                 MsgRow::text(
                     9,
-                    "Tiens, la doc est là : https://doc.rust-lang.org/book/ 😉",
+                    "Hey, the docs are here: https://doc.rust-lang.org/book/ 😉",
                     now - 120,
                     false,
                 ),
                 MsgRow::text(
                     10,
-                    "Et le changelog complet : https://github.com/rust-lang/rust/blob/master/RELEASES.md#version-1800-2021-10-21",
+                    "And the full changelog: https://github.com/rust-lang/rust/blob/master/RELEASES.md#version-1800-2021-10-21",
                     now - 100,
                     true,
                 ),
-                MsgRow::text(11, "Oui ! à demain 👋", now - 42, true),
+                MsgRow::text(11, "Yes! see you tomorrow 👋", now - 42, true),
             ],
             1002 => vec![
                 MsgRow {
                     sender_name: Some("Camille".into()),
                     sender_id: Some(2001),
                     pinned: true,
-                    ..MsgRow::text(1, "Qui veut présenter son projet vendredi ?", now - 14400, false)
+                    ..MsgRow::text(1, "Who wants to present their project on Friday?", now - 14400, false)
                 },
                 MsgRow {
-                    forwarded_from: Some("Canal Paysages".into()),
+                    forwarded_from: Some("Landscape Channel".into()),
                     sender_name: Some("Léo".into()),
                     sender_id: Some(2002),
-                    ..MsgRow::text(2, "[transféré] Photo du week-end dernier 🌄", now - 10800, false)
+                    ..MsgRow::text(2, "[forwarded] Photo from last weekend 🌄", now - 10800, false)
                 },
                 MsgRow {
                     sender_name: Some("Camille".into()),
                     sender_id: Some(2001),
-                    ..MsgRow::text(3, "@Léo tu peux relire avant vendredi ?", now - 7300, false)
+                    ..MsgRow::text(3, "@Léo can you review it before Friday?", now - 7300, false)
                 },
-                MsgRow::text(4, "Moi je peux, la CI passe enfin 🎉", now - 7200, true),
+                MsgRow::text(4, "I can, the CI finally passes 🎉", now - 7200, true),
                 doc_row(
                     5,
                     "",
                     now - 7000,
-                    "rapport-trimestre.pdf",
+                    "quarterly-report.pdf",
                     2_458_112,
                 ),
             ],
@@ -565,17 +565,17 @@ async fn serve_demo(
                 MsgRow {
                     photo: Some((640, 480)),
                     photo_path: photo,
-                    ..MsgRow::text(1, "Photo du week-end dernier 🌄", now - 90000, true)
+                    ..MsgRow::text(1, "Photo from last weekend 🌄", now - 90000, true)
                 },
-                MsgRow::text(2, "Magnifique, on la met en couverture !", now - 89000, false),
+                MsgRow::text(2, "Beautiful, we'll make it the cover!", now - 89000, false),
             ],
             1004 => vec![
-                MsgRow::text(1, "Le repas de dimanche est déplacé", now - 172800, false),
-                MsgRow::text(2, "Ok, on ramène le dessert 🍰", now - 160000, true),
+                MsgRow::text(1, "Sunday's lunch is moved", now - 172800, false),
+                MsgRow::text(2, "Ok, we'll bring dessert 🍰", now - 160000, true),
             ],
             1005 => vec![
-                MsgRow::text(1, "v2.4.0: nouvelle API de statut en ligne", now - 604800, false),
-                MsgRow::text(2, "Merci pour l'update !", now - 600000, true),
+                MsgRow::text(1, "v2.4.0: new online status API", now - 604800, false),
+                MsgRow::text(2, "Thanks for the update!", now - 600000, true),
             ],
             _ => vec![],
         }
@@ -592,10 +592,10 @@ async fn serve_demo(
     // burst of ~3 s followed by the message.
     let mut incoming_idx = 0usize;
     let incoming = [
-        "Coucou !",
-        "T'as vu l'actu ce matin ?",
-        "Je suis en route, je passe te chercher dans 20 min.",
-        "Pense à prendre le colis au passage 😉",
+        "Hey there!",
+        "Did you see the news this morning?",
+        "On my way, picking you up in 20 min.",
+        "Don't forget to grab the package on the way 😉",
     ];
     // Next time an incoming message is delivered; typing starts 3 s earlier.
     let mut next_incoming = std::time::Instant::now() + std::time::Duration::from_secs(4);
