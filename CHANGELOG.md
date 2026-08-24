@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **UI design pass (Material 3 inspired)**: the message context menu is now a
+  proper menu surface — 12 px rounded corners, hairline border, inner padding,
+  icons on **every** item (reply/forward arrows redrawn with filled heads,
+  new pencil/copy/trash icons) in an aligned column, hover state per item and
+  a red-tinted destructive "Supprimer".
+- **App logo**: paper-plane mark on an accent disc in the "Chats" header;
+  the non-functional compose/dots glyphs were removed (dead chrome).
+- **Icon buttons** (search, back, close, paperclip…) get a circular hover
+  state; send/accent buttons get hover/press color variants.
+- **Voice notes** use drawn play/pause icons instead of font glyphs.
+- All icon strokes now use round caps/joins (softer, crisper at small sizes).
+
 ## [v0.5.0] - 2026-08-23
 
 ### Added

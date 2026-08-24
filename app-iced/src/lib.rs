@@ -659,21 +659,21 @@ fn list_pane(state: &State) -> Element<'_> {
     let list = iced::widget::responsive(move |size| dialog_list(state, size.height));
 
     column![
-        // Header bar: "Chats" + search / compose / dots. `align_y(Center)`
-        // keeps the row away from the top edge (the default is top-aligned,
-        // which made the left items hug the window border).
+        // Header bar: app logo + "Chats" + search. `align_y(Center)` keeps the
+        // row away from the top edge (the default is top-aligned, which made
+        // the left items hug the window border). The non-functional
+        // compose/dots glyphs were dropped: dead chrome reads as broken.
         container(
             row![
+                icon(Icon::Logo, theme::ACCENT, 26.0),
                 text("Chats").size(theme::font::TITLE).color(Color::WHITE),
                 horizontal_spacer(),
-                button(icon(Icon::Search, theme::ICON, 20.0))
+                button(icon(Icon::Search, theme::ICON, 18.0))
                     .on_press(Message::OpenGlobalSearch)
-                    .padding(6)
-                    .style(flat_button),
-                icon(Icon::Compose, theme::ICON, 20.0),
-                icon(Icon::Dots, theme::ICON, 20.0),
+                    .padding(7)
+                    .style(icon_button_style),
             ]
-            .spacing(14)
+            .spacing(12)
             .align_y(Alignment::Center)
         )
         .width(Length::Fill)
@@ -1226,17 +1226,15 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
                     },
                     ..container::Style::default()
                 });
-                let play_state = if is_this && state.voice_playing {
-                    // Draw a pause glyph (two bars) with an existing icon-less
-                    // approach: use a Stop-like text label colored accent.
-                    "⏸︎"
+                let play_icon = if is_this && state.voice_playing {
+                    icon(Icon::Pause, theme::ACCENT, 18.0)
                 } else {
-                    "▶"
+                    icon(Icon::Play, theme::ACCENT, 18.0)
                 };
                 let voice_path = m.doc_path.clone().unwrap_or_default();
                 let click = button(
                     row![
-                        text(play_state).size(18.0).color(rgb(theme::ACCENT)),
+                        play_icon,
                         bar,
                         text(duration_fmt(doc.duration.unwrap_or(0.0)))
                             .size(theme::font::TIMESTAMP)
@@ -1527,6 +1525,45 @@ fn duration_fmt(secs: f64) -> String {
 
 /// Height of one context-menu item (10 px padding per side + ~17 px text).
 const CONTEXT_ITEM_H: f32 = 37.0;
+/// Inner padding of the menu container (M3 menus pad around their items).
+const CONTEXT_MENU_PAD: f32 = 6.0;
+
+/// One context-menu row: icon in a fixed-width column + label, hover state,
+/// 8 px item radius (M3: item < container corner).
+fn menu_item<'a>(
+    msg: Message,
+    ic: Icon,
+    label: &'a str,
+    destructive: bool,
+) -> Element<'a> {
+    let label_color = if destructive {
+        rgb(theme::ERROR)
+    } else {
+        rgb(theme::TEXT_PRIMARY)
+    };
+    let icon_color = if destructive {
+        theme::ERROR
+    } else {
+        theme::ICON
+    };
+    button(
+        row![
+            container(icon(ic, icon_color, 16.0))
+                .width(18.0)
+                .align_x(iced::alignment::Horizontal::Center),
+            text(label)
+                .size(theme::font::PLACEHOLDER)
+                .color(label_color),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center),
+    )
+    .on_press(msg)
+    .width(Length::Fill)
+    .padding([10, 12])
+    .style(move |t, s| menu_item_style(t, s, destructive))
+    .into()
+}
 
 /// The right-click context menu, rendered inline right under the message
 /// that raised it instead of an absolute overlay: floating a menu at the
@@ -1535,75 +1572,32 @@ const CONTEXT_ITEM_H: f32 = 37.0;
 /// edit stays restricted to the user's own text messages.
 fn context_menu_bar(state: &State) -> Element<'static> {
     let can_edit = state.context_can_edit();
-    let mut items = column![].spacing(0);
-    items = items.push(
-        button(
-            row![
-                icon(Icon::Reply, theme::ICON, 15.0),
-                text("Répondre").size(theme::font::PLACEHOLDER).color(rgb(theme::TEXT_PRIMARY)),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        )
-        .on_press(Message::ContextReply)
-        .width(Length::Fill)
-        .padding(10)
-        .style(menu_item_style),
-    );
-    items = items.push(
-        button(
-            row![
-                icon(Icon::Forward, theme::ICON, 15.0),
-                text("Transférer").size(theme::font::PLACEHOLDER).color(rgb(theme::TEXT_PRIMARY)),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        )
-        .on_press(Message::ContextForward)
-        .width(Length::Fill)
-        .padding(10)
-        .style(menu_item_style),
-    );
-    if can_edit {
-        items = items.push(
-            button(
-                text("Modifier").size(theme::font::PLACEHOLDER).color(rgb(theme::TEXT_PRIMARY)),
-            )
-            .on_press(Message::ContextEdit)
-            .width(Length::Fill)
-            .padding(10)
-            .style(menu_item_style),
-        );
-    }
-    if state
+    let has_text = state
         .context_menu
         .and_then(|c| state.messages.get(c.row))
-        .is_some_and(|m| !m.text.is_empty())
-    {
-        items = items.push(
-            button(
-                text("Copier").size(theme::font::PLACEHOLDER).color(rgb(theme::TEXT_PRIMARY)),
-            )
-            .on_press(Message::ContextCopy)
-            .width(Length::Fill)
-            .padding(10)
-            .style(menu_item_style),
-        );
+        .is_some_and(|m| !m.text.is_empty());
+
+    let mut items = column![].spacing(2);
+    items = items.push(menu_item(Message::ContextReply, Icon::Reply, "Répondre", false));
+    items = items.push(menu_item(
+        Message::ContextForward,
+        Icon::Forward,
+        "Transférer",
+        false,
+    ));
+    if can_edit {
+        items = items.push(menu_item(Message::ContextEdit, Icon::Edit, "Modifier", false));
+    }
+    if has_text {
+        items = items.push(menu_item(Message::ContextCopy, Icon::Copy, "Copier", false));
     }
     if can_edit {
-        items = items.push(
-            button(
-                text("Supprimer").size(theme::font::PLACEHOLDER).color(rgb(theme::ERROR)),
-            )
-            .on_press(Message::ContextDelete)
-            .width(Length::Fill)
-            .padding(10)
-            .style(menu_item_style),
-        );
+        items = items.push(menu_item(Message::ContextDelete, Icon::Trash, "Supprimer", true));
     }
 
     let menu_el = container(items)
         .width(theme::layout::CONTEXT_W)
+        .padding(CONTEXT_MENU_PAD)
         .style(menu_bg);
 
     // Right-aligned under the message (editable messages are ours → right).
@@ -1772,7 +1766,10 @@ fn build_layout(state: &State, pane_w: f32, view_h: f32) -> crate::state::MsgLay
         .map(|m| est_row_height(m, pane_w))
         .collect();
     let menu_row = state.context_menu.map(|c| c.row);
-    let menu_h_total = CONTEXT_ITEM_H * context_menu_items(state) as f32;
+    let n_items = context_menu_items(state) as f32;
+    // Item heights + 2 px inter-item spacing + the container's inner padding.
+    let menu_h_total =
+        CONTEXT_ITEM_H * n_items + (n_items - 1.0).max(0.0) * 2.0 + 2.0 * CONTEXT_MENU_PAD;
     let menu_h: Vec<f32> = (0..n)
         .map(|i| {
             if menu_row == Some(i) {
@@ -2013,19 +2010,48 @@ fn row_style(
     }
 }
 
-fn flat_button(_theme: &iced::Theme, _status: iced::widget::button::Status) -> iced::widget::button::Style {
+fn flat_button(theme: &iced::Theme, status: iced::widget::button::Status) -> iced::widget::button::Style {
+    icon_button_style(theme, status)
+}
+
+/// Circular icon button (M3 icon-button): transparent at rest, subtle
+/// state-layer fill on hover/press.
+fn icon_button_style(
+    _theme: &iced::Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    let bg = match status {
+        iced::widget::button::Status::Hovered => {
+            Some(iced::Background::Color(iced::Color::from_rgba(1.0, 1.0, 1.0, 0.09)))
+        }
+        iced::widget::button::Status::Pressed => {
+            Some(iced::Background::Color(iced::Color::from_rgba(1.0, 1.0, 1.0, 0.16)))
+        }
+        _ => None,
+    };
     iced::widget::button::Style {
-        background: None,
+        background: bg,
+        border: iced::Border {
+            radius: 999.0.into(),
+            ..iced::Border::default()
+        },
         ..iced::widget::button::Style::default()
     }
 }
 
 fn accent_circle_button(
     _theme: &iced::Theme,
-    _status: iced::widget::button::Status,
+    status: iced::widget::button::Status,
 ) -> iced::widget::button::Style {
+    let bg = match status {
+        iced::widget::button::Status::Hovered => {
+            theme::ACCENT_HOVER
+        }
+        iced::widget::button::Status::Pressed => theme::ACCENT_PRESSED,
+        _ => theme::ACCENT,
+    };
     iced::widget::button::Style {
-        background: Some(iced::Background::Color(rgb(theme::ACCENT))),
+        background: Some(iced::Background::Color(rgb(bg))),
         border: iced::Border {
             radius: 17.0.into(),
             ..iced::Border::default()
@@ -2034,9 +2060,19 @@ fn accent_circle_button(
     }
 }
 
-fn accent_button(_theme: &iced::Theme, _status: iced::widget::button::Status) -> iced::widget::button::Style {
+fn accent_button(
+    _theme: &iced::Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    let bg = match status {
+        iced::widget::button::Status::Hovered => {
+            theme::ACCENT_HOVER
+        }
+        iced::widget::button::Status::Pressed => theme::ACCENT_PRESSED,
+        _ => theme::ACCENT,
+    };
     iced::widget::button::Style {
-        background: Some(iced::Background::Color(rgb(theme::ACCENT))),
+        background: Some(iced::Background::Color(rgb(bg))),
         border: iced::Border {
             radius: 14.0.into(),
             ..iced::Border::default()
@@ -2045,22 +2081,42 @@ fn accent_button(_theme: &iced::Theme, _status: iced::widget::button::Status) ->
     }
 }
 
+/// Context-menu row: neutral hover fill, red-tinted hover for the
+/// destructive item, 8 px radius (M3: item corner < container corner).
 fn menu_item_style(
     _theme: &iced::Theme,
-    _status: iced::widget::button::Status,
+    status: iced::widget::button::Status,
+    destructive: bool,
 ) -> iced::widget::button::Style {
+    let bg = match status {
+        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
+            if destructive {
+                iced::Color::from_rgba(0.95, 0.45, 0.49, 0.14)
+            } else {
+                iced::Color::from_rgba(1.0, 1.0, 1.0, 0.08)
+            }
+        }
+        _ => iced::Color::TRANSPARENT,
+    };
     iced::widget::button::Style {
-        background: None,
+        background: Some(iced::Background::Color(bg)),
+        border: iced::Border {
+            radius: 8.0.into(),
+            ..iced::Border::default()
+        },
         ..iced::widget::button::Style::default()
     }
 }
 
+/// Menu surface: elevated dark fill, hairline border, 12 px corner radius
+/// (M3 "medium" component shape).
 fn menu_bg(_theme: &iced::Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(rgb((30, 42, 58)))),
+        background: Some(iced::Background::Color(rgb(theme::MENU_BG))),
         border: iced::Border {
-            radius: 8.0.into(),
-            ..iced::Border::default()
+            radius: 12.0.into(),
+            width: 1.0,
+            color: rgb(theme::MENU_BORDER),
         },
         ..container::Style::default()
     }
