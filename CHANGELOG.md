@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.7.0] - 2026-08-24
+
 ### Changed
 - **UI language switched to English**: every user-facing string (context menu,
   pinned banner, composer, upload bar, media placeholders/actions, forward
