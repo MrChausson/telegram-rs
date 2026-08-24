@@ -577,7 +577,8 @@ impl Telegram {
     }
 
     /// Lists the installed sticker packs with their documents (picker data).
-    ///    /// `messages.getAllStickers` returns only pack metadata; the actual
+    ///
+    /// `messages.getAllStickers` returns only pack metadata; the actual
     /// sticker documents come from one `messages.getStickerSet` call per pack
     /// (capped at [`STICKER_SETS_LIMIT`] packs to bound round-trips). Packs
     /// whose fetch fails are skipped — a partial picker beats an error page.

@@ -559,7 +559,8 @@ fn ensure_demo_stickers() -> Vec<DemoStickerSet> {
 }
 
 /// Canned info-panel detail for a demo chat (`None` = unknown chat).
-fn demo_chat_detail(id: i64) -> Option<ChatDetail> {    let d = match id {
+fn demo_chat_detail(id: i64) -> Option<ChatDetail> {
+    let d = match id {
         1001 => ChatDetail {
             id,
             title: "Camille".into(),

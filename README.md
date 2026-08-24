@@ -125,7 +125,7 @@ batches — each release moves the needle, not dribbles.
   composer (packs + thumbnail grid) and sending by document reference
 
 > 📋 **Copy / paste note:** message text can be copied from the message's
-> context menu (right-click → “Copier”), and text pastes into the composer
+> context menu (right-click → “Copy”), and text pastes into the composer
 > with Ctrl/⌘-V. Drag-to-select inside message bubbles isn't supported by the
 > Iced text widget — a documented trade-off.
 
