@@ -223,16 +223,20 @@ learned the hard way — do not re-learn them.
 
 ### Merge & review pipeline (lead's job)
 1. Agents push topic branches; they NEVER merge to main themselves.
-2. **NEVER push to `main` without explicit user approval** — this is a public
+2. **Every pushed branch MUST have an open PR**: create it as a **draft** as
+   soon as the branch is pushed and work is ongoing; mark it **ready for
+   review** when the work is complete and the full gate passed. A pushed
+   branch without a PR is a bug, not a style choice.
+3. **NEVER push to `main` without explicit user approval** — this is a public
    repository. Direct pushes to main (docs, fixes, anything) require asking
    the user first and waiting for a yes. Work can happen on main's working
    tree, but the push itself is gated.
-3. Before merging: a read-only reviewer agent reads the diffs and flags
+4. Before merging: a read-only reviewer agent reads the diffs and flags
    inconsistencies, perf risks, missed conventions.
-4. Lead merges one branch at a time (squash), resolving conflicts; after each
+5. Lead merges one branch at a time (squash), resolving conflicts; after each
    merge, run the visual QA: launch `--demo`, capture with `grim`, inspect
    with a vision agent.
-5. CI green → PR mergeable. Small PRs over big ones: less conflict surface,
+6. CI green → PR mergeable. Small PRs over big ones: less conflict surface,
    faster merges.
 
 ### Agent reliability (model quirks)
