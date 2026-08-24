@@ -1170,7 +1170,22 @@ fn conversation_pane(state: &State) -> Element<'_> {
     // outside it land on the backdrop layer and close it; scrolling still
     // reaches the underlying list (the backdrop only captures buttons), and
     // the composer below the stack stays fully interactive.
-    let body: Element<'_> = if state.emoji_panel_open {
+    // Composer panels float over the message list only (never over header or
+    // composer): a body-level stack keeps the chrome interactive and visible.
+    let body: Element<'_> = if state.sticker_picker_open {
+        iced::widget::Stack::with_children(vec![
+            body,
+            mouse_area(
+                iced::widget::Space::new()
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .on_press(Message::CloseStickerPicker)
+            .into(),
+            sticker_picker_card(state),
+        ])
+        .into()
+    } else if state.emoji_panel_open {
         iced::widget::Stack::with_children(vec![
             body,
             mouse_area(
@@ -1206,9 +1221,7 @@ fn conversation_pane(state: &State) -> Element<'_> {
 
     let pane = pane.push(top).push(body).push(composer).height(Length::Fill);
 
-    let pane: Element<'_> = if state.sticker_picker_open {
-        sticker_picker_overlay(state, pane.into())
-    } else if state.forward_pick.is_some() {
+    let pane: Element<'_> = if state.forward_pick.is_some() {
         forward_overlay(state, pane.into())
     } else {
         pane.into()
@@ -1470,10 +1483,7 @@ const STICKER_THUMB: f32 = 64.0;
 /// Floating sticker picker anchored above the composer (left side): the
 /// installed packs, each with its title and a 4-column thumbnail grid.
 /// Clicking a thumbnail sends the sticker and closes the panel.
-fn sticker_picker_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
-    // Kept for overlay-signature symmetry (`forward_overlay`); the picker is
-    // a floating card, not a replacement of the pane content.
-    let _ = under;
+fn sticker_picker_card<'a>(state: &'a State) -> Element<'a> {
     let close = button(icon(Icon::Close, theme::ICON, 14.0))
         .on_press(Message::CloseStickerPicker)
         .padding(6)
@@ -1563,22 +1573,12 @@ fn sticker_picker_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'
     .padding(14)
     .style(menu_bg);
 
-    // Anchor the card bottom-left, above the composer bar; clicks on the dim
-    // area close it via Escape semantics (the ✕ is always visible too).
     container(card)
         .width(Length::Fill)
         .height(Length::Fill)
-        .align_x(iced::alignment::Horizontal::Left)
-        .align_y(iced::alignment::Vertical::Bottom)
-        .padding(iced::Padding {
-            left: 16.0,
-            bottom: theme::layout::INPUT_H + 20.0,
-            ..Default::default()
-        })
-        .style(|_| container::Style {
-            background: Some(iced::Background::Color(Color::from_rgba8(0, 0, 0, 120.0))),
-            ..container::Style::default()
-        })
+        .align_x(Alignment::Start)
+        .align_y(Alignment::End)
+        .padding([0.0, 12.0])
         .into()
 }
 
@@ -1630,9 +1630,8 @@ fn forward_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
     .padding(14)
     .style(menu_bg);
 
-    // Dim + center the card over the conversation pane.
-    let _ = under;
-    container(card)
+    // Dim + center the card over the conversation pane (pane stays visible).
+    let dim = container(card)
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
@@ -1640,8 +1639,8 @@ fn forward_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
         .style(|_| container::Style {
             background: Some(iced::Background::Color(Color::from_rgba8(0, 0, 0, 160.0))),
             ..container::Style::default()
-        })
-        .into()
+        });
+    iced::widget::stack![under, dim].into()
 }
 
 /// Centered modal creating a group or channel: title (+ description for
@@ -1790,10 +1789,10 @@ fn confirm_overlay<'a>(state: &'a State, under: Element<'a>) -> Element<'a> {
     dim_centered(card.width(280.0).padding(18), under)
 }
 
-/// Dims `under` and centers `card` over it (shared modal chrome).
+/// Dims `under` and centers `card` over it (shared modal chrome). The pane
+/// stays visible under the dim layer.
 fn dim_centered<'a>(card: impl Into<Element<'a>>, under: Element<'a>) -> Element<'a> {
-    let _ = under;
-    container(card.into())
+    let dim = container(card.into())
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
@@ -1801,8 +1800,8 @@ fn dim_centered<'a>(card: impl Into<Element<'a>>, under: Element<'a>) -> Element
         .style(|_| container::Style {
             background: Some(iced::Background::Color(Color::from_rgba8(0, 0, 0, 160.0))),
             ..container::Style::default()
-        })
-        .into()
+        });
+    iced::widget::stack![under, dim].into()
 }
 
 /// Chat header: back, avatar, name + status, search/info icons (+ FPS badge).
@@ -1954,18 +1953,45 @@ fn emoji_section_label(title: &str) -> Element<'_> {
         .into()
 }
 
+/// Font used to render emoji glyphs in color.
+///
+/// The system color-emoji font is requested by family name; if absent the
+/// engine falls back to whatever covers the codepoints (monochrome).
+fn emoji_font() -> iced::Font {
+    #[cfg(target_os = "macos")]
+    {
+        iced::Font::with_name("Apple Color Emoji")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        iced::Font::with_name("Segoe UI Emoji")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        iced::Font::with_name("Noto Color Emoji")
+    }
+}
+
 /// One 8-column grid of emoji buttons (transparent, light hover).
+///
+/// Cells explicitly request the system color-emoji font: the default
+/// font chain resolves some codepoints (❤ ⚠ ✂ …) to monochrome outlines
+/// in text fonts like DejaVu before reaching Noto Color Emoji.
 fn emoji_grid(emojis: &str) -> Element<'static> {
     let mut grid = column![].spacing(2);
     for line in emojis.split_whitespace().collect::<Vec<_>>().chunks(EMOJI_COLS) {
         let mut r = row![].spacing(2);
         for e in line {
             r = r.push(
-                button(text(e.to_string()).size(EMOJI_FONT_SIZE))
-                    .on_press(Message::EmojiPicked((*e).to_string()))
-                    .width(Length::Fixed(38.0))
-                    .height(Length::Fixed(32.0))
-                    .style(|t, s| menu_item_style(t, s, false)),
+                button(
+                    text(e.to_string())
+                        .size(EMOJI_FONT_SIZE)
+                        .font(emoji_font()),
+                )
+                .on_press(Message::EmojiPicked((*e).to_string()))
+                .width(Length::Fixed(38.0))
+                .height(Length::Fixed(32.0))
+                .style(|t, s| menu_item_style(t, s, false)),
             );
         }
         grid = grid.push(r);

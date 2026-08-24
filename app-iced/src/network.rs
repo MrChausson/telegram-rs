@@ -662,8 +662,8 @@ async fn serve_demo(
         .as_secs() as i32;
 
     let chats = vec![
-        DemoChat { id: 1002, title: "Rust Group".into(), subtitle: "Thomas: novel review of the PR?".into(), last_ago: 7200, unread: 0, hue: 0.1 },
         DemoChat { id: 1001, title: "Camille".into(), subtitle: "Great! see you tomorrow 👋".into(), last_ago: 42, unread: 3, hue: 0.55 },
+        DemoChat { id: 1002, title: "Rust Group".into(), subtitle: "Thomas: novel review of the PR?".into(), last_ago: 7200, unread: 0, hue: 0.1 },
         DemoChat { id: 1003, title: "Landscape Channel".into(), subtitle: "Sunset over the sea 🏖".into(), last_ago: 86400, unread: 0, hue: 0.95 },
         DemoChat { id: 1004, title: "Family Group".into(), subtitle: "Mom: when are you coming over?".into(), last_ago: 172800, unread: 12, hue: 0.3 },
         DemoChat { id: 1005, title: "Paris Bots".into(), subtitle: "New version 2.4.0 released".into(), last_ago: 604800, unread: 0, hue: 0.75 },
@@ -1406,6 +1406,11 @@ struct Downloads {
     /// On-disk picker thumbnails: `doc_id -> path`.
     thumbs: Mutex<HashMap<i64, String>>,
     sem: Arc<Semaphore>,
+    /// Picker thumbnails use their own small budget so user-initiated
+    /// sticker loads never queue behind the startup media backlog
+    /// (avatars + history photo thumbnails can hold the shared semaphore
+    /// for tens of seconds on a real account).
+    thumb_sem: Arc<Semaphore>,
 }
 
 impl Downloads {
@@ -1417,6 +1422,7 @@ impl Downloads {
             sticker_refs: Mutex::new(HashMap::new()),
             thumbs: Mutex::new(HashMap::new()),
             sem: Arc::new(Semaphore::new(DOWNLOAD_CONCURRENCY)),
+            thumb_sem: Arc::new(Semaphore::new(DOWNLOAD_CONCURRENCY)),
         }
     }
 
@@ -2604,11 +2610,14 @@ fn spawn_thumb_download(
     }
     let (access_hash, file_reference) = match downloads.sticker_refs.lock().unwrap().get(&doc_id) {
         Some((h, r)) => (*h, r.clone()),
-        None => return,
+        None => {
+            eprintln!("sticker thumb {doc_id}: no stored reference");
+            return;
+        }
     };
     tokio::spawn(async move {
         let _permit = downloads
-            .sem
+            .thumb_sem
             .clone()
             .acquire_owned()
             .await
@@ -2623,7 +2632,14 @@ fn spawn_thumb_download(
                 downloads.thumbs.lock().unwrap().insert(doc_id, p.clone());
                 Some(p)
             }
-            _ => None,
+            Ok(None) => {
+                eprintln!("sticker thumb {doc_id}: no decodable payload");
+                None
+            }
+            Err(e) => {
+                eprintln!("sticker thumb {doc_id}: download failed: {e:#}");
+                None
+            }
         };
         let _ = ui_tx.send(UiMessage::StickerThumbReady { doc_id, path });
     });

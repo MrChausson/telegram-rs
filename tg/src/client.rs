@@ -539,9 +539,11 @@ impl Telegram {
         Ok(sent.id())
     }
 
-    /// Downloads a sticker document by reference into `dir`
-    /// (`{doc_id}.webp`), returning the saved path. Backs the picker's
-    /// thumbnails; cached on disk like message media.
+    /// Downloads a sticker picker thumbnail by reference into `dir`,
+    /// returning the saved path. Prefers the small server-side thumbnail
+    /// (`thumb_size="s"` — always a decodable jpeg/webp); animated formats
+    /// (.tgs/.webm) only exist as full documents, which this pipeline cannot
+    /// decode, so the thumbnail is the reliable source. Cached on disk.
     pub async fn download_sticker_doc(
         &self,
         doc_id: i64,
@@ -550,30 +552,51 @@ impl Telegram {
         dir: &std::path::Path,
     ) -> Result<Option<std::path::PathBuf>> {
         std::fs::create_dir_all(dir)?;
-        let cached = dir.join(format!("{doc_id}.webp"));
-        if cached.exists() {
+        // Cache probe first (both extensions we may have written).
+        let cached_webp = dir.join(format!("{doc_id}.webp"));
+        let cached_jpg = dir.join(format!("{doc_id}.jpg"));
+        if cached_webp.exists() {
+            return Ok(Some(cached_webp));
+        }
+        if cached_jpg.exists() {
+            return Ok(Some(cached_jpg));
+        }
+        let location_for = |thumb: &str| {
+            tl::enums::InputFileLocation::InputDocumentFileLocation(
+                tl::types::InputDocumentFileLocation {
+                    id: doc_id,
+                    access_hash,
+                    file_reference: file_reference.clone(),
+                    thumb_size: thumb.to_string(),
+                },
+            )
+        };
+        for size in ["s", ""] {
+            let mut it = self.client.iter_download(&RawPhoto(location_for(size)));
+            let mut bytes = Vec::new();
+            while let Some(chunk) = it.next().await? {
+                bytes.extend_from_slice(&chunk);
+            }
+            if !Self::decodable_image(&bytes) {
+                continue;
+            }
+            let ext = if bytes.starts_with(b"\xff\xd8") { "jpg" } else { "webp" };
+            let cached = dir.join(format!("{doc_id}.{ext}"));
+            let tmp = dir.join(format!("{doc_id}.tmp"));
+            std::fs::write(&tmp, &bytes)?;
+            std::fs::rename(&tmp, &cached)?;
             return Ok(Some(cached));
         }
-        let location = tl::enums::InputFileLocation::InputDocumentFileLocation(
-            tl::types::InputDocumentFileLocation {
-                id: doc_id,
-                access_hash,
-                file_reference,
-                thumb_size: String::new(),
-            },
-        );
-        let mut it = self.client.iter_download(&RawPhoto(location));
-        let mut bytes = Vec::new();
-        while let Some(chunk) = it.next().await? {
-            bytes.extend_from_slice(&chunk);
-        }
-        if bytes.is_empty() {
-            return Ok(None);
-        }
-        let tmp = dir.join(format!("{doc_id}.tmp"));
-        std::fs::write(&tmp, &bytes)?;
-        std::fs::rename(&tmp, &cached)?;
-        Ok(Some(cached))
+        Ok(None)
+    }
+
+    /// True when the payload is an image this app can decode (jpeg or webp
+    /// raster). Animated sticker payloads (.tgs gzip / .webm container) are
+    /// rejected here so callers keep showing placeholders instead of broken
+    /// images.
+    fn decodable_image(bytes: &[u8]) -> bool {
+        bytes.starts_with(b"\xff\xd8")                       // jpeg
+            || bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
     }
 
     /// Lists the installed sticker packs with their documents (picker data).
