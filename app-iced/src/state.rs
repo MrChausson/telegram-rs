@@ -23,6 +23,29 @@ pub fn preview_text(text: &str, photo: &Option<(u32, u32)>, doc: &Option<DocMeta
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
+// ---------------------------------------------------------------------------
+// Last-open-chat persistence
+// ---------------------------------------------------------------------------
+
+/// Reads the persisted last-open chat id from `path` (a single i64 line).
+fn read_last_chat_at(path: &std::path::Path) -> Option<i64> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Persists (`Some`) or clears (`None`) the last-open chat id at `path`.
+/// Best-effort: a read-only or missing data dir must never crash the app.
+fn write_last_chat_at(path: &std::path::Path, id: Option<i64>) {
+    let _ = match id {
+        Some(id) => std::fs::write(path, id.to_string()),
+        None => std::fs::remove_file(path),
+    };
+}
+
+/// Default location of the `last-chat` marker inside the app data dir.
+fn last_chat_path() -> std::path::PathBuf {
+    crate::network::data_dir().join("last-chat")
+}
+
 /// Sign-in flow step (only used while unauthenticated).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginStep {
@@ -151,6 +174,12 @@ pub struct State {
     pub viewer: Option<String>,
     /// Open the first chat once the list arrives (test/demo convenience).
     pub auto_open_first: bool,
+    /// Persist/restore UI state (last open chat). Off in `--demo` so QA runs
+    /// never write into the real data dir.
+    pub persist_ui: bool,
+    /// Chat to re-open when the dialog list arrives (read from `last-chat`
+    /// at boot). Consumed on first `Dialogs`, falls back to `auto_open_first`.
+    pub initial_chat: Option<i64>,
     /// True once the message list should be scrolled to the bottom (open chat,
     /// new/outgoing message). Cleared by the view after use.
     pub scroll_to_bottom: bool,
@@ -239,6 +268,8 @@ impl State {
             composer: String::new(),
             viewer: None,
             auto_open_first: false,
+            persist_ui: false,
+            initial_chat: None,
             scroll_to_bottom: false,
             scroll_offset: 0.0,
             dialog_scroll_offset: 0.0,
@@ -261,6 +292,13 @@ impl State {
     /// Sets the "open first chat once the list is loaded" convenience flag.
     pub fn with_auto_open_first(mut self, on: bool) -> Self {
         self.auto_open_first = on;
+        self
+    }
+
+    /// Enables persisting/restoring the last open chat (off in `--demo`).
+    pub fn with_persist_ui(mut self, on: bool) -> Self {
+        self.persist_ui = on;
+        self.initial_chat = read_last_chat_at(&last_chat_path());
         self
     }
 
@@ -1047,8 +1085,24 @@ impl State {
         self.forward_pick = None;
         self.pending_jump_id = None;
         self.composer.clear();
+        if self.persist_ui {
+            write_last_chat_at(&last_chat_path(), Some(id));
+        }
         let _ = self.req_tx.send(Request::OpenChat { id });
         let _ = self.req_tx.send(Request::MarkRead { id });
+        self.invalidate_layout();
+    }
+
+    /// Back to the chat list: closes the open chat and clears the
+    /// conversation-scoped state (also forgets the `last-chat` marker).
+    pub fn close_chat(&mut self) {
+        self.open_chat = None;
+        self.messages.clear();
+        self.editing = None;
+        self.context_menu = None;
+        if self.persist_ui {
+            write_last_chat_at(&last_chat_path(), None);
+        }
         self.invalidate_layout();
     }
 
@@ -1211,6 +1265,72 @@ mod tests {
         assert!(state.authenticated);
         assert_eq!(state.open_chat, Some(42));
         assert_eq!(state.messages.len(), 2);
+    }
+
+    #[test]
+    fn last_chat_marker_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("tg-lastchat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("last-chat");
+
+        assert_eq!(read_last_chat_at(&path), None);
+        write_last_chat_at(&path, Some(987654321));
+        assert_eq!(read_last_chat_at(&path), Some(987654321));
+        write_last_chat_at(&path, None);
+        assert_eq!(read_last_chat_at(&path), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dialogs_reopen_last_chat_when_present() {
+        let (mut state, mut req_rx) = demo_state();
+        state.authenticated = true;
+        state.open_chat = None;
+        state.initial_chat = Some(7);
+        state.on_message(UiMessage::Dialogs(vec![
+            ChatRow { id: 1, title: "A".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
+            ChatRow { id: 7, title: "B".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
+        ]));
+        // The restore logic lives in the shell's `update`, so simulate the
+        // fallback it applies when the persisted chat is in the list.
+        let wanted = state
+            .initial_chat
+            .take()
+            .filter(|id| state.dialogs.iter().any(|d| d.id == *id));
+        assert_eq!(wanted, Some(7));
+        state.open_chat(7);
+        assert_eq!(state.open_chat, Some(7));
+        assert!(drain(&mut req_rx).iter().any(|r| matches!(r, Request::OpenChat { id: 7 })));
+    }
+
+    #[test]
+    fn stale_last_chat_falls_back_to_first() {
+        let (mut state, _) = demo_state();
+        state.open_chat = None;
+        state.initial_chat = Some(999); // not in the list anymore
+        state.on_message(UiMessage::Dialogs(vec![
+            ChatRow { id: 1, title: "A".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
+            ChatRow { id: 2, title: "B".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
+        ]));
+        let wanted = state
+            .initial_chat
+            .take()
+            .filter(|id| state.dialogs.iter().any(|d| d.id == *id));
+        assert_eq!(wanted, None); // shell will fall back to auto_open_first
+    }
+
+    #[test]
+    fn close_chat_clears_state() {
+        let (mut state, mut req_rx) = demo_state();
+        state.persist_ui = false; // no fs writes in unit tests
+        state.close_chat();
+        assert_eq!(state.open_chat, None);
+        assert!(state.messages.is_empty());
+        assert!(state.editing.is_none());
+        assert!(state.context_menu.is_none());
+        drain(&mut req_rx);
     }
 
     #[test]

@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 use iced::widget::{
-    button, column, container, image, mouse_area, row, scrollable, text, text_input,
+    button, column, container, image, mouse_area, rich_text, row, scrollable, text, text_input,
 };
 use iced::{Alignment, Color, Length, Task};
 
@@ -44,6 +44,90 @@ fn rgb(c: (u8, u8, u8)) -> Color {
 /// True when a picked file looks like an image (compressed-photo send).
 pub fn looks_like_image(path: &str) -> bool {
     tg::client::is_image(std::path::Path::new(path))
+}
+
+/// Characters that terminate an inline URL (whitespace + closing
+/// punctuation). `.`/`:`/`?`/`!` are NOT terminators — they occur inside
+/// URLs ("www.", "https://", "?query=1"); trailing ones are stripped from
+/// the match instead.
+fn is_url_end(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(c, ',' | ';' | ')' | ']' | '}' | '>' | '<' | '"' | '\'' | '(')
+}
+
+/// Byte offset of the first inline URL in `s`, if any.
+fn find_url(s: &str) -> Option<usize> {
+    ["https://", "http://", "www."]
+        .iter()
+        .filter_map(|p| s.find(p))
+        .min()
+}
+
+/// Splits `s` into spans, turning http(s)/`www.` URLs into accent-colored,
+/// underlined, clickable spans.
+///
+/// `None` when `s` has no URL: callers keep the plain `text` widget so the
+/// rich-text path is only paid for messages that actually contain links
+/// (scroll perf: most rows stay on the plain-text hot path).
+fn linkify(s: &str) -> Option<Vec<iced::widget::text::Span<'_, String>>> {
+    use iced::widget::text::Span;
+
+    let mut spans: Vec<Span<'_, String>> = Vec::new();
+    let mut rest = s;
+    while let Some(at) = find_url(rest) {
+        let (head, from) = rest.split_at(at);
+        let url_len = from
+            .char_indices()
+            .find(|(_, c)| is_url_end(*c))
+            .map(|(i, _)| i)
+            .unwrap_or(from.len());
+        let (matched, _) = from.split_at(url_len);
+        // Sentence punctuation glued to the URL ("…voir https://a.io." / ",…")
+        // belongs to the text, not the link.
+        let stripped = matched
+            .trim_end_matches(['.', ',', ':', ';', '!', '?'])
+            .len();
+        let (url, tail) = from.split_at(stripped);
+        if url.len() > 4 || url.starts_with("http") {
+            if !head.is_empty() {
+                spans.push(Span::new(head));
+            }
+            spans.push(
+                Span::new(url)
+                    .link(url.to_string())
+                    .color(rgb(theme::ACCENT))
+                    .underline(true),
+            );
+            rest = tail;
+        } else {
+            // Bare "www." with nothing after it — plain text, keep scanning.
+            spans.push(Span::new(&rest[..at + 4]));
+            rest = &rest[at + 4..];
+        }
+    }
+    // Only worth the rich-text widget when an actual link was found.
+    if !spans.iter().any(|s| s.link.is_some()) {
+        return None;
+    }
+    if !rest.is_empty() {
+        spans.push(Span::new(rest));
+    }
+    Some(spans)
+}
+
+/// Message body / caption text: plain `text` when there is no URL, clickable
+/// rich spans otherwise.
+fn message_body<'a>(t: &'a str) -> Element<'a> {
+    match linkify(t) {
+        Some(spans) => {
+            rich_text(spans)
+                .on_link_click(Message::OpenUrl)
+                .size(theme::font::MESSAGE)
+                .color(Color::WHITE)
+                .into()
+        }
+        None => text(t).size(theme::font::MESSAGE).color(Color::WHITE).into(),
+    }
 }
 
 /// UI → application messages.
@@ -95,6 +179,8 @@ pub enum Message {
     VoiceClicked { chat_id: i64, msg_id: i32, path: String },
     /// Periodic tick while a voice note is playing (progress + completion).
     VoiceTick,
+    /// A link inside a message was clicked: open it in the system browser.
+    OpenUrl(String),
     /// Composer text changed.
     ComposerChanged(String),
     /// Composer submitted (send / edit).
@@ -135,6 +221,7 @@ fn boot() -> (State, Task<Message>) {
     state.tray_actions = tray_actions;
     let state = state
         .with_auto_open_first(open_first || demo)
+        .with_persist_ui(!demo)
         .with_perf(perf)
         .with_continuous(continuous)
         .with_scroll_perf(scroll_perf);
@@ -144,11 +231,22 @@ fn boot() -> (State, Task<Message>) {
 fn update(state: &mut State, msg: Message) -> Task<Message> {
     match msg {
         Message::Ui(ui) => {
-            // Auto-open the first chat once the dialog list arrives.
+            // Once the dialog list arrives: re-open the last-used chat when
+            // one was persisted, else fall back to "open the first chat".
             if matches!(ui, UiMessage::Dialogs(_)) {
                 state.on_message(ui);
-                if state.auto_open_first && state.open_chat.is_none() {
-                    if let Some(id) = state.dialogs.first().map(|d| d.id) {
+                if state.open_chat.is_none() {
+                    let wanted = state
+                        .initial_chat
+                        .take()
+                        .filter(|id| state.dialogs.iter().any(|d| d.id == *id));
+                    let target = wanted.or_else(|| {
+                        state
+                            .auto_open_first
+                            .then(|| state.dialogs.first().map(|d| d.id))
+                            .flatten()
+                    });
+                    if let Some(id) = target {
                         state.open_chat(id);
                     }
                 }
@@ -157,13 +255,7 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             }
         }
         Message::OpenChat(id) => state.open_chat(id),
-        Message::BackToChats => {
-            state.open_chat = None;
-            state.messages.clear();
-            state.editing = None;
-            state.context_menu = None;
-            state.invalidate_layout();
-        }
+        Message::BackToChats => state.close_chat(),
         Message::RowClicked(row) => state.click(row),
         Message::RowContext(row) => state.open_context(row),
         Message::ContextEdit => state.context_edit(),
@@ -231,6 +323,15 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             }
         }
         Message::VoiceTick => state.on_voice_tick(),
+        Message::OpenUrl(url) => {
+            // Bare "www." links get a scheme so the opener accepts them.
+            let url = if url.starts_with("www.") {
+                format!("https://{url}")
+            } else {
+                url
+            };
+            let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+        }
         Message::ComposerChanged(text) => {
             state.composer = text;
             // Notify the server while the user types (best-effort).
@@ -1286,10 +1387,7 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
                 if m.text.is_empty() {
                     horizontal_spacer()
                 } else {
-                    text(&m.text)
-                        .size(theme::font::MESSAGE)
-                        .color(Color::WHITE)
-                        .into()
+                    message_body(&m.text)
                 },
             ]
             .spacing(6)
@@ -1311,7 +1409,7 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
                 if m.text.is_empty() {
                     horizontal_spacer()
                 } else {
-                    text(&m.text).size(theme::font::MESSAGE).color(Color::WHITE).into()
+                    message_body(&m.text)
                 },
             ]
             .spacing(6)
@@ -1320,7 +1418,7 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
             placeholder_strip("Chargement de l'image…")
         }
     } else {
-        text(&m.text).size(theme::font::MESSAGE).color(Color::WHITE).into()
+        message_body(&m.text)
     };
 
     // Stack the quote above the media/text body.
@@ -2305,5 +2403,44 @@ mod tests {
         state.dialog_scroll_offset = 17_000.0;
         let el = std::hint::black_box(dialog_list(&state, 610.0));
         let _ = el;
+    }
+
+    #[test]
+    fn linkify_returns_none_without_url() {
+        assert!(linkify("salut, ça va ? rien à voir").is_none());
+        assert!(linkify("").is_none());
+        // Bare "www." with nothing behind it is not a link.
+        assert!(linkify("regarde www. et dis-moi").is_none());
+    }
+
+    #[test]
+    fn linkify_extracts_https_url_with_context() {
+        let spans = linkify("voici https://example.com/a?b=1 le lien").unwrap();
+        let texts: Vec<&str> = spans.iter().map(|s| s.text.as_ref()).collect();
+        assert_eq!(texts, ["voici ", "https://example.com/a?b=1", " le lien"]);
+        assert_eq!(spans[1].link.as_deref(), Some("https://example.com/a?b=1"));
+        assert!(spans[1].underline);
+        assert!(spans[1].color.is_some());
+    }
+
+    #[test]
+    fn linkify_handles_www_and_strips_trailing_punctuation() {
+        let spans = linkify("va sur www.rust-lang.org, c'est top.").unwrap();
+        let texts: Vec<&str> = spans.iter().map(|s| s.text.as_ref()).collect();
+        assert_eq!(
+            texts,
+            ["va sur ", "www.rust-lang.org", ", c'est top."]
+        );
+        assert_eq!(spans[1].link.as_deref(), Some("www.rust-lang.org"));
+    }
+
+    #[test]
+    fn linkify_finds_multiple_urls() {
+        let spans = linkify("http://a.io et www.b.io").unwrap();
+        let links: Vec<&str> = spans
+            .iter()
+            .filter_map(|s| s.link.as_deref())
+            .collect();
+        assert_eq!(links, ["http://a.io", "www.b.io"]);
     }
 }
