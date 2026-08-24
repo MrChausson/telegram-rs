@@ -188,3 +188,45 @@ you measure garbage). Use it before blaming the loop.
 - CI runs `cargo test --workspace` and a release build (`.github/workflows/`).
 - Branch topology: `main` is the shipped line (auto-release on tags:
   `v0.3.0` etc.); feature work happens on topic branches until merged.
+
+## Multi-agent sessions (Ensemble)
+
+Hard rules for any session where several agents work in parallel. These were
+learned the hard way — do not re-learn them.
+
+### Global conventions (confirm with the user BEFORE spawning agents)
+- **All user-facing UI text is ENGLISH** (labels, placeholders, demo content,
+  error strings, tray tooltips). No French UI, even though early history had
+  some — it was translated in `feat/ui-english`.
+- Documentation (README, CHANGELOG, AGENTS.md) stays English too.
+- Confirm language/scope/style conventions with the user before spawning any
+  agent that writes UI or docs.
+
+### Agent workflow discipline (build loop)
+- **Iterate with `cargo check -p <crate>`** (seconds), NOT the full test
+  suite. The full gate runs ONCE before commit:
+  1. `cargo test --workspace`
+  2. `cargo clippy --workspace --all-targets` (must be 0 warnings)
+  3. `cargo build --release -p app-iced`
+  Never run release builds or full tests mid-iteration; never measure perf in
+  a debug build.
+- Keep each agent's edits grouped and clearly separated so a human (or lead)
+  can merge branches sequentially with minimal conflicts.
+
+### Scope isolation between parallel agents
+- Each agent gets an explicit file whitelist + a "do not touch" list covering
+  files another agent owns. State additions must be namespaced clearly (e.g.
+  prefix fields/handlers with the feature) so merges are mechanical.
+- Land global/transversal changes (i18n passes, big refactors, renames)
+  ALONE first, then spawn feature agents on top of the result. Never run a
+  transversal pass concurrently with feature work on the same files.
+
+### Merge & review pipeline (lead's job)
+1. Agents push topic branches; they NEVER merge to main themselves.
+2. Before merging: a read-only reviewer agent reads the diffs and flags
+   inconsistencies, perf risks, missed conventions.
+3. Lead merges one branch at a time (squash), resolving conflicts; after each
+   merge, run the visual QA: launch `--demo`, capture with `grim`, inspect
+   with a vision agent.
+4. CI green → PR mergeable. Small PRs over big ones: less conflict surface,
+   faster merges.
