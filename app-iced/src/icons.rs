@@ -381,7 +381,7 @@ fn draw_icon(pixmap: &mut Pixmap, kind: Icon, cx: f32, cy: f32, size: f32, color
         Icon::Logo => {
             // App logo: accent disc + white paper plane (classic "send" mark,
             // Material send polygon scaled into the disc).
-            fill_circle(pixmap, cx, cy, half, (51, 144, 236));
+            fill_circle(pixmap, cx, cy, half, color);
             // Send-plane in a 24-unit box, scaled to 62% of the icon size.
             let s = size * 0.62 / 24.0;
             let bx = cx - 12.0 * s + size * 0.01; // nudge right: plane is asymmetric
@@ -530,6 +530,12 @@ fn render(kind: Icon, color: (u8, u8, u8), px: u32) -> (Pixmap, u32) {
     let mut pixmap = Pixmap::new(px, px).expect("icon pixmap");
     draw_icon(&mut pixmap, kind, size / 2.0, size / 2.0, size, color);
     (pixmap, px)
+}
+
+/// Renders the app logo (accent disc + paper plane) as a standalone RGBA8
+/// pixmap — used by the tray (`ksni::Icon`) and any other embedder.
+pub fn render_logo_rgba(px: u32) -> Pixmap {
+    render(Icon::Logo, crate::theme::ACCENT, px).0
 }
 
 /// Builds an `Element` drawing the given icon, `px` logical size.

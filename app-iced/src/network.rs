@@ -529,7 +529,19 @@ async fn serve_demo(
                     ..MsgRow::text(7, "", now - 500, true)
                 },
                 MsgRow::text(8, "Génial, on y va samedi ? 😎", now - 300, false),
-                MsgRow::text(9, "Oui ! à demain 👋", now - 42, true),
+                MsgRow::text(
+                    9,
+                    "Tiens, la doc est là : https://doc.rust-lang.org/book/ 😉",
+                    now - 120,
+                    false,
+                ),
+                MsgRow::text(
+                    10,
+                    "Et le changelog complet : https://github.com/rust-lang/rust/blob/master/RELEASES.md#version-1800-2021-10-21",
+                    now - 100,
+                    true,
+                ),
+                MsgRow::text(11, "Oui ! à demain 👋", now - 42, true),
             ],
             1002 => vec![
                 MsgRow::text(1, "Qui veut présenter son projet vendredi ?", now - 14400, false),

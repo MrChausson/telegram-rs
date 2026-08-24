@@ -106,6 +106,8 @@ batches — each release moves the needle, not dribbles.
 - 🎙️ **Voice notes** — recorded voice messages play in-app with a play/pause bar and progress
 - 🔔 **Desktop notifications** — new messages in non-open chats raise a desktop notification
 - 🫗 **System tray** — tray icon with "Open" / "Quit" actions (StatusNotifier, no GTK)
+- 🔗 **Clickable links** — URLs in messages open in the system browser
+- 🚪 **Reopen last chat** — the app relaunches straight into the chat you had open
 - ↩️ **Replies & forwards** — quote a message in reply, or forward it to any chat
 - 🔍 **Search** — global across chats, or inside the open chat
 - ✏️ **Live sync** — edits and deletions from any device

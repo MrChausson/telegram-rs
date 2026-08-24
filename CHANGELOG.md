@@ -6,6 +6,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Long unbreakable words (URLs) no longer overflow their bubble**: message
+  text wraps at the glyph level when a single word exceeds the bubble width
+  (`WordOrGlyph` wrapping).
+- **The context menu no longer pushes the conversation down**: it now floats
+  as an overlay anchored under the right-clicked message (above it when there
+  is no room below), without participating in the list layout. It also stays
+  anchored while its row is scrolled out of the virtualized window.
+
+### Added
+- **Clickable links**: http(s)/`www.` URLs inside messages render in the
+  accent color, underlined, and open in the system browser on click. Messages
+  without links keep the plain-text hot path (zero scroll-perf cost).
+- **Reopen the last chat**: the app now reopens the chat you had open when it
+  was closed (persisted in the data dir; falls back to the first chat, and is
+  disabled in `--demo` so QA runs stay hermetic). Going back to the list
+  forgets the marker.
+- **Tray logo**: the StatusNotifier item now embeds the app mark (accent disc
+  + paper plane, rendered at 32/64 px) instead of relying on a themed icon
+  name — plus a tooltip.
+
 ### Changed
 - **UI design pass (Material 3 inspired)**: the message context menu is now a
   proper menu surface — 12 px rounded corners, hairline border, inner padding,
