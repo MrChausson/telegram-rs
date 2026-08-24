@@ -10,7 +10,7 @@ use grammers_client::tl;
 use grammers_mtsender::SenderPool;
 use grammers_session::updates::UpdatesLike;
 
-use crate::model::{ChatInfo, ForwardInfo, GlobalHit, MediaKind, MessageInfo};
+use crate::model::{ChatDetail, ChatInfo, ChatKind, ForwardInfo, GlobalHit, MediaKind, MessageInfo, ParticipantRow, ParticipantRole};
 use crate::session::FileSession;
 
 /// Wrapped Telegram client with the network runtime running in the background.
@@ -564,6 +564,281 @@ impl Telegram {
         std::fs::write(&tmp, &bytes)?;
         std::fs::rename(&tmp, &cached)?;
         Ok(Some(cached))
+    }
+
+    /// Fetches detailed info about a chat for the info side panel.
+    ///
+    /// Dispatches on the peer kind: `users.getFullUser`,
+    /// `channels.getFullChannel` or `messages.getFullChat`. Whatever Telegram
+    /// doesn't expose (hidden bio, no username…) stays `None` — a partial
+    /// result beats an error here.
+    pub async fn get_chat_detail(
+        &self,
+        peer_ref: &grammers_session::types::PeerRef,
+    ) -> Result<ChatDetail> {
+        use grammers_session::types::PeerKind;
+        let id = peer_ref.id.bot_api_dialog_id();
+        match peer_ref.id.kind() {
+            PeerKind::User | PeerKind::UserSelf => {
+                let input_user = tl::enums::InputUser::User(tl::types::InputUser {
+                    user_id: peer_ref.id.bare_id(),
+                    access_hash: peer_ref.auth.hash(),
+                });
+                let mut users = self
+                    .client
+                    .invoke(&tl::functions::users::GetUsers {
+                        id: vec![input_user.clone()],
+                    })
+                    .await
+                    .context("fetching user")?;
+                let (title, username, phone, bot) = match users.pop() {
+                    Some(tl::enums::User::User(u)) => {
+                        let name = [
+                            u.first_name.clone().unwrap_or_default(),
+                            u.last_name.clone().unwrap_or_default(),
+                        ]
+                        .into_iter()
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                        let username = u
+                            .username
+                            .clone()
+                            .or_else(|| {
+                                u.usernames.as_ref().and_then(|v| {
+                                    v.iter().map(|x| match x {
+                                        tl::enums::Username::Username(un) => {
+                                            un.username.clone()
+                                        }
+                                    }).next()
+                                })
+                            })
+                            .filter(|s| !s.is_empty());
+                        (
+                            if name.is_empty() { "Unknown".to_string() } else { name },
+                            username,
+                            u.phone.clone().filter(|p| !p.is_empty()),
+                            u.bot,
+                        )
+                    }
+                    _ => ("Unknown".to_string(), None, None, false),
+                };
+                let full = self
+                    .client
+                    .invoke(&tl::functions::users::GetFullUser { id: input_user })
+                    .await
+                    .context("fetching user info")?;
+                let about = match full {
+                    tl::enums::users::UserFull::Full(f) => match f.full_user {
+                        tl::enums::UserFull::Full(u) => u.about,
+                    },
+                };
+                Ok(ChatDetail {
+                    id,
+                    title,
+                    kind: if bot { ChatKind::Bot } else { ChatKind::User },
+                    username,
+                    bio: about.filter(|s| !s.trim().is_empty()),
+                    phone,
+                    members_count: None,
+                })
+            }
+            PeerKind::Channel => {
+                let input_channel = tl::enums::InputChannel::Channel(tl::types::InputChannel {
+                    channel_id: peer_ref.id.bare_id(),
+                    access_hash: peer_ref.auth.hash(),
+                });
+                // Title + username come off the channel entity; about/count
+                // off the full-info call.
+                let chats = self
+                    .client
+                    .invoke(&tl::functions::channels::GetChannels {
+                        id: vec![input_channel.clone()],
+                    })
+                    .await
+                    .context("fetching channel")?;
+                let (title, username) = chats
+                    .chats()
+                    .into_iter()
+                    .find_map(|c| match c {
+                        tl::enums::Chat::Channel(ch) => {
+                            Some((ch.title.clone(), ch.username.clone()))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(("Unknown".to_string(), None));
+                let full = self
+                    .client
+                    .invoke(&tl::functions::channels::GetFullChannel {
+                        channel: input_channel,
+                    })
+                    .await
+                    .context("fetching channel info")?;
+                // GetFullChannel returns messages.ChatFull{ full_chat:
+                // ChatFull::ChannelFull } — unwrap both layers.
+                let (about, members_count) = match full {
+                    tl::enums::messages::ChatFull::Full(f) => match f.full_chat {
+                        tl::enums::ChatFull::ChannelFull(cf) => (
+                            Some(cf.about),
+                            cf.participants_count.map(|c| c.max(0) as u32),
+                        ),
+                        tl::enums::ChatFull::Full(_) => (None, None),
+                    },
+                };
+                Ok(ChatDetail {
+                    id,
+                    title,
+                    kind: ChatKind::Channel,
+                    username: username.filter(|s| !s.is_empty()),
+                    bio: about.filter(|s| !s.trim().is_empty()),
+                    phone: None,
+                    members_count,
+                })
+            }
+            PeerKind::Chat => {
+                let chat_id = peer_ref.id.bare_id();
+                let full = self
+                    .client
+                    .invoke(&tl::functions::messages::GetFullChat { chat_id })
+                    .await
+                    .context("fetching group info")?;
+                // Single-constructor type: the payload is always `Full`.
+                let tl::enums::messages::ChatFull::Full(f) = full;
+                let tl::enums::ChatFull::Full(chat) = f.full_chat else {
+                    anyhow::bail!("unexpected chat payload for a basic group");
+                };
+                let members_count = match &chat.participants {
+                    tl::enums::ChatParticipants::Participants(p) => {
+                        Some(p.participants.len().min(u32::MAX as usize) as u32)
+                    }
+                    _ => None,
+                };
+                // Basic groups have no username; the title comes from the
+                // chat entity (`get_chats`), with a graceful fallback.
+                let title = match self
+                    .client
+                    .invoke(&tl::functions::messages::GetChats { id: vec![chat_id] })
+                    .await
+                {
+                    Ok(chats) => chats
+                        .chats()
+                        .into_iter()
+                        .find_map(|c| match c {
+                            tl::enums::Chat::Chat(c) => Some(c.title.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| "Group".to_string()),
+                    Err(_) => "Group".to_string(),
+                };
+                Ok(ChatDetail {
+                    id,
+                    title,
+                    kind: ChatKind::Group,
+                    username: None,
+                    bio: (!chat.about.trim().is_empty()).then(|| chat.about.clone()),
+                    phone: None,
+                    members_count,
+                })
+            }
+        }
+    }
+
+    /// Lists up to `limit` members of a group/channel. Private conversations
+    /// have no participants; that's an empty list, not an error.
+    pub async fn get_participants(
+        &self,
+        peer_ref: &grammers_session::types::PeerRef,
+        limit: usize,
+    ) -> Result<Vec<ParticipantRow>> {
+        use grammers_client::peer::Role;
+        use grammers_session::types::PeerKind;
+        if !matches!(peer_ref.id.kind(), PeerKind::Chat | PeerKind::Channel) {
+            return Ok(Vec::new());
+        }
+        let mut it = self.client.iter_participants(*peer_ref);
+        let mut out = Vec::new();
+        while out.len() < limit {
+            let Some(p) = it.next().await.context("listing participants")? else {
+                break;
+            };
+            let role = match &p.role {
+                Role::Creator(_) => ParticipantRole::Creator,
+                Role::Admin(_) => ParticipantRole::Admin,
+                _ => ParticipantRole::Member,
+            };
+            let name = {
+                let n = p.user.full_name();
+                if n.is_empty() {
+                    format!("User {}", p.user.id().bot_api_dialog_id())
+                } else {
+                    n
+                }
+            };
+            out.push(ParticipantRow {
+                id: p.user.id().bot_api_dialog_id(),
+                name,
+                username: p.user.username().map(str::to_string),
+                role,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Removes `user_id` from the chat (kick). The user is resolved through
+    /// the session first so the kick carries a usable peer reference.
+    pub async fn kick_participant(
+        &self,
+        peer_chat: &grammers_session::types::PeerRef,
+        user_id: i64,
+    ) -> Result<()> {
+        use grammers_session::types::{PeerAuth, PeerId, PeerRef};
+        let user = PeerRef {
+            id: PeerId::user(user_id),
+            auth: PeerAuth::default(),
+        };
+        let _ = self.client.resolve_peer(user).await;
+        self.client
+            .kick_participant(*peer_chat, user)
+            .await
+            .context("kicking participant")?;
+        Ok(())
+    }
+
+    /// Mutes (`muted=true`) or unmutes a chat by pushing future-dated
+    /// / cleared notification settings to the server.
+    pub async fn set_muted(
+        &self,
+        peer_ref: &grammers_session::types::PeerRef,
+        muted: bool,
+    ) -> Result<()> {
+        // Mute for ~5 years out (Telegram's own "forever" convention);
+        // unmute resets the deadline to 0.
+        const MUTE_YEARS: i32 = 5 * 365 * 24 * 3600;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i32)
+            .unwrap_or(0);
+        let mute_until = Some(if muted { now + MUTE_YEARS } else { 0 });
+        self.client
+            .invoke(&tl::functions::account::UpdateNotifySettings {
+                peer: tl::enums::InputNotifyPeer::Peer(tl::types::InputNotifyPeer {
+                    peer: (*peer_ref).into(),
+                }),
+                settings: tl::enums::InputPeerNotifySettings::Settings(
+                    tl::types::InputPeerNotifySettings {
+                        show_previews: None,
+                        silent: None,
+                        mute_until,
+                        sound: None,
+                        stories_muted: None,
+                        stories_hide_sender: None,
+                        stories_sound: None,
+                    },
+                ),
+            })
+            .await
+            .context("updating notification settings")?;
+        Ok(())
     }
 
     /// Downloads a group/channel profile photo (small size) into `cached`.

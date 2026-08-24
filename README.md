@@ -116,6 +116,9 @@ batches — each release moves the needle, not dribbles.
 - 📋 **Context menu** — reply, forward, pin, edit, copy or delete messages
 - 📌 **Pinned messages** — banner under the header; click to jump to the message
 - 👥 **Group senders** — author names above bubbles, one color per sender
+- ℹ️ **Chat info panel** — details (username, bio, members count), mute and
+  in-chat search quick actions, plus the member list of groups/channels with
+  owner/admin badges
 
 > 📋 **Copy / paste note:** message text can be copied from the message's
 > context menu (right-click → “Copier”), and text pastes into the composer
@@ -129,7 +132,7 @@ batches — each release moves the needle, not dribbles.
 | 📤 Media | Stickers, custom emoji *(photos, documents, videos, GIFs + voice playback already shipped)* |
 | 💬 Messaging | Custom emoji in composer *(replies + forwards already shipped)* |
 | 🔍 Search | *(global + in-chat already shipped)* |
-| 👥 Groups | Create and manage groups/channels, members, admin tools, topics |
+| 👥 Groups | Create and manage groups/channels, admin tools, topics *(member list with roles already shipped)* |
 | 🎨 Experience | Light theme, settings *(notifications + tray already shipped)* |
 | 👤 Accounts | QR login, logout, multiple accounts |
 | 🔐 Privacy | Secret (end-to-end) chats |
