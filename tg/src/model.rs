@@ -27,6 +27,29 @@ pub enum MediaKind {
     Gif { name: String, size: i64 },
     /// An audio file or voice note (document + audio attributes).
     Audio { name: String, size: i64, voice: bool },
+    /// A sticker (document + sticker attribute): associated emoji, byte size
+    /// and the original file name (usually empty for stickers).
+    Sticker { name: String, size: i64, alt: String },
+}
+
+/// One sticker document inside a set (`messages.getAllStickers` listing).
+#[derive(Debug, Clone)]
+pub struct StickerDoc {
+    pub id: i64,
+    pub access_hash: i64,
+    /// Emoji the sticker stands for.
+    pub alt: String,
+    /// File reference needed to re-send the document reliably.
+    pub file_reference: Vec<u8>,
+}
+
+/// A sticker pack title + its documents, for the picker panel.
+#[derive(Debug, Clone)]
+pub struct StickerSetInfo {
+    pub title: String,
+    pub short_name: String,
+    pub count: usize,
+    pub docs: Vec<StickerDoc>,
 }
 
 /// Origin of a forwarded message, as much as the forward header exposes:

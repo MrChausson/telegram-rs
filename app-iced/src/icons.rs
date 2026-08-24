@@ -47,6 +47,8 @@ pub enum Icon {
     Pin,
     /// Plus sign (chat-list header "new group/channel" button).
     Plus,
+    /// Peeling square sticker with a face (composer sticker picker).
+    Sticker,
 }
 
 fn rgb(c: (u8, u8, u8)) -> Color {
@@ -548,6 +550,48 @@ fn draw_icon(pixmap: &mut Pixmap, kind: Icon, cx: f32, cy: f32, size: f32, color
             polyline(pixmap, &[(cx - half * 0.7, cy), (cx + half * 0.7, cy)], color, w);
             polyline(pixmap, &[(cx, cy - half * 0.7), (cx, cy + half * 0.7)], color, w);
         }
+        Icon::Sticker => {
+            // Peeling square sticker: square outline whose top-right corner
+            // is replaced by a fold notch + flap, with a simple face.
+            let w = size * 0.09;
+            let d = half * 0.72; // half side
+            let f = d * 0.55; // fold size along the edges
+            polyline(
+                pixmap,
+                &[
+                    (cx - d, cy - d),
+                    (cx + d - f, cy - d),  // top edge until the fold…
+                    (cx + d, cy - d + f),  // …diagonal notch…
+                    (cx + d, cy + d),      // right edge down
+                    (cx - d, cy + d),      // bottom edge
+                    (cx - d, cy - d),      // left edge up (close)
+                ],
+                color,
+                w,
+            );
+            // Folded flap: both endpoints meet at an inner corner.
+            let fx = cx + d - f * 0.55;
+            let fy = cy - d + f * 0.55;
+            polyline(
+                pixmap,
+                &[(cx + d - f, cy - d), (fx, fy), (cx + d, cy - d + f)],
+                color,
+                w * 0.8,
+            );
+            // Face: two eyes + smile.
+            fill_circle(pixmap, cx - d * 0.4, cy - d * 0.05, size * 0.055, color);
+            fill_circle(pixmap, cx + d * 0.15, cy - d * 0.05, size * 0.055, color);
+            polyline(
+                pixmap,
+                &[
+                    (cx - d * 0.45, cy + d * 0.3),
+                    (cx - d * 0.1, cy + d * 0.45),
+                    (cx + d * 0.25, cy + d * 0.28),
+                ],
+                color,
+                w * 0.8,
+            );
+        }
         Icon::Tick { read } => {
             let w = size * 0.09;
             let x0 = cx - half;
@@ -677,6 +721,7 @@ mod tests {
             Icon::Play,
             Icon::Pause,
             Icon::Plus,
+            Icon::Sticker,
         ] {
             let mut c = canvas();
             draw_icon(&mut c, kind, 40.0, 40.0, 24.0, (255, 255, 255));
