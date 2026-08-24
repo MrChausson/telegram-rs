@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.6.0] - 2026-08-24
+
 ### Changed
 - **UI design pass (Material 3 inspired)**: the message context menu is now a
   proper menu surface — 12 px rounded corners, hairline border, inner padding,
