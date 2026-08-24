@@ -544,14 +544,26 @@ async fn serve_demo(
                 MsgRow::text(11, "Oui ! à demain 👋", now - 42, true),
             ],
             1002 => vec![
-                MsgRow::text(1, "Qui veut présenter son projet vendredi ?", now - 14400, false),
+                MsgRow {
+                    sender_name: Some("Camille".into()),
+                    sender_id: Some(2001),
+                    pinned: true,
+                    ..MsgRow::text(1, "Qui veut présenter son projet vendredi ?", now - 14400, false)
+                },
                 MsgRow {
                     forwarded_from: Some("Canal Paysages".into()),
+                    sender_name: Some("Léo".into()),
+                    sender_id: Some(2002),
                     ..MsgRow::text(2, "[transféré] Photo du week-end dernier 🌄", now - 10800, false)
                 },
-                MsgRow::text(3, "Moi je peux, la CI passe enfin 🎉", now - 7200, true),
+                MsgRow {
+                    sender_name: Some("Camille".into()),
+                    sender_id: Some(2001),
+                    ..MsgRow::text(3, "@Léo tu peux relire avant vendredi ?", now - 7300, false)
+                },
+                MsgRow::text(4, "Moi je peux, la CI passe enfin 🎉", now - 7200, true),
                 doc_row(
-                    4,
+                    5,
                     "",
                     now - 7000,
                     "rapport-trimestre.pdf",
@@ -615,6 +627,11 @@ async fn serve_demo(
                         .map(|c| c.title.to_string())
                         .unwrap_or_else(|| "Chat".to_string());
                     let _ = ui_tx.send(UiMessage::Messages { id, title, rows });
+                    // Demo pinned message: the group pins its topic message.
+                    let _ = ui_tx.send(UiMessage::PinnedMessage {
+                        chat_id: id,
+                        msg_id: (id == 1002).then_some(1),
+                    });
                 }
                 Request::SendMessage { id, text, reply_to } => {
                     let nid = next_id;
@@ -631,6 +648,8 @@ async fn serve_demo(
                         doc: None,
                         reply_to,
                         forwarded_from: None,
+                        sender_name: None,
+                        sender_id: None,
                     });
                 }
                 Request::SendMedia { id, path, caption, is_photo, reply_to, token } => {
@@ -677,6 +696,8 @@ async fn serve_demo(
                             }),
                             reply_to,
                             forwarded_from: None,
+                            sender_name: None,
+                            sender_id: None,
                         });
                         if !is_photo {
                             // The document is already on disk (we just picked
@@ -719,6 +740,8 @@ async fn serve_demo(
                         doc: origin.doc,
                         reply_to: None,
                         forwarded_from: Some(from_title),
+                        sender_name: None,
+                        sender_id: None,
                     });
                     if let Some(p) = origin.photo_path {
                         let _ = ui_tx.send(UiMessage::PhotoReady {
@@ -819,6 +842,12 @@ Request::DownloadDoc { chat_id, msg_id } => {
                     edits.remove(&msg_id);
                     let _ = ui_tx.send(UiMessage::MessageDeleted { ids: vec![msg_id] });
                 }
+                Request::PinMessage { id, msg_id, pin } => {
+                    let _ = ui_tx.send(UiMessage::PinnedMessage {
+                        chat_id: id,
+                        msg_id: pin.then_some(msg_id),
+                    });
+                }
                 Request::MarkRead { id } => {
                     let _ = ui_tx.send(UiMessage::ChatRead { id });
                 }
@@ -859,6 +888,8 @@ Request::DownloadDoc { chat_id, msg_id } => {
                 doc: None,
                 reply_to: None,
                 forwarded_from: None,
+                sender_name: None,
+                sender_id: None,
             });
             next_id += 1;
             next_incoming = now_inst + std::time::Duration::from_secs(45);
@@ -1080,6 +1111,9 @@ fn msg_row_from_info(
         uploading: None,
         upload_token: None,
         read: false,
+        sender_name: m.sender_name,
+        sender_id: m.sender_id,
+        pinned: m.pinned,
     }
 }
 
@@ -1275,6 +1309,22 @@ fn handle_update(
                     // wins, else look up the origin chat in the dialog list.
                     forward_name(h, peers)
                 });
+                // Sender name only matters in group-ish chats (same rule as
+                // the history mapper in `tg`).
+                let is_private = matches!(
+                    msg.peer_id().kind(),
+                    grammers_session::types::PeerKind::User | grammers_session::types::PeerKind::UserSelf
+                );
+                let sender_name = if is_private {
+                    None
+                } else {
+                    msg.sender().and_then(|p| p.name()).map(str::to_string)
+                };
+                let sender_id = if is_private {
+                    None
+                } else {
+                    msg.sender_id().map(|id| id.bot_api_dialog_id())
+                };
                 let _ = ui_tx.send(UiMessage::NewMessage {
                     chat_id,
                     id: msg.id(),
@@ -1285,6 +1335,8 @@ fn handle_update(
                     doc,
                     reply_to: msg.reply_to_message_id(),
                     forwarded_from,
+                    sender_name,
+                    sender_id,
                 });
             }
         }
@@ -1336,6 +1388,20 @@ fn handle_update(
                     chat_id: grammers_session::types::PeerId::channel(u.channel_id)
                         .bot_api_dialog_id(),
                     typing: !action_is_cancel(&u.action),
+                });
+            }
+            grammers_client::tl::enums::Update::PinnedMessages(u) => {
+                let _ = ui_tx.send(UiMessage::PinnedMessage {
+                    chat_id: grammers_session::types::PeerId::from(u.peer.clone())
+                        .bot_api_dialog_id(),
+                    msg_id: u.messages.last().copied(),
+                });
+            }
+            grammers_client::tl::enums::Update::PinnedChannelMessages(u) => {
+                let _ = ui_tx.send(UiMessage::PinnedMessage {
+                    chat_id: grammers_session::types::PeerId::channel(u.channel_id)
+                        .bot_api_dialog_id(),
+                    msg_id: u.messages.last().copied(),
                 });
             }
             _ => {}
@@ -1414,6 +1480,19 @@ async fn handle_request(
                                 m.id,
                             );
                         }
+                    }
+                    // The chat's pinned message, if any (banner + jump target).
+                    match tg.get_pinned_message(peer_ref).await {
+                        Ok(Some(pinned)) => {
+                            let _ = ui_tx.send(UiMessage::PinnedMessage {
+                                chat_id: id,
+                                msg_id: Some(pinned.id),
+                            });
+                        }
+                        Ok(None) => {
+                            let _ = ui_tx.send(UiMessage::PinnedMessage { chat_id: id, msg_id: None });
+                        }
+                        Err(_) => {}
                     }
                 }
                 Err(e) => {
@@ -1562,6 +1641,29 @@ async fn handle_request(
             Some((_, peer_ref)) => {
                 if let Err(e) = tg.delete_message(peer_ref, msg_id).await {
                     let _ = ui_tx.send(UiMessage::Error(format!("Delete failed: {e}")));
+                }
+            }
+            None => {
+                let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+            }
+        },
+        Request::PinMessage { id, msg_id, pin } => match peers.get(&id) {
+            Some((_, peer_ref)) => {
+                let res = if pin {
+                    tg.pin_message(peer_ref, msg_id).await
+                } else {
+                    tg.unpin_message(peer_ref, msg_id).await
+                };
+                match res {
+                    Ok(()) => {
+                        let _ = ui_tx.send(UiMessage::PinnedMessage {
+                            chat_id: id,
+                            msg_id: pin.then_some(msg_id),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = ui_tx.send(UiMessage::Error(format!("Pin failed: {e}")));
+                    }
                 }
             }
             None => {

@@ -182,6 +182,10 @@ pub struct State {
     /// new/outgoing message). Cleared by the view after use.
     pub scroll_to_bottom: bool,
 
+    /// Id of the open chat's pinned message (`None` = nothing pinned). Drives
+    /// the banner under the chat header; a click jumps to the message.
+    pub pinned_id: Option<i32>,
+
     /// Absolute Y offset of the message list's viewport (content coordinates),
     /// fed by the scrollable's `on_scroll`. Drives virtualization: only the
     /// rows overlapping `[offset, offset + viewport]` are built each frame.
@@ -269,6 +273,7 @@ impl State {
             persist_ui: false,
             initial_chat: None,
             scroll_to_bottom: false,
+            pinned_id: None,
             scroll_offset: 0.0,
             dialog_scroll_offset: 0.0,
             layout_cache: Mutex::new(None),
@@ -481,6 +486,10 @@ impl State {
                 if self.open_chat == Some(id) {
                     let prev_len = self.messages.len();
                     self.chat_title = title;
+                    // The latest pinned row in the payload seeds the banner;
+                    // the authoritative `PinnedMessage` (fetched right after)
+                    // overrides it.
+                    self.pinned_id = rows.iter().rev().find(|m| m.pinned).map(|m| m.id);
                     self.messages = rows;
                     self.loading = false;
                     self.editing = None;
@@ -504,6 +513,8 @@ impl State {
                 doc,
                 reply_to,
                 forwarded_from,
+                sender_name,
+                sender_id,
             } => {
                 // Open chat? Merge the message (dedupe the optimistic local
                 // send, which is tagged id=0).
@@ -545,6 +556,9 @@ impl State {
                             uploading: None,
                             upload_token: None,
                             read: false,
+                            sender_name,
+                            sender_id,
+                            pinned: false,
                         });
                     }
                     self.scroll_to_bottom = true;
@@ -585,8 +599,24 @@ impl State {
                 if self.editing.is_some_and(|e| ids.contains(&e)) {
                     self.editing = None;
                 }
+                if self.pinned_id.is_some_and(|p| ids.contains(&p)) {
+                    self.pinned_id = None;
+                }
                 self.context_menu = None;
                 self.invalidate_layout();
+            }
+            UiMessage::PinnedMessage { chat_id, msg_id } => {
+                if self.open_chat == Some(chat_id) {
+                    self.pinned_id = msg_id;
+                    // Sync the per-row flags with the authoritative pin state.
+                    for m in &mut self.messages {
+                        let is_pin = msg_id == Some(m.id);
+                        if m.pinned != is_pin {
+                            m.pinned = is_pin;
+                        }
+                    }
+                    self.invalidate_layout();
+                }
             }
             UiMessage::PhotoReady { chat_id, msg_id, path } => {
                 if self.open_chat == Some(chat_id) {
@@ -971,7 +1001,61 @@ impl State {
         if self.editing == Some(m.id) {
             self.editing = None;
         }
+        if self.pinned_id == Some(m.id) {
+            self.pinned_id = None;
+        }
         self.invalidate_layout();
+    }
+
+    /// Click on the context menu's "Épingler"/"Désépingler" item.
+    pub fn context_pin(&mut self) {
+        let Some(menu) = self.context_menu.take() else {
+            return;
+        };
+        let Some(m) = self.messages.get(menu.row).cloned() else {
+            return;
+        };
+        let pin = !m.pinned;
+        let _ = self.req_tx.send(Request::PinMessage {
+            id: self.open_chat.unwrap_or(0),
+            msg_id: m.id,
+            pin,
+        });
+        // Optimistic: the authoritative `PinnedMessage` echo confirms.
+        self.pinned_id = pin.then_some(m.id);
+        for x in &mut self.messages {
+            if x.id == m.id {
+                x.pinned = pin;
+            } else if pin {
+                // Only one banner at a time (Telegram's latest-pin behaviour).
+                x.pinned = false;
+            }
+        }
+        self.invalidate_layout();
+    }
+
+    /// Whether the context-menu row is currently pinned (label switch).
+    pub fn context_row_pinned(&self) -> bool {
+        self.context_menu
+            .and_then(|c| self.messages.get(c.row))
+            .is_some_and(|m| m.pinned)
+    }
+
+    /// Click on the pinned banner: scroll to the pinned message.
+    pub fn jump_to_pinned(&mut self) {
+        let Some(pinned) = self.pinned_id else {
+            return;
+        };
+        self.context_menu = None;
+        if let Some(y) = self.message_top_of(pinned) {
+            self.scroll_to_bottom = false;
+            self.scroll_target = Some(y);
+        } else {
+            // Cache cold or message outside the loaded window: retry once the
+            // layout is rebuilt (same mechanism as search jumps).
+            self.pending_jump_id = Some(pinned);
+            self.invalidate_layout();
+        }
     }
 
     /// Submit the composer: send (or edit) the current text.
@@ -1082,6 +1166,7 @@ impl State {
         self.reply_target = None;
         self.forward_pick = None;
         self.pending_jump_id = None;
+        self.pinned_id = None;
         self.composer.clear();
         if self.persist_ui {
             write_last_chat_at(&last_chat_path(), Some(id));
@@ -1098,6 +1183,7 @@ impl State {
         self.messages.clear();
         self.editing = None;
         self.context_menu = None;
+        self.pinned_id = None;
         if self.persist_ui {
             write_last_chat_at(&last_chat_path(), None);
         }
@@ -1266,6 +1352,82 @@ mod tests {
     }
 
     #[test]
+    fn pinned_message_banner_arrives_and_clears() {
+        let (mut state, _) = demo_state();
+        assert_eq!(state.pinned_id, None);
+
+        // The network reports a pin in the open chat.
+        state.on_message(UiMessage::PinnedMessage { chat_id: 42, msg_id: Some(1) });
+        assert_eq!(state.pinned_id, Some(1));
+        // Row flag synced.
+        assert!(state.messages.iter().find(|m| m.id == 1).unwrap().pinned);
+
+        // Unpin clears the banner and the row flag.
+        state.on_message(UiMessage::PinnedMessage { chat_id: 42, msg_id: None });
+        assert_eq!(state.pinned_id, None);
+        assert!(!state.messages.iter().find(|m| m.id == 1).unwrap().pinned);
+
+        // A pin for another chat must not touch this one's banner.
+        state.on_message(UiMessage::PinnedMessage { chat_id: 7, msg_id: Some(2) });
+        assert_eq!(state.pinned_id, None);
+    }
+
+    #[test]
+    fn context_pin_sends_request_and_toggles() {
+        let (mut state, mut req_rx) = demo_state();
+        // Right-click row 0 (msg id 1) and pin it.
+        state.open_context(0);
+        assert!(!state.context_row_pinned());
+        state.context_pin();
+        let reqs = drain(&mut req_rx);
+        assert!(
+            reqs.iter().any(|r| matches!(r, Request::PinMessage { id: 42, msg_id: 1, pin: true })),
+            "expected PinMessage request, got {reqs:?}"
+        );
+        assert_eq!(state.pinned_id, Some(1));
+        assert!(state.context_menu.is_none());
+
+        // Pinning again (row is now pinned) sends an unpin.
+        state.open_context(0);
+        assert!(state.context_row_pinned());
+        state.context_pin();
+        let reqs = drain(&mut req_rx);
+        assert!(
+            reqs.iter().any(|r| matches!(r, Request::PinMessage { id: 42, msg_id: 1, pin: false })),
+            "expected unpin request, got {reqs:?}"
+        );
+        assert_eq!(state.pinned_id, None);
+    }
+
+    #[test]
+    fn deleting_the_pinned_message_clears_the_banner() {
+        let (mut state, _) = demo_state();
+        state.messages[0].pinned = true;
+        state.pinned_id = Some(1);
+        // Delete via the context menu on row 0.
+        state.open_context(0);
+        state.context_delete();
+        assert_eq!(state.pinned_id, None);
+        assert!(state.messages.iter().all(|m| m.id != 1));
+    }
+
+    #[test]
+    fn opening_another_chat_resets_the_banner() {
+        let (mut state, _) = demo_state();
+        state.pinned_id = Some(1);
+        state.open_chat(43);
+        assert_eq!(state.pinned_id, None);
+        // History rows carrying `pinned` seed the banner until the
+        // authoritative PinnedMessage arrives.
+        state.on_message(UiMessage::Messages {
+            id: 43,
+            title: "G".into(),
+            rows: vec![MsgRow { pinned: true, ..MsgRow::text(5, "topic", 10, false) }],
+        });
+        assert_eq!(state.pinned_id, Some(5));
+    }
+
+    #[test]
     fn last_chat_marker_roundtrip() {
         let dir = std::env::temp_dir().join(format!("tg-lastchat-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1416,6 +1578,8 @@ mod tests {
             doc: None,
             reply_to: None,
             forwarded_from: None,
+            sender_name: None,
+            sender_id: None,
         });
         assert_eq!(state.messages.len(), 3);
         assert!(!state.typing);
@@ -1443,6 +1607,8 @@ mod tests {
             doc: None,
             reply_to: None,
             forwarded_from: None,
+            sender_name: None,
+            sender_id: None,
         });
         // The open chat's rows must be untouched.
         assert_eq!(state.messages.len(), 2);
@@ -1470,6 +1636,8 @@ mod tests {
             doc: None,
             reply_to: None,
             forwarded_from: None,
+            sender_name: None,
+            sender_id: None,
         });
         // The update merged with the optimistic row: no duplicate.
         assert_eq!(state.messages.len(), 3);
@@ -1565,6 +1733,8 @@ mod tests {
             doc: None,
             reply_to: None,
             forwarded_from: None,
+            sender_name: None,
+            sender_id: None,
         });
         assert_eq!(state.dialogs[0].subtitle, "ping");
         assert_eq!(state.dialogs[0].unread, 1);
@@ -1678,6 +1848,8 @@ mod tests {
             doc: None,
             reply_to: None,
             forwarded_from: None,
+            sender_name: None,
+            sender_id: None,
         });
         assert_eq!(state.messages.len(), 3, "echo merges, no duplicate");
         let merged = state.messages.last().unwrap();
