@@ -9,6 +9,7 @@
 
 pub mod audio;
 pub mod bridge;
+pub mod emoji;
 pub mod tray;
 pub mod icons;
 pub mod network;
@@ -232,6 +233,12 @@ pub enum Message {
     OpenUrl(String),
     /// Composer text changed.
     ComposerChanged(String),
+    /// The composer's smiley button toggled the emoji panel.
+    EmojiToggle,
+    /// An emoji was picked in the panel: append it to the composer.
+    EmojiPicked(String),
+    /// A click outside the emoji panel dismissed it.
+    EmojiDismiss,
     /// Composer submitted (send / edit).
     Submit,
     /// Viewer close / back.
@@ -418,6 +425,9 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
                 let _ = state.req_tx.send(Request::Typing { id, typing: true });
             }
         }
+        Message::EmojiToggle => state.toggle_emoji_panel(),
+        Message::EmojiPicked(e) => state.pick_emoji(e),
+        Message::EmojiDismiss => state.close_emoji_panel(),
         Message::Submit => {
             if let Some(id) = state.open_chat {
                 let _ = state.req_tx.send(Request::Typing { id, typing: false });
@@ -1147,6 +1157,27 @@ fn conversation_pane(state: &State) -> Element<'_> {
         .into()
     };
 
+    // Emoji picker floats over the conversation area while open: clicks
+    // outside it land on the backdrop layer and close it; scrolling still
+    // reaches the underlying list (the backdrop only captures buttons), and
+    // the composer below the stack stays fully interactive.
+    let body: Element<'_> = if state.emoji_panel_open {
+        iced::widget::Stack::with_children(vec![
+            body,
+            mouse_area(
+                iced::widget::Space::new()
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .on_press(Message::EmojiDismiss)
+            .into(),
+            emoji_panel_floated(state),
+        ])
+        .into()
+    } else {
+        body
+    };
+
     let composer = composer_bar(state);
 
     let pane = column![
@@ -1729,6 +1760,85 @@ fn chat_header(
     .into()
 }
 
+// ---------------------------------------------------------------------------
+// Emoji picker panel (composer)
+// ---------------------------------------------------------------------------
+
+/// Size of the floating emoji panel (logical px).
+const EMOJI_PANEL_W: f32 = 340.0;
+const EMOJI_PANEL_H: f32 = 280.0;
+/// Emoji grid columns.
+const EMOJI_COLS: usize = 8;
+/// Rendered size of one emoji glyph in the grid.
+const EMOJI_FONT_SIZE: f32 = 22.0;
+
+/// Anchors the panel above the composer's left edge inside the stack layer.
+fn emoji_panel_floated(state: &State) -> Element<'_> {
+    container(emoji_panel(state))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::Start)
+        .align_y(Alignment::End)
+        .padding([0.0, 12.0])
+        .into()
+}
+
+/// The emoji picker card: "Recents" (or a starter set until anything was
+/// picked) followed by the standard groups, scrollable when tall.
+fn emoji_panel(state: &State) -> Element<'_> {
+    let mut content = column![].spacing(6);
+
+    let recents = if state.emoji_recents.is_empty() {
+        crate::emoji::RECENTS_FALLBACK.to_string()
+    } else {
+        state.emoji_recents.join(" ")
+    };
+    content = content.push(emoji_section_label("Recents"));
+    content = content.push(emoji_grid(&recents));
+
+    for (title, set) in crate::emoji::SETS {
+        content = content.push(emoji_section_label(title));
+        content = content.push(emoji_grid(set));
+    }
+
+    container(
+        scrollable(content)
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .width(EMOJI_PANEL_W)
+    .height(EMOJI_PANEL_H)
+    .padding(10)
+    .style(menu_bg)
+    .into()
+}
+
+fn emoji_section_label(title: &str) -> Element<'_> {
+    text(title.to_string())
+        .size(theme::font::TIMESTAMP)
+        .color(rgb(theme::TEXT_SECONDARY))
+        .into()
+}
+
+/// One 8-column grid of emoji buttons (transparent, light hover).
+fn emoji_grid(emojis: &str) -> Element<'static> {
+    let mut grid = column![].spacing(2);
+    for line in emojis.split_whitespace().collect::<Vec<_>>().chunks(EMOJI_COLS) {
+        let mut r = row![].spacing(2);
+        for e in line {
+            r = r.push(
+                button(text(e.to_string()).size(EMOJI_FONT_SIZE))
+                    .on_press(Message::EmojiPicked((*e).to_string()))
+                    .width(Length::Fixed(38.0))
+                    .height(Length::Fixed(32.0))
+                    .style(|t, s| menu_item_style(t, s, false)),
+            );
+        }
+        grid = grid.push(r);
+    }
+    grid.into()
+}
+
 /// Composer bar: rounded field + attach (or edit check) + send button, with
 /// the reply preview bar stacked above when a reply is armed.
 fn composer_bar(state: &State) -> Element<'_> {
@@ -1753,7 +1863,14 @@ fn composer_bar(state: &State) -> Element<'_> {
             .style(accent_circle_button)
     };
 
+    // Smiley opens the emoji panel; it sits left of the field.
+    let emoji_btn = button(icon(Icon::Smile, theme::ICON, 20.0))
+        .on_press(Message::EmojiToggle)
+        .padding(8)
+        .style(flat_button);
+
     let bar = row![
+        emoji_btn,
         container(field)
             .width(Length::Fill)
             .height(theme::layout::INPUT_H)
@@ -3179,6 +3296,22 @@ mod tests {
         state.ask_confirm(ConfirmKind::Delete, 1);
         let _ = std::hint::black_box(chat_view(&state));
         state.cancel_confirm();
+    }
+
+    #[test]
+    fn emoji_panel_renders_without_panicking() {
+        let (req_tx, _req_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::new(req_tx);
+        state.authenticated = true;
+        state.open_chat = Some(42);
+        state.chat_title = "Test".into();
+        state.messages = vec![MsgRow::text(1, "hello", 100, false)];
+        // Panel open, with and without persisted recents.
+        state.toggle_emoji_panel();
+        let _ = std::hint::black_box(chat_view(&state));
+        state.pick_emoji("🎉".into());
+        state.pick_emoji("😀".into());
+        let _ = std::hint::black_box(chat_view(&state));
     }
 
     #[test]

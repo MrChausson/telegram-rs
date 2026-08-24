@@ -41,6 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   author's name above the bubble, in a deterministic per-sender color from
   Telegram's 7-hue palette (private chats are unaffected). The virtualized
   row-height estimate accounts for the extra line.
+- **Emoji picker in the composer**: a smiley button left of the input opens a
+  floating panel above it — "Recents" (persisted across sessions, capped at
+  24, with a starter set until first use) plus standard grouped sets (Smileys
+  & People, Animals & Nature, Food & Drink, Activities, Objects, Symbols).
+  Picking an emoji appends it to the composer without sending; a click
+  outside or Escape closes the panel.
 
 ## [v0.6.1] - 2026-08-24
 

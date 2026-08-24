@@ -48,6 +48,37 @@ fn last_chat_path() -> std::path::PathBuf {
     crate::network::data_dir().join("last-chat")
 }
 
+// ---------------------------------------------------------------------------
+// Emoji picker (composer): panel flag + recently used emojis
+// ---------------------------------------------------------------------------
+
+/// Maximum number of recently-used emojis kept (and persisted).
+pub const EMOJI_RECENTS_MAX: usize = 24;
+
+/// Reads persisted recents from `path`: one emoji per line.
+fn read_emoji_recents_at(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .map(|content| {
+            content
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Persists `recents` at `path` (one emoji per line). Best-effort.
+fn write_emoji_recents_at(path: &std::path::Path, recents: &[String]) {
+    let _ = std::fs::write(path, recents.join("\n"));
+}
+
+/// Default location of the `emoji-recents` file inside the app data dir.
+fn emoji_recents_path() -> std::path::PathBuf {
+    crate::network::data_dir().join("emoji-recents")
+}
+
 /// Sign-in flow step (only used while unauthenticated).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginStep {
@@ -234,6 +265,15 @@ pub struct State {
     /// Local mute flag of the open chat (optimistic; drives the button label).
     pub muted: bool,
 
+    // -----------------------------------------------------------------
+    // Emoji picker (composer)
+    // -----------------------------------------------------------------
+    /// The emoji picker panel above the composer is open.
+    pub emoji_panel_open: bool,
+    /// Recently used emojis, most recent first (capped at
+    /// [`EMOJI_RECENTS_MAX`]), persisted in the data dir.
+    pub emoji_recents: Vec<String>,
+
     /// Absolute Y offset of the message list's viewport (content coordinates),
     /// fed by the scrollable's `on_scroll`. Drives virtualization: only the
     /// rows overlapping `[offset, offset + viewport]` are built each frame.
@@ -334,6 +374,8 @@ impl State {
             participants: Vec::new(),
             kick_confirm: None,
             muted: false,
+            emoji_panel_open: false,
+            emoji_recents: Vec::new(),
             scroll_offset: 0.0,
             dialog_scroll_offset: 0.0,
             layout_cache: Mutex::new(None),
@@ -359,9 +401,13 @@ impl State {
     }
 
     /// Enables persisting/restoring the last open chat (off in `--demo`).
+    /// Also restores the emoji recents (same data dir, same flag).
     pub fn with_persist_ui(mut self, on: bool) -> Self {
         self.persist_ui = on;
         self.initial_chat = read_last_chat_at(&last_chat_path());
+        if on {
+            self.emoji_recents = read_emoji_recents_at(&emoji_recents_path());
+        }
         self
     }
 
@@ -1020,6 +1066,11 @@ impl State {
         if self.confirm_leave.take().is_some() {
             return;
         }
+        // Emoji picker closes before the context menu (topmost-composer-first).
+        if self.emoji_panel_open {
+            self.close_emoji_panel();
+            return;
+        }
         self.context_menu = None;
         if self.editing.is_some() {
             self.editing = None;
@@ -1032,6 +1083,37 @@ impl State {
             return; // overlay closed; skip a redundant layout invalidation
         }
         self.invalidate_layout();
+    }
+
+    // -----------------------------------------------------------------
+    // Emoji picker (composer)
+    // -----------------------------------------------------------------
+
+    /// Shows/hides the emoji panel above the composer.
+    pub fn toggle_emoji_panel(&mut self) {
+        self.emoji_panel_open = !self.emoji_panel_open;
+    }
+
+    /// Hides the emoji panel (Escape or click outside).
+    pub fn close_emoji_panel(&mut self) {
+        self.emoji_panel_open = false;
+    }
+
+    /// An emoji was picked in the panel: append it to the composer text and
+    /// move it to the front of the recents (deduplicated, capped), persisting
+    /// them when UI persistence is on. The composer keeps its focus; sending
+    /// stays an explicit action.
+    pub fn pick_emoji(&mut self, emoji: String) {
+        if emoji.is_empty() {
+            return;
+        }
+        self.composer.push_str(&emoji);
+        self.emoji_recents.retain(|e| *e != emoji);
+        self.emoji_recents.insert(0, emoji);
+        self.emoji_recents.truncate(EMOJI_RECENTS_MAX);
+        if self.persist_ui {
+            write_emoji_recents_at(&emoji_recents_path(), &self.emoji_recents);
+        }
     }
 
     /// Click on the context menu's "Reply" item.
@@ -1451,6 +1533,7 @@ impl State {
         self.participants.clear();
         self.kick_confirm = None;
         self.muted = false;
+        self.emoji_panel_open = false;
         if self.persist_ui {
             write_last_chat_at(&last_chat_path(), Some(id));
         }
@@ -1472,6 +1555,7 @@ impl State {
         self.participants.clear();
         self.kick_confirm = None;
         self.muted = false;
+        self.emoji_panel_open = false;
         if self.persist_ui {
             write_last_chat_at(&last_chat_path(), None);
         }
@@ -2644,5 +2728,69 @@ mod tests {
             members_count: None,
         }));
         assert_eq!(state.copy_username().as_deref(), Some("@camille_dev"));
+    }
+
+    #[test]
+    fn emoji_panel_toggles_and_escape_closes_it_first() {
+        let (mut state, _) = demo_state();
+        assert!(!state.emoji_panel_open);
+        state.toggle_emoji_panel();
+        assert!(state.emoji_panel_open);
+        state.toggle_emoji_panel();
+        assert!(!state.emoji_panel_open);
+
+        // Escape closes the panel BEFORE the context menu.
+        state.toggle_emoji_panel();
+        state.open_context(0);
+        state.escape();
+        assert!(!state.emoji_panel_open, "panel must close first");
+        assert!(state.context_menu.is_some(), "menu must stay open");
+        state.escape();
+        assert!(state.context_menu.is_none());
+    }
+
+    #[test]
+    fn emoji_pick_appends_to_composer_and_dedups_recents() {
+        let (mut state, _) = demo_state();
+        assert!(state.emoji_recents.is_empty());
+
+        state.composer.push_str("hi ");
+        state.pick_emoji("😀".into());
+        state.pick_emoji("🎉".into());
+        assert_eq!(state.composer, "hi 😀🎉");
+        assert_eq!(state.emoji_recents, vec!["🎉".to_string(), "😀".to_string()]);
+
+        // Picking an existing emoji moves it to the front instead of duping.
+        state.pick_emoji("😀".into());
+        assert_eq!(state.emoji_recents, vec!["😀".to_string(), "🎉".to_string()]);
+    }
+
+    #[test]
+    fn emoji_recents_are_capped_at_max() {
+        let (mut state, _) = demo_state();
+        for i in 0..30 {
+            state.pick_emoji(format!("e{i}"));
+        }
+        assert_eq!(state.emoji_recents.len(), EMOJI_RECENTS_MAX);
+        // Most recent first: the last picked emoji leads, the oldest fell off.
+        assert_eq!(state.emoji_recents[0], "e29");
+        assert_eq!(state.emoji_recents[EMOJI_RECENTS_MAX - 1], "e6");
+    }
+
+    #[test]
+    fn emoji_recents_persistence_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("tg-emoji-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("emoji-recents");
+
+        assert!(read_emoji_recents_at(&path).is_empty());
+        write_emoji_recents_at(&path, &["🎉".into(), "😀".into()]);
+        assert_eq!(read_emoji_recents_at(&path), vec!["🎉".to_string(), "😀".to_string()]);
+        // A missing/corrupt file must never crash: empty list fallback.
+        std::fs::write(&path, "").unwrap();
+        assert!(read_emoji_recents_at(&path).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

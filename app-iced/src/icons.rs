@@ -47,6 +47,8 @@ pub enum Icon {
     Pin,
     /// Plus sign (chat-list header "new group/channel" button).
     Plus,
+    /// Smiley face (composer's emoji-picker button).
+    Smile,
 }
 
 fn rgb(c: (u8, u8, u8)) -> Color {
@@ -548,6 +550,29 @@ fn draw_icon(pixmap: &mut Pixmap, kind: Icon, cx: f32, cy: f32, size: f32, color
             polyline(pixmap, &[(cx - half * 0.7, cy), (cx + half * 0.7, cy)], color, w);
             polyline(pixmap, &[(cx, cy - half * 0.7), (cx, cy + half * 0.7)], color, w);
         }
+        Icon::Smile => {
+            // Round face outline, two dot eyes, smiling mouth arc.
+            let r = half * 0.85;
+            let w = size * 0.085;
+            if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
+                stroke(pixmap, &path, color, w);
+            }
+            fill_circle(pixmap, cx - r * 0.38, cy - r * 0.30, size * 0.055, color);
+            fill_circle(pixmap, cx + r * 0.38, cy - r * 0.30, size * 0.055, color);
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx - r * 0.48, cy + r * 0.10);
+            pb.cubic_to(
+                cx - r * 0.26,
+                cy + r * 0.62,
+                cx + r * 0.26,
+                cy + r * 0.62,
+                cx + r * 0.48,
+                cy + r * 0.10,
+            );
+            if let Some(path) = pb.finish() {
+                stroke(pixmap, &path, color, w);
+            }
+        }
         Icon::Tick { read } => {
             let w = size * 0.09;
             let x0 = cx - half;
@@ -677,6 +702,7 @@ mod tests {
             Icon::Play,
             Icon::Pause,
             Icon::Plus,
+            Icon::Smile,
         ] {
             let mut c = canvas();
             draw_icon(&mut c, kind, 40.0, 40.0, 24.0, (255, 255, 255));
