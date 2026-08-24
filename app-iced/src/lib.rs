@@ -443,7 +443,15 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             }
             state.submit();
         }
-        Message::CloseViewer => state.back(),
+        Message::CloseViewer => {
+            state.back();
+            // Re-sync the list scroll: the widget may have been recreated
+            // while the viewer was up (GL drivers stall on the full-screen
+            // swap), so pin it back to the position we remember.
+            let y = state.scroll_offset.max(0.0);
+            use iced::widget::operation::{scroll_to, AbsoluteOffset};
+            return scroll_to::<Message>(MSG_LIST_ID, AbsoluteOffset { x: 0.0, y });
+        }
         Message::LoginChanged(text) => state.login_input = text,
         Message::LoginSubmit => submit_login(state),
         Message::LoginBack => login_back(state),
@@ -564,9 +572,10 @@ fn view(state: &State) -> Element<'_> {
     RENDERED.fetch_add(1, Ordering::SeqCst);
     // Entry into the redraw path: bump the display-fps rolling window.
     let _ = rendered_per_second();
-    if state.viewer.is_some() {
-        return viewer_view(state);
-    }
+    // NOTE: the viewer is NOT a top-level view swap — on GL/NVIDIA, swapping
+    // the whole window content for a full-screen image and back stalls
+    // surface presentation (last frame stays on screen). It renders as an
+    // overlay layer inside `conversation_pane` instead.
     if !state.authenticated {
         return login_view(state);
     }
@@ -708,24 +717,33 @@ fn viewer_view(state: &State) -> Element<'_> {
         .on_press(Message::CloseViewer)
         .padding(8)
         .style(flat_button);
-    column![
-        row![close]
-            .padding(8)
-            .width(Length::Fill),
-        container(
-            mouse_area(
-                image(image::Handle::from_path(path))
-                    .width(Length::Fill)
-                    .content_fit(iced::ContentFit::Contain),
+    // Opaque layer: covers the conversation pane (sidebar stays visible).
+    container(
+        column![
+            row![close]
+                .padding(8)
+                .width(Length::Fill),
+            container(
+                mouse_area(
+                    image(image::Handle::from_path(path))
+                        .width(Length::Fill)
+                        .content_fit(iced::ContentFit::Contain),
+                )
+                .on_press(Message::CloseViewer),
             )
-            .on_press(Message::CloseViewer),
-        )
-        .center_x(Length::Fill)
-        .width(Length::Fill)
-        .height(Length::Fill),
-    ]
-    .spacing(8)
-    .padding(16)
+            .center_x(Length::Fill)
+            .width(Length::Fill)
+            .height(Length::Fill),
+        ]
+        .spacing(8)
+        .padding(16),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(|_| container::Style {
+        background: Some(iced::Background::Color(Color::BLACK)),
+        ..container::Style::default()
+    })
     .into()
 }
 
@@ -843,7 +861,18 @@ fn login_view(state: &State) -> Element<'_> {
 /// harness can drive the exact per-frame view headlessly. The creation modal
 /// and the leave/delete confirmation float over everything.
 pub fn chat_view(state: &State) -> Element<'_> {
-    let base: Element<'_> = row![list_pane(state), conversation_pane(state)].into();
+    // The photo viewer overlays the conversation pane only (sidebar stays
+    // visible): a full-window swap stalls GL presentation on close. The
+    // stack is ALWAYS present with an empty top layer when closed, so the
+    // message-list subtree keeps its identity across open/close cycles.
+    let viewer_layer: Element<'_> = if state.viewer.is_some() {
+        viewer_view(state)
+    } else {
+        horizontal_spacer()
+    };
+    let conversation: Element<'_> =
+        iced::widget::stack![conversation_pane(state), viewer_layer].into();
+    let base: Element<'_> = row![list_pane(state), conversation].into();
     let base = if state.create_dialog.is_some() {
         create_overlay(state, base)
     } else {
