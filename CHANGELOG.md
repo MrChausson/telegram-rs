@@ -61,6 +61,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [v0.6.1] - 2026-08-24
 
+### Added
+- **Settings panel**: a right sheet from the "Chats" header gear with
+  Profile (edit name/bio via `account.updateProfile`), a notifications
+  toggle (persists, gates desktop notifications), storage usage with a
+  clear-cache action (confirmation + safe paths), and the active sessions
+  list with per-device termination (`account.getAuthorizations` /
+  `resetAuthorization`). Includes the theme switch row.
+
 ### Fixed
 - **Long unbreakable words (URLs) no longer overflow their bubble**: message
   text wraps at the glyph level when a single word exceeds the bubble width

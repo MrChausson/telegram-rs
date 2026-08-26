@@ -314,16 +314,12 @@ fn boot() -> (State, Task<Message>) {
     let mut state = State::new(req_tx);
     state.tray_actions = tray_actions;
     state.notify_pref = notify_pref;
-    let mut state = state
+    let state = state
         .with_auto_open_first(open_first || demo)
         .with_persist_ui(!demo)
         .with_perf(perf)
         .with_continuous(continuous)
         .with_scroll_perf(scroll_perf);
-    // QA-TEMP: TG_QA_PANEL=settings auto-opens the settings sheet for visual QA.
-    if std::env::var("TG_QA_PANEL").as_deref() == Ok("settings") {
-        state.open_settings();
-    }
     (state, Task::none())
 }
 
