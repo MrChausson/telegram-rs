@@ -51,6 +51,8 @@ pub enum Icon {
     Smile,
     /// Peeling square sticker with a face (composer sticker picker).
     Sticker,
+    /// Gear (chat-list header settings button).
+    Settings,
 }
 
 fn rgb(c: (u8, u8, u8)) -> Color {
@@ -616,6 +618,29 @@ fn draw_icon(pixmap: &mut Pixmap, kind: Icon, cx: f32, cy: f32, size: f32, color
                 color,
                 w * 0.8,
             );
+        }
+        Icon::Settings => {
+            // Gear: ring + 8 radial teeth + a punched centre hole.
+            let w = size * 0.13;
+            let r = size * 0.26;
+            if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
+                stroke(pixmap, &path, color, w);
+            }
+            let teeth = 8;
+            for i in 0..teeth {
+                let a = (i as f32) * std::f32::consts::TAU / teeth as f32
+                    + std::f32::consts::FRAC_PI_8;
+                let (sn, cs) = (a.sin(), a.cos());
+                polyline(
+                    pixmap,
+                    &[
+                        (cx + cs * r * 0.92, cy + sn * r * 0.92),
+                        (cx + cs * r * 1.55, cy + sn * r * 1.55),
+                    ],
+                    color,
+                    w,
+                );
+            }
         }
         Icon::Tick { read } => {
             let w = size * 0.09;

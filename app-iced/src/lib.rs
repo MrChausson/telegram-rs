@@ -219,6 +219,31 @@ pub enum Message {
     CloseStickerPicker,
     /// The context menu was dismissed.
     DismissMenu,
+    // -----------------------------------------------------------------
+    // Settings panel
+    // -----------------------------------------------------------------
+    /// The list header's gear button: toggle the settings sheet.
+    ToggleSettings,
+    /// The settings sheet's ✕ was pressed.
+    CloseSettings,
+    /// A settings tab header was clicked.
+    SettingsTab(state::SettingsTab),
+    /// The First name field of the profile edit form changed.
+    SettingsNameChanged(String),
+    /// The Bio field of the profile edit form changed.
+    SettingsBioChanged(String),
+    /// The profile edit form's Save button.
+    SaveProfile,
+    /// The notifications On/Off button was pressed.
+    ToggleNotifications,
+    /// The "Clear cache" button was pressed (arms the confirmation).
+    AskClearCache,
+    /// The inline clear-cache confirmation was cancelled.
+    CancelClearCache,
+    /// The inline clear-cache confirmation was accepted.
+    ConfirmClearCache,
+    /// "Terminate" was clicked on a session row.
+    RevokeSession(i64),
     /// Flip dark ⇄ light (Settings panel). `State::toggle_theme` applies the
     /// palette and persists the choice.
     ToggleTheme,
@@ -280,24 +305,22 @@ fn boot() -> (State, Task<Message>) {
     let scroll_perf = std::env::args()
         .find_map(|a| a.strip_prefix("--scroll-perf=").and_then(|v| v.parse::<f32>().ok()))
         .unwrap_or(0.0);
-    let req_tx = network::spawn_network(demo, big);
+    // Shared notifications preference: the panel flips it, the network
+    // runtime consults it (same wiring pattern as the tray flags).
+    let notify_pref = std::sync::Arc::new(network::NotifyPref::default());
+    let req_tx = network::spawn_network(demo, big, notify_pref.clone());
     // System tray: best-effort (silent no-op without a StatusNotifier host).
     let tray_actions = std::sync::Arc::new(tray::TrayActions::default());
     tray::start(tray_actions.clone());
     let mut state = State::new(req_tx);
     state.tray_actions = tray_actions;
-    let mut state = state
+    state.notify_pref = notify_pref;
+    let state = state
         .with_auto_open_first(open_first || demo)
         .with_persist_ui(!demo)
         .with_perf(perf)
         .with_continuous(continuous)
         .with_scroll_perf(scroll_perf);
-    // QA-TEMP: TG_QA_THEME=light forces the light palette at boot for visual
-    // QA screenshots. Remove before shipping.
-    if std::env::var("TG_QA_THEME").as_deref() == Ok("light") {
-        state.theme_mode = crate::theme::ThemeMode::Light;
-        crate::theme::set_mode(state.theme_mode);
-    }
     (state, Task::none())
 }
 
@@ -398,6 +421,20 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::StickerPicked(set, doc) => state.send_sticker(set, doc),
         Message::CloseStickerPicker => state.close_sticker_picker(),
         Message::DismissMenu => state.dismiss_menu(),
+        // -----------------------------------------------------------------
+        // Settings panel
+        // -----------------------------------------------------------------
+        Message::ToggleSettings => state.toggle_settings(),
+        Message::CloseSettings => state.close_settings(),
+        Message::SettingsTab(tab) => state.set_settings_tab(tab),
+        Message::SettingsNameChanged(t) => state.edit_name = t,
+        Message::SettingsBioChanged(b) => state.edit_bio = b,
+        Message::SaveProfile => state.submit_profile_edit(),
+        Message::ToggleNotifications => state.toggle_notifications(),
+        Message::AskClearCache => state.ask_clear_cache(),
+        Message::CancelClearCache => state.cancel_clear_cache(),
+        Message::ConfirmClearCache => state.confirm_clear_cache_now(),
+        Message::RevokeSession(hash) => state.revoke_session(hash),
         Message::ToggleTheme => state.toggle_theme(),
         Message::Escape => {
             if state.search_open() {
@@ -895,8 +932,381 @@ pub fn chat_view(state: &State) -> Element<'_> {
         create_layer(state),
         confirm_layer(state),
         info_layer(state),
+        settings_layer(state),
     ]
     .into()
+}
+
+/// Width of the right-hand settings sheet.
+const SETTINGS_W: f32 = 340.0;
+
+/// Settings as a floating right sheet (same pattern as [`info_layer`]):
+/// opaque card + hairline border, NO translucent scrim (see the note there).
+fn settings_layer<'a>(state: &'a State) -> Element<'a> {
+    if !state.settings_open {
+        return horizontal_spacer();
+    }
+    let sheet = container(settings_panel(state))
+        .width(SETTINGS_W)
+        .height(Length::Fill)
+        .padding([12.0, 0.0])
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(rgb(theme::LIST_BG()))),
+            border: iced::Border {
+                radius: 0.0.into(),
+                width: 1.0,
+                color: rgb(theme::MENU_BORDER()),
+            },
+            ..container::Style::default()
+        });
+    container(sheet)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::End)
+        .align_y(Alignment::Start)
+        .into()
+}
+
+/// One tab header of the settings panel (selected one highlighted).
+fn settings_tab_header<'a>(
+    label: &'a str,
+    tab: state::SettingsTab,
+    active: bool,
+) -> Element<'a> {
+    button(
+        text(label)
+            .size(theme::font::TIMESTAMP)
+            .color(if active { Color::WHITE } else { rgb(theme::TEXT_SECONDARY()) }),
+    )
+    .on_press(Message::SettingsTab(tab))
+    .padding([6, 12])
+    .style(flat_button)
+    .into()
+}
+
+/// A labelled row inside the settings panel (label left, control right).
+fn settings_row<'a>(
+    label: &str,
+    control: impl Into<Element<'a>>,
+) -> iced::widget::Row<'a, Message> {
+    row![
+        text(label.to_string())
+            .size(theme::font::TIMESTAMP)
+            .color(rgb(theme::TEXT_PRIMARY()))
+            .width(Length::Fill),
+        control.into(),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+}
+
+/// Thin divider between settings sections.
+fn settings_divider() -> Element<'static> {
+    container(horizontal_spacer())
+        .width(Length::Fill)
+        .height(1.0)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(rgb(theme::DIVIDER()))),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// The settings panel body: tabs on top, then the active tab's content.
+fn settings_panel(state: &State) -> Element<'_> {
+    let close = button(icon(Icon::Close, theme::ICON(), 16.0))
+        .on_press(Message::CloseSettings)
+        .padding(6)
+        .style(flat_button);
+
+    let tabs = row![
+        settings_tab_header("Profile", state::SettingsTab::Profile, state.settings_tab == state::SettingsTab::Profile),
+        settings_tab_header("Storage", state::SettingsTab::Storage, state.settings_tab == state::SettingsTab::Storage),
+        settings_tab_header("Sessions", state::SettingsTab::Sessions, state.settings_tab == state::SettingsTab::Sessions),
+        horizontal_spacer(),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    let mut col = column![
+        row![
+            text("Settings")
+                .size(theme::font::NAME)
+                .color(Color::WHITE)
+                .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+            horizontal_spacer(),
+            close,
+        ]
+        .width(Length::Fill)
+        .align_y(Alignment::Center),
+        tabs,
+        settings_divider(),
+    ]
+    .spacing(12)
+    .padding([12, 14]);
+
+    match state.settings_tab {
+        state::SettingsTab::Profile => col = col.push(settings_profile_tab(state)),
+        state::SettingsTab::Storage => col = col.push(settings_storage_tab(state)),
+        state::SettingsTab::Sessions => col = col.push(settings_sessions_tab(state)),
+    }
+
+    scrollable(col.width(SETTINGS_W - 2.0).height(Length::Fill)).into()
+}
+
+/// Profile tab: identity card + edit form + notifications + theme rows.
+fn settings_profile_tab(state: &State) -> Element<'_> {
+    let mut col = column![].spacing(10);
+
+    // Identity block.
+    if let Some(p) = &state.my_profile {
+        col = col.push(container(avatar_circle(None, &p.name, 64.0)).center_x(Length::Fill));
+        col = col.push(
+            container(
+                text(p.name.clone())
+                    .size(theme::font::NAME)
+                    .color(Color::WHITE)
+                    .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+            )
+            .center_x(Length::Fill),
+        );
+        if let Some(u) = &p.username {
+            col = col.push(
+                container(
+                    text(format!("@{u}"))
+                        .size(theme::font::TIMESTAMP)
+                        .color(rgb(theme::ACCENT())),
+                )
+                .center_x(Length::Fill),
+            );
+        }
+        if let Some(ph) = &p.phone {
+            col = col.push(
+                container(
+                    text(ph.clone())
+                        .size(theme::font::TIMESTAMP)
+                        .color(rgb(theme::TEXT_SECONDARY())),
+                )
+                .center_x(Length::Fill),
+            );
+        }
+        if let Some(bio) = &p.bio {
+            col = col.push(
+                container(
+                    text(bio.clone())
+                        .size(theme::font::TIMESTAMP)
+                        .color(rgb(theme::TEXT_SECONDARY())),
+                )
+                .center_x(Length::Fill),
+            );
+        }
+    } else {
+        col = col.push(
+            text("Loading profile…")
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(theme::TEXT_SECONDARY())),
+        );
+    }
+
+    col = col.push(settings_divider());
+
+    // Edit form: First name / Bio / Save.
+    col = col.push(
+        text("Edit profile")
+            .size(theme::font::TIMESTAMP)
+            .color(rgb(theme::ICON()))
+            .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+    );
+    col = col.push(
+        text_input("First name", &state.edit_name)
+            .on_input(Message::SettingsNameChanged)
+            .size(theme::font::TIMESTAMP)
+            .padding(8)
+            .style(text_input_style),
+    );
+    col = col.push(
+        text_input("Bio", &state.edit_bio)
+            .on_input(Message::SettingsBioChanged)
+            .size(theme::font::TIMESTAMP)
+            .padding(8)
+            .style(text_input_style),
+    );
+    col = col.push(
+        button(text("Save").size(theme::font::TIMESTAMP).color(Color::WHITE))
+            .on_press(Message::SaveProfile)
+            .padding([6, 16])
+            .style(accent_button),
+    );
+
+    col = col.push(settings_divider());
+
+    // Notifications toggle.
+    col = col.push(settings_row(
+        "Notifications",
+        button(
+            text(if state.notifications_on { "On" } else { "Off" })
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(theme::ICON())),
+        )
+        .on_press(Message::ToggleNotifications)
+        .padding([4, 12])
+        .style(flat_button),
+    ));
+
+    // Theme switch (contract with the theme feature).
+    col = col.push(settings_row(
+        "Theme",
+        button(
+            text(match state.theme_mode {
+                state::ThemeMode::Dark => "Switch to Light",
+                state::ThemeMode::Light => "Switch to Dark",
+            })
+            .size(theme::font::TIMESTAMP)
+            .color(rgb(theme::ICON())),
+        )
+        .on_press(Message::ToggleTheme)
+        .padding([4, 12])
+        .style(flat_button),
+    ));
+
+    col.into()
+}
+
+/// Storage tab: measured cache size + clear action with inline confirmation
+/// (kick_confirm pattern).
+fn settings_storage_tab(state: &State) -> Element<'_> {
+    let mut col = column![].spacing(10);
+
+    col = col.push(
+        text("Storage")
+            .size(theme::font::TIMESTAMP)
+            .color(rgb(theme::ICON()))
+            .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+    );
+
+    let size_label = match state.cache_bytes {
+        Some(bytes) => fmt_size(bytes as i64),
+        None => "…".to_string(),
+    };
+    col = col.push(settings_row("Cache used", text(size_label)
+        .size(theme::font::TIMESTAMP)
+        .color(rgb(theme::TEXT_SECONDARY()))));
+
+    if state.confirm_clear_cache {
+        col = col.push(
+            row![
+                text("Clear all cached media?")
+                    .size(theme::font::TIMESTAMP)
+                    .color(rgb(theme::ERROR()))
+                    .width(Length::Fill),
+                button(text("Yes").size(theme::font::BADGE).color(rgb(theme::ERROR())))
+                    .on_press(Message::ConfirmClearCache)
+                    .padding([3, 10])
+                    .style(flat_button),
+                button(text("No").size(theme::font::BADGE).color(rgb(theme::ICON())))
+                    .on_press(Message::CancelClearCache)
+                    .padding([3, 10])
+                    .style(flat_button),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        );
+    } else {
+        col = col.push(
+            button(
+                row![
+                    icon(Icon::Trash, theme::ICON(), 14.0),
+                    text("Clear cache")
+                        .size(theme::font::TIMESTAMP)
+                        .color(rgb(theme::ICON())),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            )
+            .on_press(Message::AskClearCache)
+            .padding([6, 12])
+            .style(flat_button),
+        );
+    }
+
+    col = col.push(
+        text("Photos, documents and stickers you received are cached here. Clearing never signs you out.")
+            .size(theme::font::BADGE)
+            .color(rgb(theme::TEXT_SECONDARY())),
+    );
+
+    col.into()
+}
+
+/// Sessions tab: active authorizations; the current device is badged, others
+/// offer Terminate.
+fn settings_sessions_tab(state: &State) -> Element<'_> {
+    let mut col = column![].spacing(8);
+
+    col = col.push(
+        text("Active sessions")
+            .size(theme::font::TIMESTAMP)
+            .color(rgb(theme::ICON()))
+            .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+    );
+
+    if state.sessions.is_empty() {
+        col = col.push(
+            text(if state.my_profile.is_some() {
+                "No other sessions"
+            } else {
+                "Loading sessions…"
+            })
+            .size(theme::font::TIMESTAMP)
+            .color(rgb(theme::TEXT_SECONDARY())),
+        );
+        return col.into();
+    }
+
+    for s in &state.sessions {
+        let trailing: Element<'static> = if s.current {            container(
+                text("This device")
+                    .size(theme::font::BADGE)
+                    .color(rgb(theme::ACCENT())),
+            )
+            .padding([2, 6])
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(rgb(theme::PERF_BADGE_BG()))),
+                border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                ..container::Style::default()
+            })
+            .into()
+        } else {
+            button(
+                text("Terminate")
+                    .size(theme::font::BADGE)
+                    .color(rgb(theme::ERROR())),
+            )
+            .on_press(Message::RevokeSession(s.hash))
+            .padding([3, 8])
+            .style(flat_button)
+            .into()
+        };
+        col = col.push(
+            row![
+                column![
+                    text(s.device.clone())
+                        .size(theme::font::TIMESTAMP)
+                        .color(Color::WHITE),
+                    text(format!("{} · {}", s.platform, s.country))
+                        .size(theme::font::BADGE)
+                        .color(rgb(theme::TEXT_SECONDARY())),
+                ]
+                .width(Length::Fill),
+                trailing,
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .padding([6, 0]),
+        );
+    }
+
+    col.into()
 }
 
 /// Chat info as a floating right sheet over a dimmed app (pattern of the
@@ -954,6 +1364,10 @@ fn list_pane(state: &State) -> Element<'_> {
                 .style(icon_button_style),
             button(icon(Icon::Search, theme::ICON(), 18.0))
                 .on_press(Message::OpenGlobalSearch)
+                .padding(7)
+                .style(icon_button_style),
+            button(icon(Icon::Settings, theme::ICON(), 18.0))
+                .on_press(Message::ToggleSettings)
                 .padding(7)
                 .style(icon_button_style),
         ]

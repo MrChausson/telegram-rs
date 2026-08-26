@@ -10,7 +10,7 @@ use grammers_client::tl;
 use grammers_mtsender::SenderPool;
 use grammers_session::updates::UpdatesLike;
 
-use crate::model::{ChatDetail, ChatInfo, ChatKind, ForwardInfo, GlobalHit, MediaKind, MessageInfo, ParticipantRow, ParticipantRole, StickerDoc, StickerSetInfo};
+use crate::model::{AuthSession, ChatDetail, ChatInfo, ChatKind, ForwardInfo, GlobalHit, MediaKind, MessageInfo, ParticipantRow, ParticipantRole, SelfProfile, StickerDoc, StickerSetInfo};
 use crate::session::FileSession;
 
 /// Wrapped Telegram client with the network runtime running in the background.
@@ -1164,6 +1164,130 @@ impl Telegram {
             })
             .await
             .context("updating notification settings")?;
+        Ok(())
+    }
+
+    /// Fetches the signed-in user's own profile: name/username/phone off
+    /// `users.getUsers` (self), bio (about) off `users.getFullUser`. Whatever
+    /// Telegram hides stays `None` — a partial result beats an error here.
+    pub async fn get_me(&self) -> Result<SelfProfile> {
+        let mut users = self
+            .client
+            .invoke(&tl::functions::users::GetUsers {
+                id: vec![tl::enums::InputUser::UserSelf],
+            })
+            .await
+            .context("fetching own profile")?;
+        let (name, username, phone) = match users.pop() {
+            Some(tl::enums::User::User(u)) => {
+                let name = [u.first_name.clone().unwrap_or_default(),
+                    u.last_name.clone().unwrap_or_default()]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+                let username = u
+                    .username
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        u.usernames.as_ref().and_then(|v| {
+                            v.iter().map(|x| match x {
+                                tl::enums::Username::Username(un) => un.username.clone(),
+                            }).next()
+                        })
+                    })
+                    .filter(|s| !s.is_empty());
+                (
+                    name,
+                    username,
+                    u.phone
+                        .clone()
+                        .filter(|p| !p.is_empty())
+                        .map(|p| format!("+{p}")),
+                )
+            }
+            _ => ("Unknown".to_string(), None, None),
+        };
+        let bio = match self
+            .client
+            .invoke(&tl::functions::users::GetFullUser {
+                id: tl::enums::InputUser::UserSelf,
+            })
+            .await
+        {
+            Ok(full) => match full {
+                tl::enums::users::UserFull::Full(f) => match f.full_user {
+                    tl::enums::UserFull::Full(u) => u.about,
+                },
+            },
+            Err(_) => None,
+        };
+        Ok(SelfProfile {
+            name,
+            username,
+            phone,
+            bio: bio.filter(|s| !s.trim().is_empty()),
+        })
+    }
+
+    /// Updates the user's own profile (`None` leaves a field unchanged).
+    /// The caller refreshes the panel with a fresh [`Self::get_me`].
+    pub async fn update_profile(
+        &self,
+        first_name: Option<String>,
+        last_name: Option<String>,
+        about: Option<String>,
+    ) -> Result<()> {
+        self.client
+            .invoke(&tl::functions::account::UpdateProfile {
+                first_name,
+                last_name,
+                about,
+            })
+            .await
+            .context("updating profile")?;
+        Ok(())
+    }
+
+    /// Lists the account's active sessions (settings panel).
+    pub async fn sessions(&self) -> Result<Vec<AuthSession>> {
+        let res = self
+            .client
+            .invoke(&tl::functions::account::GetAuthorizations {})
+            .await
+            .context("listing sessions")?;
+        let list = match res {
+            tl::enums::account::Authorizations::Authorizations(a) => a.authorizations,
+        };
+        Ok(list
+            .into_iter()
+            .map(|a| match a {
+                tl::enums::Authorization::Authorization(a) => AuthSession {
+                    device: a.device_model,
+                    platform: if a.platform.is_empty() {
+                        a.system_version
+                    } else {
+                        a.platform
+                    },
+                    country: a.country,
+                    current: a.current,
+                    hash: a.hash,
+                },
+            })
+            .collect())
+    }
+
+    /// Terminates another session of the account by its authorization hash.
+    pub async fn revoke_session(&self, hash: i64) -> Result<()> {
+        let ok = self
+            .client
+            .invoke(&tl::functions::account::ResetAuthorization { hash })
+            .await
+            .context("revoking session")?;
+        if !ok {
+            anyhow::bail!("session {hash} could not be revoked");
+        }
         Ok(())
     }
 
