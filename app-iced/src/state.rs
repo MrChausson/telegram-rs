@@ -539,7 +539,7 @@ impl State {
         let pos = self.dialogs.iter().position(|d| d.id == chat_id);
         let Some(pos) = pos else { return };
         let Some(d) = self.dialogs.get(pos) else { return };
-        let short = (crate::ellipsize(&d.title, 15), crate::ellipsize(&d.subtitle, 24));
+        let short = (crate::ellipsize(&d.title, 15), crate::ellipsize(&d.subtitle, 20));
         if self.dialog_short.len() <= pos {
             self.dialog_short.resize(pos + 1, (String::new(), String::new()));
         }
@@ -672,7 +672,7 @@ impl State {
                     .map(|d| {
                         (
                             crate::ellipsize(&d.title, 15),
-                            crate::ellipsize(&d.subtitle, 24),
+                            crate::ellipsize(&d.subtitle, 20),
                         )
                     })
                     .collect();

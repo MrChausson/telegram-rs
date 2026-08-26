@@ -1130,6 +1130,9 @@ fn chat_row_button<'a>(row: &'a ChatRow, selected: bool, title: &'a str, sub: &'
         .wrapping(iced::widget::text::Wrapping::None)
         .width(Length::Fill);
 
+    // The right meta column (timestamp + unread badge) gets a RESERVED
+    // fixed width so long previews can never run under it.
+    let meta_w = 52.0f32;
     let ts: Element<'_> = if row.date > 0 {
         text(theme::cached_time(row.date))
             .size(theme::font::TIMESTAMP)
@@ -1140,19 +1143,26 @@ fn chat_row_button<'a>(row: &'a ChatRow, selected: bool, title: &'a str, sub: &'
     };
 
     let badge: Element<'_> = if unread {
-        container(text(row.unread).size(theme::font::BADGE).color(Color::WHITE))
-            .padding([2, 6])
-            .style(badge_circle)
-            .into()
+        container(
+            text(row.unread)
+                .size(theme::font::BADGE)
+                .color(Color::WHITE),
+        )
+        .padding([2, 7])
+        .style(badge_circle)
+        .into()
     } else {
-        horizontal_spacer()
+        container(iced::widget::Space::new().height(18.0)).into()
     };
 
     let row_button = button(
         row![
             avatar,
             column![name, sub_text].spacing(2).width(Length::Fill),
-            column![ts, badge].spacing(4).align_x(Alignment::End),
+            column![ts, badge]
+                .spacing(4)
+                .width(Length::Fixed(meta_w))
+                .align_x(Alignment::End),
         ]
         .spacing(10)
         .align_y(Alignment::Center),
@@ -1927,12 +1937,12 @@ fn chat_header(
                 .style(flat_button),
             perf_badge,
         ]
-        .spacing(10)
+        .spacing(6)
         .align_y(Alignment::Center),
     )
     .width(Length::Fill)
     .height(theme::layout::CHAT_HEADER_H)
-    .padding([0, 12])
+    .padding([4.0, 14.0])
     .align_y(Alignment::Center)
     .style(header_bg)
     .into()
