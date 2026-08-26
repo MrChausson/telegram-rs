@@ -2831,7 +2831,7 @@ const LIST_OVERSCAN: usize = 16;
 /// Breathing room kept BELOW the last message when the list is scrolled to
 /// the end: without it the snap-to-end pins the newest bubble flush against
 /// the viewport bottom (hard to read, no separation from the composer).
-const LIST_BOTTOM_PAD: f32 = 18.0;
+const LIST_BOTTOM_PAD: f32 = 28.0;
 
 /// Number of items the open context menu shows.
 fn context_menu_items(state: &State) -> usize {
