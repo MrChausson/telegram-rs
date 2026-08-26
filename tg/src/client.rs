@@ -1400,12 +1400,15 @@ fn transcode_ogg_for_playback(cached: &std::path::Path) -> Option<std::path::Pat
     match out {
         Ok(o) if o.status.success() => Some(wav),
         other => {
+            // Keep serving the ORIGINAL ogg path: playback falls back to the
+            // system player (which decodes Opus natively) instead of losing
+            // the download entirely.
             eprintln!(
                 "voice transcode failed for {}: {:?}",
                 cached.display(),
                 other.map(|o| o.stderr).map(|e| String::from_utf8_lossy(&e).into_owned())
             );
-            None
+            Some(cached.to_path_buf())
         }
     }
 }
