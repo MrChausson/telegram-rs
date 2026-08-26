@@ -653,7 +653,7 @@ fn render(kind: Icon, color: (u8, u8, u8), px: u32) -> (Pixmap, u32) {
 /// Renders the app logo (accent disc + paper plane) as a standalone RGBA8
 /// pixmap — used by the tray (`ksni::Icon`) and any other embedder.
 pub fn render_logo_rgba(px: u32) -> Pixmap {
-    render(Icon::Logo, crate::theme::ACCENT, px).0
+    render(Icon::Logo, crate::theme::ACCENT(), px).0
 }
 
 /// Builds an `Element` drawing the given icon, `px` logical size.

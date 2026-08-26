@@ -7,6 +7,34 @@ use crate::bridge::{
     StickerSetBridge, UiMessage,
 };
 
+// ---------------------------------------------------------------------------
+// Theme (light/dark) — Lot 3a
+// ---------------------------------------------------------------------------
+
+/// Selected UI color scheme. Defined in [`crate::theme`] (next to the
+/// palettes) and re-exported here: the settings panel toggles
+/// `Message::ToggleTheme` → `State::toggle_theme`.
+pub use crate::theme::ThemeMode;
+
+/// Reads the persisted theme mode from `path`; a missing/unreadable/garbage
+/// marker falls back to dark.
+fn read_theme_mode_at(path: &std::path::Path) -> ThemeMode {
+    std::fs::read_to_string(path)
+        .map(|content| ThemeMode::parse(&content))
+        .unwrap_or_default()
+}
+
+/// Persists `m` at `path` (`"dark"`/`"light"`). Best-effort: a read-only or
+/// missing data dir must never crash the app.
+fn write_theme_mode_at(path: &std::path::Path, m: ThemeMode) {
+    let _ = std::fs::write(path, m.as_str());
+}
+
+/// Default location of the `theme-mode` file inside the app data dir.
+fn theme_mode_path() -> std::path::PathBuf {
+    crate::network::data_dir().join("theme-mode")
+}
+
 /// One-line preview of a message for list rows / reply snippets: the text,
 /// or a media placeholder when there is none.
 pub fn preview_text(
@@ -287,6 +315,13 @@ pub struct State {
     pub muted: bool,
 
     // -----------------------------------------------------------------
+    // Theme (light/dark)
+    // -----------------------------------------------------------------
+    /// Current color scheme. Flipped by [`Self::toggle_theme`]; applied to
+    /// the live palette and persisted (with `persist_ui`) there too.
+    pub theme_mode: ThemeMode,
+
+    // -----------------------------------------------------------------
     // Emoji picker (composer)
     // -----------------------------------------------------------------
     /// The emoji picker panel above the composer is open.
@@ -408,6 +443,7 @@ impl State {
             participants: Vec::new(),
             kick_confirm: None,
             muted: false,
+            theme_mode: ThemeMode::Dark,
             emoji_panel_open: false,
             emoji_recents: Vec::new(),
             sticker_picker_open: false,
@@ -438,14 +474,33 @@ impl State {
     }
 
     /// Enables persisting/restoring the last open chat (off in `--demo`).
-    /// Also restores the emoji recents (same data dir, same flag).
+    /// Also restores the emoji recents and the theme mode (same data dir,
+    /// same flag).
     pub fn with_persist_ui(mut self, on: bool) -> Self {
         self.persist_ui = on;
         self.initial_chat = read_last_chat_at(&last_chat_path());
         if on {
             self.emoji_recents = read_emoji_recents_at(&emoji_recents_path());
+            // Theme: restore from disk AND apply to the live palette so the
+            // very first frame already uses it.
+            let m = read_theme_mode_at(&theme_mode_path());
+            self.theme_mode = m;
+            crate::theme::set_mode(m);
         }
         self
+    }
+
+    /// Flips dark ⇄ light, applies the new palette (the next rendered frame
+    /// picks it up) and persists the choice when `persist_ui` is on.
+    pub fn toggle_theme(&mut self) {
+        self.theme_mode = match self.theme_mode {
+            ThemeMode::Dark => ThemeMode::Light,
+            ThemeMode::Light => ThemeMode::Dark,
+        };
+        crate::theme::set_mode(self.theme_mode);
+        if self.persist_ui {
+            write_theme_mode_at(&theme_mode_path(), self.theme_mode);
+        }
     }
 
     /// Enables the `--perf` FPS overlay.
@@ -484,7 +539,7 @@ impl State {
         let pos = self.dialogs.iter().position(|d| d.id == chat_id);
         let Some(pos) = pos else { return };
         let Some(d) = self.dialogs.get(pos) else { return };
-        let short = (crate::ellipsize(&d.title, 15), crate::ellipsize(&d.subtitle, 24));
+        let short = (crate::ellipsize(&d.title, 15), crate::ellipsize(&d.subtitle, 20));
         if self.dialog_short.len() <= pos {
             self.dialog_short.resize(pos + 1, (String::new(), String::new()));
         }
@@ -617,7 +672,7 @@ impl State {
                     .map(|d| {
                         (
                             crate::ellipsize(&d.title, 15),
-                            crate::ellipsize(&d.subtitle, 24),
+                            crate::ellipsize(&d.subtitle, 20),
                         )
                     })
                     .collect();
@@ -3002,6 +3057,45 @@ mod tests {
         // A missing/corrupt file must never crash: empty list fallback.
         std::fs::write(&path, "").unwrap();
         assert!(read_emoji_recents_at(&path).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_defaults_to_dark_and_toggle_flips_palette() {
+        let _guard = crate::theme::mode_test_guard();
+        let (mut state, _) = demo_state();
+        assert_eq!(state.theme_mode, ThemeMode::Dark);
+        assert_eq!(crate::theme::LIST_BG(), (23, 33, 43));
+
+        state.toggle_theme();
+        assert_eq!(state.theme_mode, ThemeMode::Light);
+        // The live palette follows immediately (the next frame re-reads it).
+        assert_eq!(crate::theme::LIST_BG(), (255, 255, 255));
+        assert_eq!(crate::theme::TEXT_PRIMARY(), (0, 0, 0));
+        assert_eq!(crate::theme::BUBBLE_SENT(), (238, 255, 222));
+
+        state.toggle_theme();
+        assert_eq!(state.theme_mode, ThemeMode::Dark);
+        assert_eq!(crate::theme::LIST_BG(), (23, 33, 43));
+    }
+
+    #[test]
+    fn theme_mode_persistence_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("tg-theme-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("theme-mode");
+
+        // Missing file → dark.
+        assert_eq!(read_theme_mode_at(&path), ThemeMode::Dark);
+        write_theme_mode_at(&path, ThemeMode::Light);
+        assert_eq!(read_theme_mode_at(&path), ThemeMode::Light);
+        write_theme_mode_at(&path, ThemeMode::Dark);
+        assert_eq!(read_theme_mode_at(&path), ThemeMode::Dark);
+        // Corrupt marker must never crash: dark fallback.
+        std::fs::write(&path, "neon-pink").unwrap();
+        assert_eq!(read_theme_mode_at(&path), ThemeMode::Dark);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

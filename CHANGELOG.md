@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Light theme**: a full light palette alongside the dark one, switchable
+  from the settings panel and persisted across sessions (data-dir marker,
+  disabled under `--demo`). Iced's own base palette follows the mode so
+  default-styled surfaces adapt too.
+
+### Fixed
+- **Chat header icons** (search / info) are right-aligned with a proper
+  margin and vertically centered again.
+- **Unread badges** no longer sit over the last-message preview: the right
+  meta column (timestamp + badge) has a reserved fixed width and previews
+  ellipsize earlier.
+
 ## [v0.7.0] - 2026-08-24
 
 ### Changed
