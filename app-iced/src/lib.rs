@@ -2944,15 +2944,24 @@ pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
     // (`tops` covers every row).
     let content = if let Some(menu) = state.context_menu {
         let row = menu.row.min(n.saturating_sub(1));
-        let below = tops[row] + heights[row] - top_pad + 3.0;
+        // Position in VIEWPORT space: the menu must stay on screen, so the
+        // flip compares against the visible height (not the content tail —
+        // comparing against it made menus near the list bottom open off-screen).
         let menu_h = context_menu_h(state);
-        let stack_h = total - top_pad;
-        let y = if below + menu_h > stack_h {
-            // Not enough room below: float above the row instead.
-            (tops[row] - menu_h - 3.0 - top_pad).max(0.0)
+        let row_top_vp = tops[row] - state.scroll_offset;
+        let row_bot_vp = row_top_vp + heights[row];
+        let desired_vp = if row_bot_vp + menu_h + 3.0 > view_h {
+            // Not enough room below: float above the row, clamped to the
+            // viewport top when the row itself hugs it.
+            (row_top_vp - menu_h - 3.0).max(2.0)
         } else {
-            below
+            row_bot_vp + 3.0
         };
+        // Keep the whole menu inside the viewport with a small breathing
+        // margin (the estimate can undershoot the real painted height).
+        let desired_vp = desired_vp.min((view_h - menu_h - 8.0).max(2.0));
+        // The layer's padding is relative to the slice start (`top_pad`).
+        let y = (desired_vp + state.scroll_offset - top_pad).max(0.0);
         let layer = container(
             row![horizontal_spacer(), context_menu_bar(state)]
                 .padding([0.0, theme::layout::MSG_PAD_X]),
