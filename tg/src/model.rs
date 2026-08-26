@@ -26,7 +26,7 @@ pub enum MediaKind {
     /// An animated GIF (document + animated attribute).
     Gif { name: String, size: i64 },
     /// An audio file or voice note (document + audio attributes).
-    Audio { name: String, size: i64, voice: bool },
+    Audio { name: String, size: i64, voice: bool, duration: f64 },
     /// A sticker (document + sticker attribute): associated emoji, byte size
     /// and the original file name (usually empty for stickers).
     Sticker { name: String, size: i64, alt: String },

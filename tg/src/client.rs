@@ -1365,6 +1365,7 @@ pub fn media_kind_of_document(doc: &grammers_client::media::Document) -> Option<
                     name,
                     size,
                     voice: a.voice,
+                    duration: a.duration as f64,
                 })
             }
             _ => {}
@@ -1445,6 +1446,7 @@ pub fn media_kind_of_path(path: &std::path::Path) -> Option<MediaKind> {
             name,
             size,
             voice: false,
+            duration: 0.0,
         },
         _ => return None,
     };

@@ -1507,13 +1507,18 @@ fn media_to_row(
             }),
             None,
         ),
-        Some(MK::Audio { name, size, voice }) => (
+        Some(MK::Audio {
+            name,
+            size,
+            voice,
+            duration,
+        }) => (
             None,
             Some(DocMeta {
                 name,
                 size,
                 kind: DocKind::Audio { voice },
-                duration: None,
+                duration: Some(duration).filter(|d| *d > 0.0),
             }),
             None,
         ),
@@ -2708,7 +2713,9 @@ mod tests {
             name: "v.ogg".into(),
             size: 20,
             voice: true,
+            duration: 12.0,
         }));
+        assert_eq!(doc.as_ref().and_then(|d| d.duration), Some(12.0));
         assert_eq!(doc.unwrap().kind, DocKind::Audio { voice: true });
         // Plain file stays a file.
         let (_, doc, _) = media_to_row(Some(tg::model::MediaKind::Document {
