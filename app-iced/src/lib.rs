@@ -96,7 +96,7 @@ fn linkify(s: &str) -> Option<Vec<iced::widget::text::Span<'_, String>>> {
             spans.push(
                 Span::new(url)
                     .link(url.to_string())
-                    .color(rgb(theme::ACCENT))
+                    .color(rgb(theme::ACCENT()))
                     .underline(true),
             );
             rest = tail;
@@ -125,13 +125,13 @@ fn message_body<'a>(t: &'a str) -> Element<'a> {
             rich_text(spans)
                 .on_link_click(Message::OpenUrl)
                 .size(theme::font::MESSAGE)
-                .color(Color::WHITE)
+                .color(rgb(theme::TEXT_PRIMARY()))
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
                 .into()
         }
         None => text(t)
             .size(theme::font::MESSAGE)
-            .color(Color::WHITE)
+            .color(rgb(theme::TEXT_PRIMARY()))
             .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
             .into(),
     }
@@ -244,7 +244,8 @@ pub enum Message {
     ConfirmClearCache,
     /// "Terminate" was clicked on a session row.
     RevokeSession(i64),
-    /// The theme row's switch button (contract with the theme feature).
+    /// Flip dark ⇄ light (Settings panel). `State::toggle_theme` applies the
+    /// palette and persists the choice.
     ToggleTheme,
     /// Escape: close the context menu, cancel editing or close the viewer.
     Escape,
@@ -669,7 +670,7 @@ fn search_view(state: &State) -> Element<'_> {
 
     let header = container(
         row![
-            button(icon(Icon::Back, theme::ICON, 18.0))
+            button(icon(Icon::Back, theme::ICON(), 18.0))
                 .on_press(Message::CloseSearch)
                 .padding(8)
                 .style(flat_button),
@@ -719,18 +720,18 @@ fn search_hit_row( hit: &bridge::SearchHit, _query: &str, idx: usize) -> Element
             column![
                 text(title)
                     .size(theme::font::NAME)
-                    .color(Color::WHITE)
+                    .color(rgb(theme::TEXT_PRIMARY()))
                     .wrapping(iced::widget::text::Wrapping::None),
                 text(snippet)
                     .size(theme::font::PLACEHOLDER)
-                    .color(rgb(theme::TEXT_SECONDARY))
+                    .color(rgb(theme::TEXT_SECONDARY()))
                     .wrapping(iced::widget::text::Wrapping::None),
             ]
             .spacing(2)
             .width(Length::Fill),
             text(ts)
                 .size(theme::font::TIMESTAMP)
-                .color(rgb(theme::TEXT_SECONDARY)),
+                .color(rgb(theme::TEXT_SECONDARY())),
         ]
         .spacing(10)
         .align_y(Alignment::Center),
@@ -747,7 +748,7 @@ fn search_hint(label: &str) -> Element<'static> {
     container(
         text(label.to_string())
             .size(theme::font::MESSAGE)
-            .color(rgb(theme::TEXT_SECONDARY)),
+            .color(rgb(theme::TEXT_SECONDARY())),
     )
     .width(Length::Fill)
     .height(Length::Fill)
@@ -762,7 +763,7 @@ fn search_hint(label: &str) -> Element<'static> {
 
 fn viewer_view(state: &State) -> Element<'_> {
     let Some(path) = &state.viewer else { return container("").into() };
-    let close = button(icon(Icon::Back, theme::ICON, 16.0))
+    let close = button(icon(Icon::Back, theme::ICON(), 16.0))
         .on_press(Message::CloseViewer)
         .padding(8)
         .style(flat_button);
@@ -827,9 +828,9 @@ fn login_view(state: &State) -> Element<'_> {
     let status = if state.status.is_empty() {
         None
     } else if state.login_error {
-        Some(text(&state.status).size(theme::font::TIMESTAMP).color(rgb(theme::ERROR)))
+        Some(text(&state.status).size(theme::font::TIMESTAMP).color(rgb(theme::ERROR())))
     } else {
-        Some(text(&state.status).size(theme::font::TIMESTAMP).color(rgb(theme::TEXT_SECONDARY)))
+        Some(text(&state.status).size(theme::font::TIMESTAMP).color(rgb(theme::TEXT_SECONDARY())))
     };
 
     let logo = container(
@@ -856,7 +857,7 @@ fn login_view(state: &State) -> Element<'_> {
         let mut card = column![
             logo,
             text(title).size(20),
-            text(subtitle).size(13).color(rgb(theme::TEXT_SECONDARY)),
+            text(subtitle).size(13).color(rgb(theme::TEXT_SECONDARY())),
             input,
         button(
             text(button_label).size(15).color(Color::WHITE)
@@ -876,8 +877,8 @@ fn login_view(state: &State) -> Element<'_> {
     let back = if state.login_step != LoginStep::Phone {
         Some(
             button(row![
-                icon(Icon::Back, theme::ICON, 18.0),
-                text("Back").size(13).color(rgb(theme::ICON)),
+                icon(Icon::Back, theme::ICON(), 18.0),
+                text("Back").size(13).color(rgb(theme::ICON())),
             ])
             .on_press(Message::LoginBack)
             .padding(8)
@@ -950,11 +951,11 @@ fn settings_layer<'a>(state: &'a State) -> Element<'a> {
         .height(Length::Fill)
         .padding([12.0, 0.0])
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(rgb(theme::LIST_BG))),
+            background: Some(iced::Background::Color(rgb(theme::LIST_BG()))),
             border: iced::Border {
                 radius: 0.0.into(),
                 width: 1.0,
-                color: rgb(theme::MENU_BORDER),
+                color: rgb(theme::MENU_BORDER()),
             },
             ..container::Style::default()
         });
@@ -975,7 +976,7 @@ fn settings_tab_header<'a>(
     button(
         text(label)
             .size(theme::font::TIMESTAMP)
-            .color(if active { Color::WHITE } else { rgb(theme::TEXT_SECONDARY) }),
+            .color(if active { Color::WHITE } else { rgb(theme::TEXT_SECONDARY()) }),
     )
     .on_press(Message::SettingsTab(tab))
     .padding([6, 12])
@@ -991,7 +992,7 @@ fn settings_row<'a>(
     row![
         text(label.to_string())
             .size(theme::font::TIMESTAMP)
-            .color(rgb(theme::TEXT_PRIMARY))
+            .color(rgb(theme::TEXT_PRIMARY()))
             .width(Length::Fill),
         control.into(),
     ]
@@ -1005,7 +1006,7 @@ fn settings_divider() -> Element<'static> {
         .width(Length::Fill)
         .height(1.0)
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(rgb(theme::DIVIDER))),
+            background: Some(iced::Background::Color(rgb(theme::DIVIDER()))),
             ..container::Style::default()
         })
         .into()
@@ -1013,7 +1014,7 @@ fn settings_divider() -> Element<'static> {
 
 /// The settings panel body: tabs on top, then the active tab's content.
 fn settings_panel(state: &State) -> Element<'_> {
-    let close = button(icon(Icon::Close, theme::ICON, 16.0))
+    let close = button(icon(Icon::Close, theme::ICON(), 16.0))
         .on_press(Message::CloseSettings)
         .padding(6)
         .style(flat_button);
@@ -1074,7 +1075,7 @@ fn settings_profile_tab(state: &State) -> Element<'_> {
                 container(
                     text(format!("@{u}"))
                         .size(theme::font::TIMESTAMP)
-                        .color(rgb(theme::ACCENT)),
+                        .color(rgb(theme::ACCENT())),
                 )
                 .center_x(Length::Fill),
             );
@@ -1084,7 +1085,7 @@ fn settings_profile_tab(state: &State) -> Element<'_> {
                 container(
                     text(ph.clone())
                         .size(theme::font::TIMESTAMP)
-                        .color(rgb(theme::TEXT_SECONDARY)),
+                        .color(rgb(theme::TEXT_SECONDARY())),
                 )
                 .center_x(Length::Fill),
             );
@@ -1094,7 +1095,7 @@ fn settings_profile_tab(state: &State) -> Element<'_> {
                 container(
                     text(bio.clone())
                         .size(theme::font::TIMESTAMP)
-                        .color(rgb(theme::TEXT_SECONDARY)),
+                        .color(rgb(theme::TEXT_SECONDARY())),
                 )
                 .center_x(Length::Fill),
             );
@@ -1103,7 +1104,7 @@ fn settings_profile_tab(state: &State) -> Element<'_> {
         col = col.push(
             text("Loading profile…")
                 .size(theme::font::TIMESTAMP)
-                .color(rgb(theme::TEXT_SECONDARY)),
+                .color(rgb(theme::TEXT_SECONDARY())),
         );
     }
 
@@ -1113,7 +1114,7 @@ fn settings_profile_tab(state: &State) -> Element<'_> {
     col = col.push(
         text("Edit profile")
             .size(theme::font::TIMESTAMP)
-            .color(rgb(theme::ICON))
+            .color(rgb(theme::ICON()))
             .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
     );
     col = col.push(
@@ -1145,7 +1146,7 @@ fn settings_profile_tab(state: &State) -> Element<'_> {
         button(
             text(if state.notifications_on { "On" } else { "Off" })
                 .size(theme::font::TIMESTAMP)
-                .color(rgb(theme::ICON)),
+                .color(rgb(theme::ICON())),
         )
         .on_press(Message::ToggleNotifications)
         .padding([4, 12])
@@ -1161,7 +1162,7 @@ fn settings_profile_tab(state: &State) -> Element<'_> {
                 state::ThemeMode::Light => "Switch to Dark",
             })
             .size(theme::font::TIMESTAMP)
-            .color(rgb(theme::ICON)),
+            .color(rgb(theme::ICON())),
         )
         .on_press(Message::ToggleTheme)
         .padding([4, 12])
@@ -1179,7 +1180,7 @@ fn settings_storage_tab(state: &State) -> Element<'_> {
     col = col.push(
         text("Storage")
             .size(theme::font::TIMESTAMP)
-            .color(rgb(theme::ICON))
+            .color(rgb(theme::ICON()))
             .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
     );
 
@@ -1189,20 +1190,20 @@ fn settings_storage_tab(state: &State) -> Element<'_> {
     };
     col = col.push(settings_row("Cache used", text(size_label)
         .size(theme::font::TIMESTAMP)
-        .color(rgb(theme::TEXT_SECONDARY))));
+        .color(rgb(theme::TEXT_SECONDARY()))));
 
     if state.confirm_clear_cache {
         col = col.push(
             row![
                 text("Clear all cached media?")
                     .size(theme::font::TIMESTAMP)
-                    .color(rgb(theme::ERROR))
+                    .color(rgb(theme::ERROR()))
                     .width(Length::Fill),
-                button(text("Yes").size(theme::font::BADGE).color(rgb(theme::ERROR)))
+                button(text("Yes").size(theme::font::BADGE).color(rgb(theme::ERROR())))
                     .on_press(Message::ConfirmClearCache)
                     .padding([3, 10])
                     .style(flat_button),
-                button(text("No").size(theme::font::BADGE).color(rgb(theme::ICON)))
+                button(text("No").size(theme::font::BADGE).color(rgb(theme::ICON())))
                     .on_press(Message::CancelClearCache)
                     .padding([3, 10])
                     .style(flat_button),
@@ -1214,10 +1215,10 @@ fn settings_storage_tab(state: &State) -> Element<'_> {
         col = col.push(
             button(
                 row![
-                    icon(Icon::Trash, theme::ICON, 14.0),
+                    icon(Icon::Trash, theme::ICON(), 14.0),
                     text("Clear cache")
                         .size(theme::font::TIMESTAMP)
-                        .color(rgb(theme::ICON)),
+                        .color(rgb(theme::ICON())),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -1231,7 +1232,7 @@ fn settings_storage_tab(state: &State) -> Element<'_> {
     col = col.push(
         text("Photos, documents and stickers you received are cached here. Clearing never signs you out.")
             .size(theme::font::BADGE)
-            .color(rgb(theme::TEXT_SECONDARY)),
+            .color(rgb(theme::TEXT_SECONDARY())),
     );
 
     col.into()
@@ -1245,7 +1246,7 @@ fn settings_sessions_tab(state: &State) -> Element<'_> {
     col = col.push(
         text("Active sessions")
             .size(theme::font::TIMESTAMP)
-            .color(rgb(theme::ICON))
+            .color(rgb(theme::ICON()))
             .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
     );
 
@@ -1257,7 +1258,7 @@ fn settings_sessions_tab(state: &State) -> Element<'_> {
                 "Loading sessions…"
             })
             .size(theme::font::TIMESTAMP)
-            .color(rgb(theme::TEXT_SECONDARY)),
+            .color(rgb(theme::TEXT_SECONDARY())),
         );
         return col.into();
     }
@@ -1266,11 +1267,11 @@ fn settings_sessions_tab(state: &State) -> Element<'_> {
         let trailing: Element<'static> = if s.current {            container(
                 text("This device")
                     .size(theme::font::BADGE)
-                    .color(rgb(theme::ACCENT)),
+                    .color(rgb(theme::ACCENT())),
             )
             .padding([2, 6])
             .style(|_| container::Style {
-                background: Some(iced::Background::Color(rgb(theme::PERF_BADGE_BG))),
+                background: Some(iced::Background::Color(rgb(theme::PERF_BADGE_BG()))),
                 border: iced::Border { radius: 6.0.into(), ..Default::default() },
                 ..container::Style::default()
             })
@@ -1279,7 +1280,7 @@ fn settings_sessions_tab(state: &State) -> Element<'_> {
             button(
                 text("Terminate")
                     .size(theme::font::BADGE)
-                    .color(rgb(theme::ERROR)),
+                    .color(rgb(theme::ERROR())),
             )
             .on_press(Message::RevokeSession(s.hash))
             .padding([3, 8])
@@ -1294,7 +1295,7 @@ fn settings_sessions_tab(state: &State) -> Element<'_> {
                         .color(Color::WHITE),
                     text(format!("{} · {}", s.platform, s.country))
                         .size(theme::font::BADGE)
-                        .color(rgb(theme::TEXT_SECONDARY)),
+                        .color(rgb(theme::TEXT_SECONDARY())),
                 ]
                 .width(Length::Fill),
                 trailing,
@@ -1322,11 +1323,11 @@ fn info_layer<'a>(state: &'a State) -> Element<'a> {
         .height(Length::Fill)
         .padding([12.0, 0.0])
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(rgb(theme::LIST_BG))),
+            background: Some(iced::Background::Color(rgb(theme::LIST_BG()))),
             border: iced::Border {
                 radius: 0.0.into(),
                 width: 1.0,
-                color: rgb(theme::MENU_BORDER),
+                color: rgb(theme::MENU_BORDER()),
             },
             ..container::Style::default()
         });
@@ -1354,18 +1355,18 @@ fn list_pane(state: &State) -> Element<'_> {
 
     let header = container(
         row![
-            icon(Icon::Logo, theme::ACCENT, 26.0),
-            text("Chats").size(theme::font::TITLE).color(Color::WHITE),
+            icon(Icon::Logo, theme::ACCENT(), 26.0),
+            text("Chats").size(theme::font::TITLE).color(rgb(theme::TEXT_PRIMARY())),
             horizontal_spacer(),
-            button(icon(Icon::Plus, theme::ICON, 18.0))
+            button(icon(Icon::Plus, theme::ICON(), 18.0))
                 .on_press(Message::OpenCreateMenu)
                 .padding(7)
                 .style(icon_button_style),
-            button(icon(Icon::Search, theme::ICON, 18.0))
+            button(icon(Icon::Search, theme::ICON(), 18.0))
                 .on_press(Message::OpenGlobalSearch)
                 .padding(7)
                 .style(icon_button_style),
-            button(icon(Icon::Settings, theme::ICON, 18.0))
+            button(icon(Icon::Settings, theme::ICON(), 18.0))
                 .on_press(Message::ToggleSettings)
                 .padding(7)
                 .style(icon_button_style),
@@ -1534,38 +1535,48 @@ fn chat_row_button<'a>(row: &'a ChatRow, selected: bool, title: &'a str, sub: &'
     // `title`/`sub` are the pre-ellipsized strings from `State::dialog_short`.
     let name = text(title)
         .size(theme::font::NAME)
-        .color(Color::WHITE)
+        .color(rgb(theme::TEXT_PRIMARY()))
         .wrapping(iced::widget::text::Wrapping::None)
         .width(Length::Fill);
     let sub_text = text(sub)
         .size(theme::font::MESSAGE)
-        .color(rgb(theme::TEXT_SECONDARY))
+        .color(rgb(theme::TEXT_SECONDARY()))
         .wrapping(iced::widget::text::Wrapping::None)
         .width(Length::Fill);
 
+    // The right meta column (timestamp + unread badge) gets a RESERVED
+    // fixed width so long previews can never run under it.
+    let meta_w = 52.0f32;
     let ts: Element<'_> = if row.date > 0 {
         text(theme::cached_time(row.date))
             .size(theme::font::TIMESTAMP)
-            .color(rgb(theme::TEXT_SECONDARY))
+            .color(rgb(theme::TEXT_SECONDARY()))
             .into()
     } else {
         horizontal_spacer()
     };
 
     let badge: Element<'_> = if unread {
-        container(text(row.unread).size(theme::font::BADGE).color(Color::WHITE))
-            .padding([2, 6])
-            .style(badge_circle)
-            .into()
+        container(
+            text(row.unread)
+                .size(theme::font::BADGE)
+                .color(Color::WHITE),
+        )
+        .padding([2, 7])
+        .style(badge_circle)
+        .into()
     } else {
-        horizontal_spacer()
+        container(iced::widget::Space::new().height(18.0)).into()
     };
 
     let row_button = button(
         row![
             avatar,
             column![name, sub_text].spacing(2).width(Length::Fill),
-            column![ts, badge].spacing(4).align_x(Alignment::End),
+            column![ts, badge]
+                .spacing(4)
+                .width(Length::Fixed(meta_w))
+                .align_x(Alignment::End),
         ]
         .spacing(10)
         .align_y(Alignment::Center),
@@ -1631,7 +1642,7 @@ fn conversation_pane(state: &State) -> Element<'_> {
         container(
             text(msg)
                 .size(theme::font::MESSAGE)
-                .color(rgb(theme::TEXT_SECONDARY)),
+                .color(rgb(theme::TEXT_SECONDARY())),
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -1716,7 +1727,7 @@ const INFO_W: f32 = 300.0;
 /// Right-hand panel with the open chat's details (avatar, username, bio…),
 /// quick actions (mute, search) and the member list of groups/channels.
 fn info_panel(state: &State) -> Element<'_> {
-    let close = button(icon(Icon::Close, theme::ICON, 16.0))
+    let close = button(icon(Icon::Close, theme::ICON(), 16.0))
         .on_press(Message::CloseInfo)
         .padding(6)
         .style(flat_button);
@@ -1724,7 +1735,7 @@ fn info_panel(state: &State) -> Element<'_> {
     let mut col = column![row![
         text("Chat info")
             .size(theme::font::NAME)
-            .color(Color::WHITE)
+            .color(rgb(theme::TEXT_PRIMARY()))
             .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
         horizontal_spacer(),
         close,
@@ -1748,7 +1759,7 @@ fn info_panel(state: &State) -> Element<'_> {
             container(
                 text(title)
                     .size(theme::font::NAME)
-                    .color(Color::WHITE)
+                    .color(rgb(theme::TEXT_PRIMARY()))
                     .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT })
                     .wrapping(iced::widget::text::Wrapping::None),
             )
@@ -1756,7 +1767,7 @@ fn info_panel(state: &State) -> Element<'_> {
             container(
                 text(info_subtitle(state))
                     .size(theme::font::TIMESTAMP)
-                    .color(rgb(theme::TEXT_SECONDARY)),
+                    .color(rgb(theme::TEXT_SECONDARY())),
             )
             .center_x(Length::Fill),
         ]
@@ -1770,10 +1781,10 @@ fn info_panel(state: &State) -> Element<'_> {
             col = col.push(
                 button(
                     row![
-                        icon(Icon::Info, theme::ICON, 14.0),
+                        icon(Icon::Info, theme::ICON(), 14.0),
                         text(format!("@{username}"))
                             .size(theme::font::TIMESTAMP)
-                            .color(rgb(theme::ACCENT)),
+                            .color(rgb(theme::ACCENT())),
                     ]
                     .spacing(8)
                     .align_y(Alignment::Center),
@@ -1787,14 +1798,14 @@ fn info_panel(state: &State) -> Element<'_> {
             col = col.push(
                 text(bio.clone())
                     .size(theme::font::TIMESTAMP)
-                    .color(rgb(theme::TEXT_SECONDARY)),
+                    .color(rgb(theme::TEXT_SECONDARY())),
             );
         }
         if let Some(phone) = &d.phone {
             col = col.push(
                 text(phone.clone())
                     .size(theme::font::TIMESTAMP)
-                    .color(rgb(theme::TEXT_SECONDARY)),
+                    .color(rgb(theme::TEXT_SECONDARY())),
             );
         }
     }
@@ -1805,17 +1816,17 @@ fn info_panel(state: &State) -> Element<'_> {
             button(
                 text(if state.muted { "Unmute" } else { "Mute" })
                     .size(theme::font::TIMESTAMP)
-                    .color(rgb(theme::ICON)),
+                    .color(rgb(theme::ICON())),
             )
             .on_press(Message::ToggleMute)
             .padding([6, 12])
             .style(flat_button),
             button(
                 row![
-                    icon(Icon::Search, theme::ICON, 14.0),
+                    icon(Icon::Search, theme::ICON(), 14.0),
                     text("Search in chat")
                         .size(theme::font::TIMESTAMP)
-                        .color(rgb(theme::ICON)),
+                        .color(rgb(theme::ICON())),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -1836,7 +1847,7 @@ fn info_panel(state: &State) -> Element<'_> {
         col = col.push(
             text(format!("Members ({})", state.participants.len()))
                 .size(theme::font::TIMESTAMP)
-                .color(rgb(theme::ICON))
+                .color(rgb(theme::ICON()))
                 .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
         );
         for p in &state.participants {
@@ -1846,7 +1857,7 @@ fn info_panel(state: &State) -> Element<'_> {
             col = col.push(
                 text("No members to show")
                     .size(theme::font::TIMESTAMP)
-                    .color(rgb(theme::TEXT_SECONDARY)),
+                    .color(rgb(theme::TEXT_SECONDARY())),
             );
         }
     }
@@ -1879,11 +1890,11 @@ fn member_row(p: &bridge::ParticipantRow, confirming: bool) -> Element<'static> 
     let name = p.name.clone();
     let trailing: Element<'static> = if confirming {
         row![
-            button(text("Remove").size(theme::font::BADGE).color(rgb(theme::ERROR)))
+            button(text("Remove").size(theme::font::BADGE).color(rgb(theme::ERROR())))
                 .on_press(Message::ConfirmKick)
                 .padding([3, 8])
                 .style(flat_button),
-            button(text("Cancel").size(theme::font::BADGE).color(rgb(theme::ICON)))
+            button(text("Cancel").size(theme::font::BADGE).color(rgb(theme::ICON())))
                 .on_press(Message::Escape)
                 .padding([3, 8])
                 .style(flat_button),
@@ -1891,7 +1902,7 @@ fn member_row(p: &bridge::ParticipantRow, confirming: bool) -> Element<'static> 
         .spacing(4)
         .into()
     } else {
-        button(icon(Icon::Close, theme::ICON, 14.0))
+        button(icon(Icon::Close, theme::ICON(), 14.0))
             .on_press(Message::KickMember(p.id))
             .padding(5)
             .style(flat_button)
@@ -1903,7 +1914,7 @@ fn member_row(p: &bridge::ParticipantRow, confirming: bool) -> Element<'static> 
             column![
                 text(name)
                     .size(theme::font::MESSAGE)
-                    .color(Color::WHITE)
+                    .color(rgb(theme::TEXT_PRIMARY()))
                     .wrapping(iced::widget::text::Wrapping::None),
             ]
             .width(Length::Fill),
@@ -1923,14 +1934,14 @@ fn member_row(p: &bridge::ParticipantRow, confirming: bool) -> Element<'static> 
 /// members).
 fn role_badge(role: bridge::ParticipantRole) -> Element<'static> {
     let (label, color) = match role {
-        bridge::ParticipantRole::Creator => ("Owner", theme::ACCENT),
-        bridge::ParticipantRole::Admin => ("Admin", theme::ICON),
+        bridge::ParticipantRole::Creator => ("Owner", theme::ACCENT()),
+        bridge::ParticipantRole::Admin => ("Admin", theme::ICON()),
         bridge::ParticipantRole::Member => return horizontal_spacer(),
     };
     container(text(label).size(theme::font::BADGE).color(rgb(color)))
         .padding([2, 6])
         .style(move |_| container::Style {
-            background: Some(iced::Background::Color(rgb(theme::PERF_BADGE_BG))),
+            background: Some(iced::Background::Color(rgb(theme::PERF_BADGE_BG()))),
             border: iced::Border {
                 radius: 6.0.into(),
                 ..iced::Border::default()
@@ -1952,7 +1963,7 @@ const STICKER_THUMB: f32 = 64.0;
 /// installed packs, each with its title and a 4-column thumbnail grid.
 /// Clicking a thumbnail sends the sticker and closes the panel.
 fn sticker_picker_card<'a>(state: &'a State) -> Element<'a> {
-    let close = button(icon(Icon::Close, theme::ICON, 14.0))
+    let close = button(icon(Icon::Close, theme::ICON(), 14.0))
         .on_press(Message::CloseStickerPicker)
         .padding(6)
         .style(flat_button);
@@ -1963,7 +1974,7 @@ fn sticker_picker_card<'a>(state: &'a State) -> Element<'a> {
             container(
                 text("Loading packs…")
                     .size(theme::font::MESSAGE)
-                    .color(rgb(theme::TEXT_SECONDARY)),
+                    .color(rgb(theme::TEXT_SECONDARY())),
             )
             .width(Length::Fill)
             .padding(24),
@@ -1973,7 +1984,7 @@ fn sticker_picker_card<'a>(state: &'a State) -> Element<'a> {
         body = body.push(
             text(format!("{} ({})", set.title, set.docs.len()))
                 .size(theme::font::TIMESTAMP)
-                .color(rgb(theme::ICON))
+                .color(rgb(theme::ICON()))
                 .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
         );
         for (row_i, chunk) in set.docs.chunks(4).enumerate() {
@@ -1991,7 +2002,7 @@ fn sticker_picker_card<'a>(state: &'a State) -> Element<'a> {
                         .width(STICKER_THUMB)
                         .height(STICKER_THUMB)
                         .style(|_| container::Style {
-                            background: Some(iced::Background::Color(rgb(theme::INPUT_FILL))),
+                            background: Some(iced::Background::Color(rgb(theme::INPUT_FILL()))),
                             border: iced::Border { radius: 12.0.into(), ..Default::default() },
                             ..container::Style::default()
                         }),
@@ -2001,14 +2012,14 @@ fn sticker_picker_card<'a>(state: &'a State) -> Element<'a> {
                     .style(flat_button)
                     .into(),
                     None => container(
-                        icon(Icon::Sticker, theme::DIVIDER, 22.0),
+                        icon(Icon::Sticker, theme::DIVIDER(), 22.0),
                     )
                     .width(STICKER_THUMB)
                     .height(STICKER_THUMB)
                     .align_x(iced::alignment::Horizontal::Center)
                     .align_y(iced::alignment::Vertical::Center)
                     .style(|_| container::Style {
-                        background: Some(iced::Background::Color(rgb(theme::INPUT_FILL))),
+                        background: Some(iced::Background::Color(rgb(theme::INPUT_FILL()))),
                         border: iced::Border { radius: 12.0.into(), ..Default::default() },
                         ..container::Style::default()
                     })
@@ -2025,7 +2036,7 @@ fn sticker_picker_card<'a>(state: &'a State) -> Element<'a> {
             row![
                 text("Stickers")
                     .size(theme::font::NAME)
-                    .color(Color::WHITE)
+                    .color(rgb(theme::TEXT_PRIMARY()))
                     .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
                 horizontal_spacer(),
                 close,
@@ -2062,7 +2073,7 @@ fn forward_layer<'a>(state: &'a State) -> Element<'a> {
                     avatar_circle(d.avatar_path.as_deref(), &d.title, theme::layout::AVATAR_LIST - 12.0),
                     text(&d.title)
                         .size(theme::font::MESSAGE)
-                        .color(Color::WHITE)
+                        .color(rgb(theme::TEXT_PRIMARY()))
                         .wrapping(iced::widget::text::Wrapping::None),
                     horizontal_spacer(),
                 ]
@@ -2079,10 +2090,10 @@ fn forward_layer<'a>(state: &'a State) -> Element<'a> {
     let card = container(
         column![
             row![
-                icon(Icon::Forward, theme::ACCENT, 16.0),
-                text("Forward to…").size(theme::font::NAME).color(Color::WHITE),
+                icon(Icon::Forward, theme::ACCENT(), 16.0),
+                text("Forward to…").size(theme::font::NAME).color(rgb(theme::TEXT_PRIMARY())),
                 horizontal_spacer(),
-                button(icon(Icon::Close, theme::ICON, 14.0))
+                button(icon(Icon::Close, theme::ICON(), 14.0))
                     .on_press(Message::Escape)
                     .padding(6)
                     .style(flat_button),
@@ -2126,9 +2137,9 @@ fn create_layer<'a>(state: &'a State) -> Element<'a> {
 
     let mut card = column![
         row![
-            text(title).size(theme::font::NAME).color(Color::WHITE),
+            text(title).size(theme::font::NAME).color(rgb(theme::TEXT_PRIMARY())),
             horizontal_spacer(),
-            button(icon(Icon::Close, theme::ICON, 14.0))
+            button(icon(Icon::Close, theme::ICON(), 14.0))
                 .on_press(Message::CancelCreate)
                 .padding(6)
                 .style(flat_button),
@@ -2159,12 +2170,12 @@ fn create_layer<'a>(state: &'a State) -> Element<'a> {
         let mut members = column![
             text("Members")
                 .size(theme::font::TIMESTAMP)
-                .color(rgb(theme::TEXT_SECONDARY))
+                .color(rgb(theme::TEXT_SECONDARY()))
         ]
         .spacing(2);
         for (i, (_, name, on)) in state.member_pick.iter().enumerate() {
             let check: Element<'_> = if *on {
-                icon(Icon::Tick { read: true }, theme::ACCENT, 16.0)
+                icon(Icon::Tick { read: true }, theme::ACCENT(), 16.0)
             } else {
                 horizontal_spacer()
             };
@@ -2174,7 +2185,7 @@ fn create_layer<'a>(state: &'a State) -> Element<'a> {
                         avatar_circle(None, name, 28.0),
                         text(name)
                             .size(theme::font::MESSAGE)
-                            .color(Color::WHITE)
+                            .color(rgb(theme::TEXT_PRIMARY()))
                             .wrapping(iced::widget::text::Wrapping::None),
                         horizontal_spacer(),
                         check,
@@ -2197,7 +2208,7 @@ fn create_layer<'a>(state: &'a State) -> Element<'a> {
 
     card = card.push(
         row![
-            button(text("Cancel").size(theme::font::MESSAGE).color(rgb(theme::ICON)))
+            button(text("Cancel").size(theme::font::MESSAGE).color(rgb(theme::ICON())))
                 .on_press(Message::CancelCreate)
                 .padding([10, 18])
                 .style(flat_button),
@@ -2227,12 +2238,12 @@ fn confirm_layer<'a>(state: &'a State) -> Element<'a> {
         state::ConfirmKind::Delete => ("Delete chat?", "Delete"),
     };
     let card = column![
-        text(question).size(theme::font::NAME).color(Color::WHITE),
+        text(question).size(theme::font::NAME).color(rgb(theme::TEXT_PRIMARY())),
         row![
             button(
                 text("Cancel")
                     .size(theme::font::MESSAGE)
-                    .color(rgb(theme::ICON))
+                    .color(rgb(theme::ICON()))
             )
             .on_press(Message::ConfirmNo)
             .padding([10, 18])
@@ -2240,7 +2251,7 @@ fn confirm_layer<'a>(state: &'a State) -> Element<'a> {
             button(
                 text(action.to_string())
                     .size(theme::font::MESSAGE)
-                    .color(rgb(theme::ERROR))
+                    .color(rgb(theme::ERROR()))
             )
             .on_press(Message::ConfirmYes)
             .padding([10, 18])
@@ -2273,20 +2284,20 @@ fn chat_header(
 ) -> Element<'static> {
     let name = text(ellipsize(title, 40))
         .size(theme::font::NAME)
-        .color(Color::WHITE)
+        .color(rgb(theme::TEXT_PRIMARY()))
         .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT })
         .wrapping(iced::widget::text::Wrapping::None)
         .width(Length::Fill);
     let status: Element<'static> = if title.is_empty() {
         text(" ")
             .size(theme::font::TIMESTAMP)
-            .color(rgb(theme::TEXT_SECONDARY))
+            .color(rgb(theme::TEXT_SECONDARY()))
             .into()
     } else {
         let (label, color) = if typing {
-            ("typing…", theme::ACCENT)
+            ("typing…", theme::ACCENT())
         } else {
-            ("Chat", theme::TEXT_SECONDARY)
+            ("Chat", theme::TEXT_SECONDARY())
         };
         text(label)
             .size(theme::font::TIMESTAMP)
@@ -2298,11 +2309,11 @@ fn chat_header(
         Some(fps) => container(
             text(fps)
                 .size(theme::font::TIMESTAMP)
-                .color(rgb(theme::ACCENT)),
+                .color(rgb(theme::ACCENT())),
         )
         .padding([2, 6])
         .style(move |_theme| container::Style {
-            background: Some(iced::Background::Color(rgb(theme::PERF_BADGE_BG))),
+            background: Some(iced::Background::Color(rgb(theme::PERF_BADGE_BG()))),
             border: iced::Border {
                 radius: 6.0.into(),
                 ..iced::Border::default()
@@ -2330,22 +2341,22 @@ fn chat_header(
             .padding(4)
             .style(flat_button),
             horizontal_spacer(),
-            button(icon(Icon::Search, theme::ICON, 20.0))
+            button(icon(Icon::Search, theme::ICON(), 20.0))
                 .on_press(Message::OpenInChatSearch)
                 .padding(6)
                 .style(flat_button),
-            button(icon(Icon::Info, theme::ICON, 20.0))
+            button(icon(Icon::Info, theme::ICON(), 20.0))
                 .on_press(Message::ToggleInfo)
                 .padding(6)
                 .style(flat_button),
             perf_badge,
         ]
-        .spacing(10)
+        .spacing(6)
         .align_y(Alignment::Center),
     )
     .width(Length::Fill)
     .height(theme::layout::CHAT_HEADER_H)
-    .padding([0, 12])
+    .padding([4.0, 14.0])
     .align_y(Alignment::Center)
     .style(header_bg)
     .into()
@@ -2407,7 +2418,7 @@ fn emoji_panel(state: &State) -> Element<'_> {
 fn emoji_section_label(title: &str) -> Element<'_> {
     text(title.to_string())
         .size(theme::font::TIMESTAMP)
-        .color(rgb(theme::TEXT_SECONDARY))
+        .color(rgb(theme::TEXT_SECONDARY()))
         .into()
 }
 
@@ -2472,17 +2483,17 @@ fn composer_bar(state: &State) -> Element<'_> {
         .style(text_input_style);
 
     let send = if state.editing.is_some() {
-        button(icon(Icon::Tick { read: true }, theme::TEXT_PRIMARY, 20.0))
+        button(icon(Icon::Tick { read: true }, theme::TEXT_PRIMARY(), 20.0))
             .on_press(Message::Submit)
             .style(accent_circle_button)
     } else {
-        button(icon(Icon::Send, theme::TEXT_PRIMARY, 20.0))
+        button(icon(Icon::Send, theme::TEXT_PRIMARY(), 20.0))
             .on_press(Message::Submit)
             .style(accent_circle_button)
     };
 
     // Smiley opens the emoji panel; it sits left of the field.
-    let emoji_btn = button(icon(Icon::Smile, theme::ICON, 20.0))
+    let emoji_btn = button(icon(Icon::Smile, theme::ICON(), 20.0))
         .on_press(Message::EmojiToggle)
         .padding(8)
         .style(flat_button);
@@ -2503,19 +2514,19 @@ fn composer_bar(state: &State) -> Element<'_> {
         col = col.push(
             container(
                 row![
-                    icon(Icon::Reply, theme::ACCENT, 16.0),
+                    icon(Icon::Reply, theme::ACCENT(), 16.0),
                     column![
                         text("Reply to")
                             .size(theme::font::TIMESTAMP)
-                            .color(rgb(theme::ACCENT)),
+                            .color(rgb(theme::ACCENT())),
                         text(&reply.snippet)
                             .size(theme::font::TIMESTAMP)
-                            .color(rgb(theme::TEXT_SECONDARY))
+                            .color(rgb(theme::TEXT_SECONDARY()))
                             .wrapping(iced::widget::text::Wrapping::None),
                     ]
                     .spacing(1)
                     .width(Length::Fill),
-                    button(icon(Icon::Close, theme::ICON, 14.0))
+                    button(icon(Icon::Close, theme::ICON(), 14.0))
                         .on_press(Message::CancelReply)
                         .padding(6)
                         .style(flat_button),
@@ -2526,7 +2537,7 @@ fn composer_bar(state: &State) -> Element<'_> {
             .width(Length::Fill)
             .padding([6, 12])
             .style(|_| container::Style {
-                background: Some(iced::Background::Color(rgb(theme::INPUT_FILL))),
+                background: Some(iced::Background::Color(rgb(theme::INPUT_FILL()))),
                 border: iced::Border {
                     radius: 10.0.into(),
                     ..iced::Border::default()
@@ -2544,7 +2555,7 @@ fn composer_bar(state: &State) -> Element<'_> {
         col.into()
     } else {
         let sticker_btn: Element<'_> = if state.open_chat.is_some() {
-            button(icon(Icon::Sticker, theme::ICON, 20.0))
+            button(icon(Icon::Sticker, theme::ICON(), 20.0))
                 .on_press(Message::ToggleStickerPicker)
                 .padding(8)
                 .style(flat_button)
@@ -2553,7 +2564,7 @@ fn composer_bar(state: &State) -> Element<'_> {
             horizontal_spacer()
         };
         row![
-            button(icon(Icon::Paperclip, theme::ICON, 20.0))
+            button(icon(Icon::Paperclip, theme::ICON(), 20.0))
                 .on_press(Message::AttachFile)
                 .padding(8)
                 .style(flat_button),
@@ -2681,7 +2692,7 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
                             .width(Length::FillPortion((pct * 100.0).max(1.0) as u16))
                             .height(Length::Fill)
                             .style(|_| container::Style {
-                                background: Some(iced::Background::Color(rgb(theme::ACCENT))),
+                                background: Some(iced::Background::Color(rgb(theme::ACCENT()))),
                                 border: iced::Border {
                                     radius: 2.0.into(),
                                     ..iced::Border::default()
@@ -2692,7 +2703,7 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
                     .width(Length::Fill)
                     .height(4.0)
                     .style(|_| container::Style {
-                        background: Some(iced::Background::Color(rgb(theme::DIVIDER))),
+                        background: Some(iced::Background::Color(rgb(theme::DIVIDER()))),
                         border: iced::Border {
                             radius: 2.0.into(),
                             ..iced::Border::default()
@@ -2702,9 +2713,9 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
                     .into()
                 };
                 let play_icon = if is_this && state.voice_playing {
-                    icon(Icon::Pause, theme::ACCENT, 18.0)
+                    icon(Icon::Pause, theme::ACCENT(), 18.0)
                 } else {
-                    icon(Icon::Play, theme::ACCENT, 18.0)
+                    icon(Icon::Play, theme::ACCENT(), 18.0)
                 };
                 let voice_path = m.doc_path.clone().unwrap_or_default();
                 let click = button(
@@ -2713,7 +2724,7 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
                         bar,
                         text(duration_fmt(doc.duration.unwrap_or(0.0)))
                             .size(theme::font::TIMESTAMP)
-                            .color(rgb(theme::TEXT_SECONDARY)),
+                            .color(rgb(theme::TEXT_SECONDARY())),
                     ]
                     .spacing(10)
                     .align_y(Alignment::Center)
@@ -2734,7 +2745,7 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
                     } else {
                         text(&m.text)
                             .size(theme::font::MESSAGE)
-                            .color(Color::WHITE)
+                            .color(rgb(theme::TEXT_PRIMARY()))
                             .into()
                     },
                 ]
@@ -2743,15 +2754,15 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
             }
             _ => column![
                 row![
-                    icon(media_icon, theme::ACCENT, 30.0),
+                    icon(media_icon, theme::ACCENT(), 30.0),
                     column![
                         text(doc_name)
                             .size(theme::font::MESSAGE)
-                            .color(Color::WHITE)
+                            .color(rgb(theme::TEXT_PRIMARY()))
                             .wrapping(iced::widget::text::Wrapping::None),
                         text(meta)
                             .size(theme::font::TIMESTAMP)
-                            .color(rgb(theme::TEXT_SECONDARY)),
+                            .color(rgb(theme::TEXT_SECONDARY())),
                     ]
                     .spacing(2)
                     .width(Length::Fill),
@@ -2836,9 +2847,9 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
         .width(bubble_w)
         .style(move |_| container::Style {
             background: Some(iced::Background::Color(rgb(if m.out {
-                theme::BUBBLE_SENT
+                theme::BUBBLE_SENT()
             } else {
-                theme::BUBBLE_RECV
+                theme::BUBBLE_RECV()
             }))),
             border: iced::Border {
                 radius: r,
@@ -2858,18 +2869,18 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
     let meta: Element<'_> = if m.out {
         let ts_text: Element<'_> = text(ts.clone())
             .size(theme::font::TIMESTAMP)
-            .color(rgb(theme::TEXT_SECONDARY))
+            .color(rgb(theme::TEXT_SECONDARY()))
             .into();
         let tick: Element<'_> = if m.read {
-            icon(Icon::Tick { read: true }, theme::ACCENT, 15.0)
+            icon(Icon::Tick { read: true }, theme::ACCENT(), 15.0)
         } else {
-            icon(Icon::Tick { read: false }, theme::TEXT_SECONDARY, 15.0)
+            icon(Icon::Tick { read: false }, theme::TEXT_SECONDARY(), 15.0)
         };
         row![tick, ts_text].spacing(6).into()
     } else {
         text(ts)
             .size(theme::font::TIMESTAMP)
-            .color(rgb(theme::TEXT_SECONDARY))
+            .color(rgb(theme::TEXT_SECONDARY()))
             .into()
     };
 
@@ -2919,7 +2930,7 @@ fn sticker_message_row<'a>(idx: usize, m: &'a MsgRow) -> Element<'a> {
         None => container(
             text("…")
                 .size(theme::font::NAME)
-                .color(rgb(theme::TEXT_SECONDARY)),
+                .color(rgb(theme::TEXT_SECONDARY())),
         )
         .width(STICKER_SIZE)
         .height(STICKER_SIZE)
@@ -2935,17 +2946,17 @@ fn sticker_message_row<'a>(idx: usize, m: &'a MsgRow) -> Element<'a> {
     };
     let meta: Element<'_> = if m.out {
         let tick: Element<'_> = if m.read {
-            icon(Icon::Tick { read: true }, theme::ACCENT, 15.0)
+            icon(Icon::Tick { read: true }, theme::ACCENT(), 15.0)
         } else {
-            icon(Icon::Tick { read: false }, theme::TEXT_SECONDARY, 15.0)
+            icon(Icon::Tick { read: false }, theme::TEXT_SECONDARY(), 15.0)
         };
-        row![tick, text(ts).size(theme::font::TIMESTAMP).color(rgb(theme::TEXT_SECONDARY))]
+        row![tick, text(ts).size(theme::font::TIMESTAMP).color(rgb(theme::TEXT_SECONDARY()))]
             .spacing(6)
             .into()
     } else {
         text(ts)
             .size(theme::font::TIMESTAMP)
-            .color(rgb(theme::TEXT_SECONDARY))
+            .color(rgb(theme::TEXT_SECONDARY()))
             .into()
     };
 
@@ -2975,7 +2986,7 @@ fn quote_block(label: &str, content: String) -> Element<'static> {
             .width(3.0)
             .height(28.0)
             .style(|_| container::Style {
-                background: Some(iced::Background::Color(rgb(theme::ACCENT))),
+                background: Some(iced::Background::Color(rgb(theme::ACCENT()))),
                 border: iced::Border {
                     radius: 2.0.into(),
                     ..iced::Border::default()
@@ -2985,10 +2996,10 @@ fn quote_block(label: &str, content: String) -> Element<'static> {
         column![
             text(label.to_string())
                 .size(theme::font::TIMESTAMP)
-                .color(rgb(theme::ACCENT)),
+                .color(rgb(theme::ACCENT())),
             text(content)
                 .size(theme::font::TIMESTAMP)
-                .color(rgb(theme::TEXT_SECONDARY))
+                .color(rgb(theme::TEXT_SECONDARY()))
                 .wrapping(iced::widget::text::Wrapping::None),
         ]
         .spacing(1),
@@ -3004,13 +3015,13 @@ fn uploading_bar(p: f32) -> Element<'static> {
     column![
         text(format!("Uploading… {}%", pct))
             .size(theme::font::TIMESTAMP)
-            .color(rgb(theme::TEXT_SECONDARY)),
+            .color(rgb(theme::TEXT_SECONDARY())),
         container(
             container(iced::widget::Space::new())
                 .width(Length::FillPortion(pct.max(1.0) as u16))
                 .height(Length::Fill)
                 .style(|_| container::Style {
-                    background: Some(iced::Background::Color(rgb(theme::ACCENT))),
+                    background: Some(iced::Background::Color(rgb(theme::ACCENT()))),
                     border: iced::Border {
                         radius: 2.0.into(),
                         ..iced::Border::default()
@@ -3021,7 +3032,7 @@ fn uploading_bar(p: f32) -> Element<'static> {
         .width(Length::Fill)
         .height(4.0)
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(rgb(theme::DIVIDER))),
+            background: Some(iced::Background::Color(rgb(theme::DIVIDER()))),
             border: iced::Border {
                 radius: 2.0.into(),
                 ..iced::Border::default()
@@ -3039,13 +3050,13 @@ fn placeholder_strip(label: &str) -> Element<'static> {
     container(
         text(label.to_string())
             .size(theme::font::TIMESTAMP)
-            .color(rgb(theme::TEXT_SECONDARY)),
+            .color(rgb(theme::TEXT_SECONDARY())),
     )
     .width(Length::Fill)
     .padding(24)
     .align_x(Alignment::Center)
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(rgb(theme::INPUT_FILL))),
+        background: Some(iced::Background::Color(rgb(theme::INPUT_FILL()))),
         border: iced::Border {
             radius: 12.0.into(),
             ..iced::Border::default()
@@ -3095,13 +3106,13 @@ fn pinned_banner(m: &MsgRow) -> Element<'static> {
     let snippet = crate::ellipsize(&state::preview_text(&m.text, &m.photo, &m.doc, &m.sticker), 48);
     button(
         row![
-            icon(Icon::Pin, theme::ACCENT, 14.0),
+            icon(Icon::Pin, theme::ACCENT(), 14.0),
             text("Pinned")
                 .size(theme::font::TIMESTAMP)
-                .color(rgb(theme::ACCENT)),
+                .color(rgb(theme::ACCENT())),
             text(snippet)
                 .size(theme::font::TIMESTAMP)
-                .color(rgb(theme::TEXT_SECONDARY))
+                .color(rgb(theme::TEXT_SECONDARY()))
                 .wrapping(iced::widget::text::Wrapping::None)
                 .width(Length::Fill),
         ]
@@ -3115,9 +3126,9 @@ fn pinned_banner(m: &MsgRow) -> Element<'static> {
     .style(|_theme, status| {
         let bg = match status {
             iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
-                rgb(theme::ROW_HOVER)
+                rgb(theme::ROW_HOVER())
             }
-            _ => rgb(theme::LIST_BG),
+            _ => rgb(theme::LIST_BG()),
         };
         iced::widget::button::Style {
             background: Some(iced::Background::Color(bg)),
@@ -3168,14 +3179,14 @@ fn menu_item<'a>(
     destructive: bool,
 ) -> Element<'a> {
     let label_color = if destructive {
-        rgb(theme::ERROR)
+        rgb(theme::ERROR())
     } else {
-        rgb(theme::TEXT_PRIMARY)
+        rgb(theme::TEXT_PRIMARY())
     };
     let icon_color = if destructive {
-        theme::ERROR
+        theme::ERROR()
     } else {
-        theme::ICON
+        theme::ICON()
     };
     button(
         row![
@@ -3656,28 +3667,28 @@ fn build_circular_avatar(path: &str, px: u32) -> Option<image::Handle> {
 
 fn list_bg(_theme: &iced::Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(rgb(theme::LIST_BG))),
+        background: Some(iced::Background::Color(rgb(theme::LIST_BG()))),
         ..container::Style::default()
     }
 }
 
 fn chat_bg(_theme: &iced::Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(rgb(theme::CHAT_BG))),
+        background: Some(iced::Background::Color(rgb(theme::CHAT_BG()))),
         ..container::Style::default()
     }
 }
 
 fn divider(_theme: &iced::Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(rgb(theme::DIVIDER))),
+        background: Some(iced::Background::Color(rgb(theme::DIVIDER()))),
         ..container::Style::default()
     }
 }
 
 fn header_bg(_theme: &iced::Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(rgb(theme::LIST_BG))),
+        background: Some(iced::Background::Color(rgb(theme::LIST_BG()))),
         ..container::Style::default()
     }
 }
@@ -3688,11 +3699,11 @@ fn row_style(
     selected: bool,
 ) -> iced::widget::button::Style {
     let bg = if selected {
-        theme::ROW_SELECTED
+        theme::ROW_SELECTED()
     } else {
         match status {
-            iced::widget::button::Status::Hovered => theme::ROW_HOVER,
-            _ => theme::LIST_BG,
+            iced::widget::button::Status::Hovered => theme::ROW_HOVER(),
+            _ => theme::LIST_BG(),
         }
     };
     iced::widget::button::Style {
@@ -3717,10 +3728,12 @@ fn icon_button_style(
 ) -> iced::widget::button::Style {
     let bg = match status {
         iced::widget::button::Status::Hovered => {
-            Some(iced::Background::Color(iced::Color::from_rgba(1.0, 1.0, 1.0, 0.09)))
+            let (r, g, b, a) = theme::HOVER_OVERLAY(false);
+            Some(iced::Background::Color(iced::Color::from_rgba8(r, g, b, a)))
         }
         iced::widget::button::Status::Pressed => {
-            Some(iced::Background::Color(iced::Color::from_rgba(1.0, 1.0, 1.0, 0.16)))
+            let (r, g, b, a) = theme::HOVER_OVERLAY(true);
+            Some(iced::Background::Color(iced::Color::from_rgba8(r, g, b, a)))
         }
         _ => None,
     };
@@ -3740,10 +3753,10 @@ fn accent_circle_button(
 ) -> iced::widget::button::Style {
     let bg = match status {
         iced::widget::button::Status::Hovered => {
-            theme::ACCENT_HOVER
+            theme::ACCENT_HOVER()
         }
-        iced::widget::button::Status::Pressed => theme::ACCENT_PRESSED,
-        _ => theme::ACCENT,
+        iced::widget::button::Status::Pressed => theme::ACCENT_PRESSED(),
+        _ => theme::ACCENT(),
     };
     iced::widget::button::Style {
         background: Some(iced::Background::Color(rgb(bg))),
@@ -3761,10 +3774,10 @@ fn accent_button(
 ) -> iced::widget::button::Style {
     let bg = match status {
         iced::widget::button::Status::Hovered => {
-            theme::ACCENT_HOVER
+            theme::ACCENT_HOVER()
         }
-        iced::widget::button::Status::Pressed => theme::ACCENT_PRESSED,
-        _ => theme::ACCENT,
+        iced::widget::button::Status::Pressed => theme::ACCENT_PRESSED(),
+        _ => theme::ACCENT(),
     };
     iced::widget::button::Style {
         background: Some(iced::Background::Color(rgb(bg))),
@@ -3788,7 +3801,8 @@ fn menu_item_style(
             if destructive {
                 iced::Color::from_rgba(0.95, 0.45, 0.49, 0.14)
             } else {
-                iced::Color::from_rgba(1.0, 1.0, 1.0, 0.08)
+                let (r, g, b, a) = theme::MENU_ITEM_OVERLAY();
+                iced::Color::from_rgba8(r, g, b, a)
             }
         }
         _ => iced::Color::TRANSPARENT,
@@ -3807,11 +3821,11 @@ fn menu_item_style(
 /// (M3 "medium" component shape).
 fn menu_bg(_theme: &iced::Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(rgb(theme::MENU_BG))),
+        background: Some(iced::Background::Color(rgb(theme::MENU_BG()))),
         border: iced::Border {
             radius: 12.0.into(),
             width: 1.0,
-            color: rgb(theme::MENU_BORDER),
+            color: rgb(theme::MENU_BORDER()),
         },
         ..container::Style::default()
     }
@@ -3819,7 +3833,7 @@ fn menu_bg(_theme: &iced::Theme) -> container::Style {
 
 fn badge_circle(_theme: &iced::Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(rgb(theme::ACCENT))),
+        background: Some(iced::Background::Color(rgb(theme::ACCENT()))),
         border: iced::Border {
             radius: 10.0.into(),
             ..iced::Border::default()
@@ -3830,7 +3844,7 @@ fn badge_circle(_theme: &iced::Theme) -> container::Style {
 
 fn accent_circle(_theme: &iced::Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(rgb(theme::ACCENT))),
+        background: Some(iced::Background::Color(rgb(theme::ACCENT()))),
         border: iced::Border {
             radius: 38.0.into(),
             ..iced::Border::default()
@@ -3841,7 +3855,7 @@ fn accent_circle(_theme: &iced::Theme) -> container::Style {
 
 fn field_rounded(_theme: &iced::Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(rgb(theme::INPUT_FILL))),
+        background: Some(iced::Background::Color(rgb(theme::INPUT_FILL()))),
         border: iced::Border {
             radius: theme::layout::INPUT_RADIUS.into(),
             ..iced::Border::default()
@@ -3855,16 +3869,16 @@ fn text_input_style(
     _status: iced::widget::text_input::Status,
 ) -> iced::widget::text_input::Style {
     iced::widget::text_input::Style {
-        background: iced::Background::Color(rgb(theme::INPUT_FILL)),
+        background: iced::Background::Color(rgb(theme::INPUT_FILL())),
         border: iced::Border {
             radius: theme::layout::INPUT_RADIUS.into(),
             width: 1.0,
-            color: rgb(theme::INPUT_BORDER),
+            color: rgb(theme::INPUT_BORDER()),
         },
-        icon: rgb(theme::TEXT_SECONDARY),
-        placeholder: rgb(theme::TEXT_SECONDARY),
-        value: rgb(theme::TEXT_PRIMARY),
-        selection: rgb(theme::ACCENT),
+        icon: rgb(theme::TEXT_SECONDARY()),
+        placeholder: rgb(theme::TEXT_SECONDARY()),
+        value: rgb(theme::TEXT_PRIMARY()),
+        selection: rgb(theme::ACCENT()),
     }
 }
 
@@ -3883,14 +3897,14 @@ fn voice_slider_style(
         rail: iced::widget::slider::Rail {
             width: rail_width,
             backgrounds: (
-                iced::Background::Color(rgb(theme::ACCENT)),
-                iced::Background::Color(rgb(theme::DIVIDER)),
+                iced::Background::Color(rgb(theme::ACCENT())),
+                iced::Background::Color(rgb(theme::DIVIDER())),
             ),
             border: iced::Border::default(),
         },
         handle: iced::widget::slider::Handle {
             shape: iced::widget::slider::HandleShape::Circle { radius: handle_r },
-            background: iced::Background::Color(rgb(theme::ACCENT)),
+            background: iced::Background::Color(rgb(theme::ACCENT())),
             border_width: 0.0,
             border_color: Color::TRANSPARENT,
         },
@@ -3947,8 +3961,20 @@ pub fn run() -> iced::Result {
         .subscription(subscription)
         .window_size((w, h))
         .title("tg — Iced prototype")
-        .theme(iced::Theme::Dark)
+        // Base iced palette follows our mode: default-styled widgets (and
+        // the login screen, which has no explicit background) adapt too.
+        // Custom colors all come from `theme::*()` regardless.
+        .theme(app_theme)
         .run()
+}
+
+/// The application theme: iced's own palette follows our light/dark mode so
+/// default-styled widgets (login screen backgrounds, scrollbars) adapt.
+fn app_theme(_state: &state::State) -> iced::Theme {
+    match theme::mode() {
+        theme::ThemeMode::Light => iced::Theme::Light,
+        theme::ThemeMode::Dark => iced::Theme::Dark,
+    }
 }
 
 /// Parses an optional `--win=WxH` (logical px) to shrink the software-rendered
