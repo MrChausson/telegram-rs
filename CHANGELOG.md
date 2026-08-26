@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.8.0] - 2026-08-26
+
 ### Added
 - **Light theme**: a full light palette alongside the dark one, switchable
   from the settings panel and persisted across sessions (data-dir marker,
