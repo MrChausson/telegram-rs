@@ -1054,6 +1054,18 @@ impl State {
         self.playing_voice = Some((chat_id, msg_id, path.to_string()));
         self.voice_elapsed = 0.0;
         self.voice_playing = crate::audio::play(path);
+        self.fallback_to_system_player_if_undecodable(path);
+    }
+
+    /// Inline playback failed and the payload is Ogg (Opus voice note):
+    /// hand it to the system player instead of doing nothing. Telegram
+    /// voices are Opus-in-Ogg; inline playback needs the ffmpeg transcode
+    /// performed at download time (missing/broken ffmpeg degrades here).
+    fn fallback_to_system_player_if_undecodable(&mut self, path: &str) {
+        if !self.voice_playing && path.ends_with(".ogg") {
+            self.open_file = Some(path.to_string());
+            self.status = "Opening with the system player…".to_string();
+        }
     }
 
     /// Resolves a `DocReady` for a voice note into playable state (and starts
@@ -1076,6 +1088,7 @@ impl State {
         self.playing_voice = Some((chat_id, msg_id, path.to_string()));
         self.voice_elapsed = 0.0;
         self.voice_playing = crate::audio::play(path);
+        self.fallback_to_system_player_if_undecodable(path);
     }
 
     /// Right-click over a message row: open the context menu (any message;

@@ -440,7 +440,7 @@ impl Telegram {
         let safe_name = raw_name.rsplit(['/', '\\']).next().unwrap_or("file");
         let cached = dir.join(format!("{msg_id}_{safe_name}"));
         if cached.exists() {
-            return Ok(Some(cached));
+            return Ok(transcode_ogg_for_playback(&cached));
         }
         let mut it = self.client.iter_download(&doc);
         let mut bytes = Vec::new();
@@ -453,7 +453,7 @@ impl Telegram {
         let tmp = dir.join(format!("{msg_id}.tmp"));
         std::fs::write(&tmp, &bytes)?;
         std::fs::rename(&tmp, &cached)?;
-        Ok(Some(cached))
+        Ok(transcode_ogg_for_playback(&cached))
     }
 
     /// Downloads a message's sticker into `dir` (`{msg_id}.webp`), returning
@@ -1375,6 +1375,40 @@ pub fn media_kind_of_document(doc: &grammers_client::media::Document) -> Option<
 
 /// True when the path looks like an image that Telegram can compress into a
 /// photo (by extension — no content sniffing).
+/// Transcodes an Ogg file to WAV next to it (same stem) so rodio can play
+/// Telegram voice notes: they are Opus-in-Ogg and neither rodio nor
+/// symphonia ship an Opus decoder, while ffmpeg handles them everywhere.
+/// Returns the WAV path on success, the original path otherwise (a missing
+/// system ffmpeg degrades to a logged playback failure, never an error).
+fn transcode_ogg_for_playback(cached: &std::path::Path) -> Option<std::path::PathBuf> {
+    let is_ogg = std::fs::read(cached)
+        .ok()
+        .is_some_and(|b| b.starts_with(b"OggS"));
+    if !is_ogg {
+        return Some(cached.to_path_buf());
+    }
+    let wav = cached.with_extension("wav");
+    if wav.exists() {
+        return Some(wav);
+    }
+    let out = std::process::Command::new("ffmpeg")
+        .args(["-y", "-loglevel", "error", "-i"])
+        .arg(cached)
+        .arg(&wav)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => Some(wav),
+        other => {
+            eprintln!(
+                "voice transcode failed for {}: {:?}",
+                cached.display(),
+                other.map(|o| o.stderr).map(|e| String::from_utf8_lossy(&e).into_owned())
+            );
+            None
+        }
+    }
+}
+
 pub fn is_image(path: &std::path::Path) -> bool {
     matches!(
         path.extension()

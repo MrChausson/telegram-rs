@@ -40,15 +40,19 @@ pub fn is_active() -> bool {
 pub fn play(path: &str) -> bool {
     let started = Instant::now();
     let Ok((stream, handle)) = OutputStream::try_default() else {
+        eprintln!("voice play {path}: no audio output device");
         return false;
     };
     let Ok(sink) = Sink::try_new(&handle) else {
+        eprintln!("voice play {path}: could not create sink");
         return false;
     };
     let Ok(file) = File::open(path) else {
+        eprintln!("voice play {path}: file missing");
         return false;
     };
     let Ok(src) = Decoder::new(BufReader::new(file)) else {
+        eprintln!("voice play {path}: unsupported/undecodable format");
         return false;
     };
     sink.append(src);

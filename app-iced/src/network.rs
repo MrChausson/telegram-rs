@@ -2539,9 +2539,11 @@ fn spawn_doc_download(
     if downloads.docs.lock().unwrap().contains_key(&(chat_id, msg_id)) {
         return;
     }
+    // User-initiated (a click on the voice/file card): use the fast budget
+    // so it never queues behind the startup media backlog.
     tokio::spawn(async move {
         let _permit = downloads
-            .sem
+            .thumb_sem
             .clone()
             .acquire_owned()
             .await
@@ -2553,7 +2555,14 @@ fn spawn_doc_download(
                 downloads.insert_doc(chat_id, msg_id, p.clone());
                 Some(p)
             }
-            _ => None,
+            Ok(None) => {
+                eprintln!("doc download {chat_id}/{msg_id}: nothing to download");
+                None
+            }
+            Err(e) => {
+                eprintln!("doc download {chat_id}/{msg_id} failed: {e:#}");
+                None
+            }
         };
         let _ = ui_tx.send(UiMessage::DocReady { chat_id, msg_id, path });
     });
