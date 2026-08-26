@@ -18,8 +18,8 @@ use tg::session::load_or_new;
 use tokio::sync::mpsc;
 
 use crate::bridge::{
-    ChatDetail, ChatKind, ChatRow, DocKind, DocMeta, MsgRow, ParticipantRole, ParticipantRow,
-    Request, SearchHit, StickerMeta, StickerSetBridge, UiMessage,
+    ChatDetail, ChatKind, ChatRow, DocKind, DocMeta, MsgRow, MyProfile, ParticipantRole,
+    ParticipantRow, Request, SearchHit, SessionInfo, StickerMeta, StickerSetBridge, UiMessage,
 };
 
 const ENV_FILE: &str = ".env";
@@ -86,6 +86,49 @@ pub fn cache_dir() -> PathBuf {
     data_dir().join("data")
 }
 
+/// Shared notifications on/off flag (same pattern as [`crate::tray::TrayActions`]):
+/// the settings panel flips it, the network runtime consults it before raising
+/// a desktop notification.
+#[derive(Debug, Default)]
+pub struct NotifyPref(pub std::sync::atomic::AtomicBool);
+
+impl NotifyPref {
+    pub fn enabled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Recursive size in bytes of everything under `dir` (missing dir = 0).
+pub fn dir_size_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for e in entries.flatten() {
+        let path = e.path();
+        if path.is_dir() {
+            total += dir_size_bytes(&path);
+        } else if let Ok(meta) = e.metadata() {
+            total += meta.len();
+        }
+    }
+    total
+}
+
+/// Size of the media cache (the `data` subdir of the app data dir).
+pub fn cache_bytes_on_disk() -> u64 {
+    dir_size_bytes(&cache_dir())
+}
+
+/// Wipes every subdirectory of the cache dir. The session file and the
+/// `last-chat` marker live one level up (data dir root) and are never
+/// touched; only the known media subfolders are removed.
+fn clear_cache_dirs() {
+    for name in ["avatars", "media", "stickers", "thumbs", "demo"] {
+        let _ = std::fs::remove_dir_all(cache_dir().join(name));
+    }
+}
+
 /// Maps chat ids to already-cached avatar files (no download needed).
 fn avatar_files() -> Vec<(i64, String)> {
     let dir = cache_dir().join("avatars");
@@ -146,7 +189,7 @@ pub fn api_hash(env: &HashMap<String, String>) -> Option<String> {
 /// ~400-message history so scroll performance can be exercised (the 5-message
 /// demo chat never reproduces the lag of a real history). `false` connects to
 /// the real account.
-pub fn spawn_network(demo: bool, big: bool) -> UnboundedSender<Request> {
+pub fn spawn_network(demo: bool, big: bool, notify: Arc<NotifyPref>) -> UnboundedSender<Request> {
     let (ui_tx, ui_rx) = mpsc::unbounded_channel::<UiMessage>();
     let (req_tx, mut req_rx) = mpsc::unbounded_channel::<Request>();
     let net_tx = req_tx.clone();
@@ -210,7 +253,7 @@ pub fn spawn_network(demo: bool, big: bool) -> UnboundedSender<Request> {
                                 });
                             }
                         });
-                        serve(tg, updates_rx, &ui_tx, &mut req_rx, &mut peers).await;
+                        serve(tg, updates_rx, &ui_tx, &mut req_rx, &mut peers, &notify).await;
                     }
                     Err(e) => {
                         let _ = ui_tx.send(UiMessage::Error(format!(
@@ -558,6 +601,26 @@ fn ensure_demo_stickers() -> Vec<DemoStickerSet> {
     out
 }
 
+/// Two canned active sessions for the demo (settings panel > Sessions).
+fn demo_sessions() -> Vec<SessionInfo> {
+    vec![
+        SessionInfo {
+            device: "This device".into(),
+            platform: "Linux".into(),
+            country: "France".into(),
+            current: true,
+            hash: 111_001,
+        },
+        SessionInfo {
+            device: "iPhone 15".into(),
+            platform: "iOS 17".into(),
+            country: "France".into(),
+            current: false,
+            hash: 222_002,
+        },
+    ]
+}
+
 /// Canned info-panel detail for a demo chat (`None` = unknown chat).
 fn demo_chat_detail(id: i64) -> Option<ChatDetail> {
     let d = match id {
@@ -671,6 +734,20 @@ async fn serve_demo(
     // Shared with the request handlers below so create/leave/delete/rename
     // can mutate the list at runtime (the closures only borrow it).
     let chats = std::rc::Rc::new(std::cell::RefCell::new(chats));
+
+    // Canned own-profile, mutated by UpdateProfile so the edit flow echoes.
+    struct DemoProfile {
+        first_name: Option<String>,
+        username: Option<String>,
+        phone: Option<String>,
+        bio: Option<String>,
+    }
+    let demo_profile = std::rc::Rc::new(std::cell::RefCell::new(DemoProfile {
+        first_name: Some("Demo User".into()),
+        username: Some("demo_user".into()),
+        phone: Some("+33612345678".into()),
+        bio: Some("Just trying out tg.".into()),
+    }));
 
     let assets = ensure_demo_assets(&chats.borrow());
     // Two canned sticker packs (512x512 generated PNGs) + their picker data.
@@ -1250,6 +1327,43 @@ Request::DownloadDoc { chat_id, msg_id } => {
                         });
                     }
                 }
+                Request::GetMe => {
+                    let p = demo_profile.borrow();
+                    let _ = ui_tx.send(UiMessage::MyProfile(MyProfile {
+                        name: p.first_name.clone().unwrap_or_default(),
+                        username: p.username.clone(),
+                        phone: p.phone.clone(),
+                        bio: p.bio.clone(),
+                    }));
+                }
+                Request::UpdateProfile { first_name, bio, .. } => {
+                    {
+                        let mut p = demo_profile.borrow_mut();
+                        if first_name.is_some() {
+                            p.first_name = first_name;
+                        }
+                        p.bio = bio;
+                    }
+                    let p = demo_profile.borrow();
+                    let _ = ui_tx.send(UiMessage::MyProfile(MyProfile {
+                        name: p.first_name.clone().unwrap_or_default(),
+                        username: p.username.clone(),
+                        phone: p.phone.clone(),
+                        bio: p.bio.clone(),
+                    }));
+                }
+                Request::GetSessions => {
+                    let _ = ui_tx.send(UiMessage::Sessions(demo_sessions()));
+                }
+                Request::RevokeSession { hash } => {
+                    let _ = ui_tx.send(UiMessage::SessionRevoked { hash });
+                }
+                Request::ClearCache => {
+                    clear_cache_dirs();
+                    let _ = ui_tx.send(UiMessage::CacheCleared {
+                        bytes: cache_bytes_on_disk(),
+                    });
+                }
                 _ => {}
             }
         }
@@ -1614,6 +1728,7 @@ async fn serve(
     ui_tx: &mpsc::UnboundedSender<UiMessage>,
     req_rx: &mut mpsc::UnboundedReceiver<Request>,
     peers: &mut HashMap<i64, (String, PeerRef)>,
+    notify_pref: &NotifyPref,
 ) {
     let mut updates = tg
         .client()
@@ -1767,7 +1882,7 @@ async fn serve(
                 if let Update::NewMessage(ref msg) = update {
                     if let Some(peer) = msg.peer() {
                         let cid = peer.id().bot_api_dialog_id();
-                        if open_id != Some(cid) {
+                        if open_id != Some(cid) && notify_pref.enabled() {
                             let title = peers
                                 .get(&cid)
                                 .map(|(t, _)| t.clone())
@@ -2182,6 +2297,73 @@ async fn handle_request(
                 )));
             }
         },
+        Request::GetMe => match tg.get_me().await {
+            Ok(p) => {
+                let _ = ui_tx.send(UiMessage::MyProfile(MyProfile {
+                    name: p.name,
+                    username: p.username,
+                    phone: p.phone,
+                    bio: p.bio,
+                }));
+            }
+            Err(e) => {
+                let _ = ui_tx.send(UiMessage::Error(format!("Could not load profile: {e}")));
+            }
+        },
+        Request::UpdateProfile {
+            first_name,
+            last_name,
+            bio,
+        } => {
+            if let Err(e) = tg.update_profile(first_name, last_name, bio).await {
+                let _ = ui_tx.send(UiMessage::Error(format!("Could not update profile: {e}")));
+            }
+            // Echo the refreshed profile either way (server state is the truth).
+            match tg.get_me().await {
+                Ok(p) => {
+                    let _ = ui_tx.send(UiMessage::MyProfile(MyProfile {
+                        name: p.name,
+                        username: p.username,
+                        phone: p.phone,
+                        bio: p.bio,
+                    }));
+                }
+                Err(e) => {
+                    let _ = ui_tx.send(UiMessage::Error(format!("Could not load profile: {e}")));
+                }
+            }
+        }
+        Request::GetSessions => match tg.sessions().await {
+            Ok(list) => {
+                let sessions: Vec<SessionInfo> = list
+                    .into_iter()
+                    .map(|s| SessionInfo {
+                        device: s.device,
+                        platform: s.platform,
+                        country: s.country,
+                        current: s.current,
+                        hash: s.hash,
+                    })
+                    .collect();
+                let _ = ui_tx.send(UiMessage::Sessions(sessions));
+            }
+            Err(e) => {
+                let _ = ui_tx.send(UiMessage::Error(format!("Could not list sessions: {e}")));
+            }
+        },
+        Request::RevokeSession { hash } => {
+            if let Err(e) = tg.revoke_session(hash).await {
+                let _ = ui_tx.send(UiMessage::Error(format!("Could not revoke session: {e}")));
+            } else {
+                let _ = ui_tx.send(UiMessage::SessionRevoked { hash });
+            }
+        }
+        Request::ClearCache => {
+            clear_cache_dirs();
+            let _ = ui_tx.send(UiMessage::CacheCleared {
+                bytes: cache_bytes_on_disk(),
+            });
+        }
         Request::Search { id, query } => {
             if query.is_empty() {
                 // Nothing typed: clear the results instead of listing "all".

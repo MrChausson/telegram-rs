@@ -3,8 +3,8 @@
 //! like the custom `ui` crate's `UiState`, so it can be unit tested headlessly.
 
 use crate::bridge::{
-    ChatDetail, ChatRow, DocMeta, MsgRow, ParticipantRow, Request, SearchHit, StickerMeta,
-    StickerSetBridge, UiMessage,
+    ChatDetail, ChatRow, DocMeta, MsgRow, MyProfile, ParticipantRow, Request, SearchHit,
+    SessionInfo, StickerMeta, StickerSetBridge, UiMessage,
 };
 
 /// One-line preview of a message for list rows / reply snippets: the text,
@@ -101,6 +101,35 @@ pub enum LoginStep {
     Password,
 }
 
+/// UI theme mode (settings panel row; mechanics owned by the theme feature).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeMode {
+    Dark,
+    Light,
+}
+
+// ---------------------------------------------------------------------------
+// Notifications preference persistence ("on"/"off" file in the data dir)
+// ---------------------------------------------------------------------------
+
+/// Default location of the `notifications` file inside the app data dir.
+fn notifications_path() -> std::path::PathBuf {
+    crate::network::data_dir().join("notifications")
+}
+
+/// Reads the persisted notifications flag from `path` (`"off"` = disabled,
+/// anything else — including a missing file — = enabled).
+fn read_notifications_at(path: &std::path::Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|c| c.trim() != "off")
+        .unwrap_or(true)
+}
+
+/// Persists the notifications flag at `path`. Best-effort.
+fn write_notifications_at(path: &std::path::Path, on: bool) {
+    let _ = std::fs::write(path, if on { "on" } else { "off" });
+}
+
 /// Open context menu over a message (right-click / long-press).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextMenu {
@@ -122,6 +151,17 @@ pub enum ConfirmKind {
     Leave,
     /// Delete the chat from the account.
     Delete,
+}
+
+/// Which tab of the settings panel is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsTab {
+    /// Own profile (identity + edit + notifications + theme).
+    Profile,
+    /// Media cache size + clear action.
+    Storage,
+    /// Active account sessions.
+    Sessions,
 }
 
 /// Where the search UI is currently searching.
@@ -305,6 +345,36 @@ pub struct State {
     /// Downloaded picker thumbnails keyed by document id.
     pub sticker_thumbs: HashMap<i64, String>,
 
+    // -----------------------------------------------------------------
+    // Settings panel (global overlay, NOT reset when switching chats)
+    // -----------------------------------------------------------------
+    /// The right-hand settings sheet is open.
+    pub settings_open: bool,
+    /// Which settings tab is displayed.
+    pub settings_tab: SettingsTab,
+    /// The signed-in user's own profile (`None` until `GetMe` answers).
+    pub my_profile: Option<MyProfile>,
+    /// First-name input of the profile edit form.
+    pub edit_name: String,
+    /// Bio input of the profile edit form.
+    pub edit_bio: String,
+    /// Active account sessions (`UiMessage::Sessions`).
+    pub sessions: Vec<SessionInfo>,
+    /// Media cache size in bytes (`Some` once measured).
+    pub cache_bytes: Option<u64>,
+    /// The "Clear cache" destructive action awaits inline confirmation.
+    pub confirm_clear_cache: bool,
+
+    /// Shared notifications preference (flipped by the panel, consulted by
+    /// the network runtime before raising a desktop notification).
+    pub notify_pref: Arc<crate::network::NotifyPref>,
+    /// Local mirror of the shared flag (drives the On/Off label).
+    pub notifications_on: bool,
+
+    // Theme contract (owned by the theme feature; consumed by Settings).
+    /// Current UI theme mode.
+    pub theme_mode: ThemeMode,
+
     /// Absolute Y offset of the message list's viewport (content coordinates),
     /// fed by the scrollable's `on_scroll`. Drives virtualization: only the
     /// rows overlapping `[offset, offset + viewport]` are built each frame.
@@ -413,6 +483,17 @@ impl State {
             sticker_picker_open: false,
             sticker_sets: Vec::new(),
             sticker_thumbs: HashMap::new(),
+            settings_open: false,
+            settings_tab: SettingsTab::Profile,
+            my_profile: None,
+            edit_name: String::new(),
+            edit_bio: String::new(),
+            sessions: Vec::new(),
+            cache_bytes: None,
+            confirm_clear_cache: false,
+            notify_pref: Arc::new(crate::network::NotifyPref::default()),
+            notifications_on: true,
+            theme_mode: ThemeMode::Dark,
             scroll_offset: 0.0,
             dialog_scroll_offset: 0.0,
             layout_cache: Mutex::new(None),
@@ -444,6 +525,11 @@ impl State {
         self.initial_chat = read_last_chat_at(&last_chat_path());
         if on {
             self.emoji_recents = read_emoji_recents_at(&emoji_recents_path());
+            self.notifications_on = read_notifications_at(&notifications_path());
+            use std::sync::atomic::Ordering;
+            self.notify_pref
+                .0
+                .store(self.notifications_on, Ordering::SeqCst);
         }
         self
     }
@@ -975,6 +1061,30 @@ impl State {
                     format!("Signed in as {name} — {} chats", self.dialogs.len())
                 };
             }
+            UiMessage::MyProfile(p) => {
+                // Seed the edit inputs only while they're untouched, so a
+                // profile echo never clobbers text being typed.
+                let untouched = self.edit_name.is_empty() && self.edit_bio.is_empty();
+                let first = p.name.split_once(' ').map(|(f, _)| f).unwrap_or(&p.name);
+                if untouched {
+                    self.edit_name = first.to_string();
+                    self.edit_bio = p.bio.clone().unwrap_or_default();
+                }
+                self.my_profile = Some(p);
+            }
+            UiMessage::Sessions(list) => {
+                // Stale guard: only apply while the panel still wants them.
+                if self.settings_open || self.sessions.is_empty() {
+                    self.sessions = list;
+                }
+            }
+            UiMessage::SessionRevoked { hash } => {
+                self.sessions.retain(|s| s.hash != hash);
+            }
+            UiMessage::CacheCleared { bytes } => {
+                self.cache_bytes = Some(bytes);
+                self.confirm_clear_cache = false;
+            }
             UiMessage::Error(e) => {
                 self.loading = false;
                 if !self.authenticated {
@@ -1197,6 +1307,11 @@ impl State {
         // Emoji picker closes before the context menu (topmost-composer-first).
         if self.emoji_panel_open {
             self.close_emoji_panel();
+            return;
+        }
+        // Settings sheet closes before the context menu (global overlay).
+        if self.settings_open {
+            self.close_settings();
             return;
         }
         self.context_menu = None;
@@ -1548,6 +1663,106 @@ impl State {
     pub fn copy_username(&mut self) -> Option<String> {
         let username = self.chat_info.as_ref()?.username.as_ref()?;
         Some(format!("@{username}"))
+    }
+
+    // -----------------------------------------------------------------
+    // Settings panel (global overlay; NOT reset when switching chats)
+    // -----------------------------------------------------------------
+
+    /// Opens the settings sheet: fetches the own profile (once) and the
+    /// active sessions, and measures the media cache on disk.
+    pub fn open_settings(&mut self) {
+        self.settings_open = true;
+        self.settings_tab = SettingsTab::Profile;
+        self.confirm_clear_cache = false;
+        if self.my_profile.is_none() {
+            let _ = self.req_tx.send(Request::GetMe);
+        }
+        let _ = self.req_tx.send(Request::GetSessions);
+        self.cache_bytes = Some(crate::network::cache_bytes_on_disk());
+    }
+
+    /// Closes the settings sheet (✕ or Escape).
+    pub fn close_settings(&mut self) {
+        self.settings_open = false;
+        self.confirm_clear_cache = false;
+    }
+
+    /// The header gear button: toggle the sheet.
+    pub fn toggle_settings(&mut self) {
+        if self.settings_open {
+            self.close_settings();
+        } else {
+            self.open_settings();
+        }
+    }
+
+    /// Switches the active settings tab.
+    pub fn set_settings_tab(&mut self, tab: SettingsTab) {
+        self.settings_tab = tab;
+    }
+
+    /// Submits the profile edit form (First name / Bio). Telegram requires a
+    /// non-empty first name; the refreshed profile arrives as a `MyProfile`
+    /// echo. `last_name` is left unchanged (kept simple).
+    pub fn submit_profile_edit(&mut self) {
+        let first = self.edit_name.trim();
+        if first.is_empty() {
+            return;
+        }
+        let bio = self.edit_bio.trim().to_string();
+        let _ = self.req_tx.send(Request::UpdateProfile {
+            first_name: Some(first.to_string()),
+            last_name: None,
+            bio: Some(bio),
+        });
+    }
+
+    /// "Clear cache" pressed: arms the inline Yes/No confirmation.
+    pub fn ask_clear_cache(&mut self) {
+        self.confirm_clear_cache = true;
+    }
+
+    /// Cancels the pending cache-clear confirmation.
+    pub fn cancel_clear_cache(&mut self) {
+        self.confirm_clear_cache = false;
+    }
+
+    /// Confirms the cache wipe: sends `ClearCache`; the `CacheCleared` echo
+    /// refreshes the displayed size.
+    pub fn confirm_clear_cache_now(&mut self) {
+        if !self.confirm_clear_cache {
+            return;
+        }
+        self.confirm_clear_cache = false;
+        let _ = self.req_tx.send(Request::ClearCache);
+    }
+
+    /// "Terminate" on a session row: the authoritative `SessionRevoked` echo
+    /// removes the row locally.
+    pub fn revoke_session(&mut self, hash: i64) {
+        let _ = self.req_tx.send(Request::RevokeSession { hash });
+    }
+
+    /// The notifications On/Off button: flips the shared flag consulted by
+    /// the network runtime and persists it when UI persistence is on.
+    pub fn toggle_notifications(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.notifications_on = !self.notifications_on;
+        self.notify_pref
+            .0
+            .store(self.notifications_on, Ordering::SeqCst);
+        if self.persist_ui {
+            write_notifications_at(&notifications_path(), self.notifications_on);
+        }
+    }
+
+    /// Theme row button (contract with the theme feature): flips Dark/Light.
+    pub fn toggle_theme(&mut self) {
+        self.theme_mode = match self.theme_mode {
+            ThemeMode::Dark => ThemeMode::Light,
+            ThemeMode::Light => ThemeMode::Dark,
+        };
     }
 
     // -----------------------------------------------------------------
@@ -3131,5 +3346,188 @@ mod tests {
         assert_eq!(row.sticker.as_ref().map(|s| s.alt.as_str()), Some("🎉"));
         assert!(row.doc.is_none(), "stickers are not document cards");
         assert!(preview_text("", &None, &None, &row.sticker).contains("🎉"));
+    }
+
+    // -----------------------------------------------------------------
+    // Settings panel
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn settings_open_close_requests_profile_and_sessions() {
+        let (mut state, mut req_rx) = demo_state();
+        state.open_settings();
+        assert!(state.settings_open);
+        assert!(state.cache_bytes.is_some(), "cache measured on open");
+        let reqs = drain(&mut req_rx);
+        assert!(reqs.iter().any(|r| matches!(r, Request::GetMe)));
+        assert!(reqs.iter().any(|r| matches!(r, Request::GetSessions)));
+        state.close_settings();
+        assert!(!state.settings_open);
+    }
+
+    #[test]
+    fn settings_survives_chat_switches() {
+        let (mut state, _) = demo_state();
+        state.open_settings();
+        state.open_chat(43);
+        assert!(state.settings_open, "settings is global, not chat-scoped");
+    }
+
+    #[test]
+    fn settings_tabs_switch() {
+        let (mut state, _) = demo_state();
+        assert_eq!(state.settings_tab, SettingsTab::Profile);
+        state.set_settings_tab(SettingsTab::Storage);
+        assert_eq!(state.settings_tab, SettingsTab::Storage);
+        state.set_settings_tab(SettingsTab::Sessions);
+        assert_eq!(state.settings_tab, SettingsTab::Sessions);
+    }
+
+    #[test]
+    fn profile_echo_seeds_edit_inputs_once() {
+        let (mut state, _) = demo_state();
+        state.on_message(UiMessage::MyProfile(MyProfile {
+            name: "Demo User".into(),
+            username: Some("demo_user".into()),
+            phone: Some("+33612345678".into()),
+            bio: Some("Hello".into()),
+        }));
+        assert_eq!(state.edit_name, "Demo");
+        assert_eq!(state.edit_bio, "Hello");
+        // A later echo must NOT clobber typed text.
+        state.edit_name = "Typed".into();
+        state.on_message(UiMessage::MyProfile(MyProfile {
+            name: "Demo User".into(),
+            username: None,
+            phone: None,
+            bio: None,
+        }));
+        assert_eq!(state.edit_name, "Typed");
+        assert_eq!(
+            state.my_profile.as_ref().unwrap().name,
+            "Demo User"
+        );
+    }
+
+    #[test]
+    fn profile_update_request_shape() {
+        let (mut state, mut req_rx) = demo_state();
+        state.edit_name = "  Alice  ".into();
+        state.edit_bio = "  Rust dev  ".into();
+        state.submit_profile_edit();
+        let reqs = drain(&mut req_rx);
+        assert!(
+            reqs.iter().any(|r| matches!(
+                r,
+                Request::UpdateProfile {
+                    first_name: Some(f),
+                    last_name: None,
+                    bio: Some(b),
+                } if f == "Alice" && b == "Rust dev"
+            )),
+            "expected trimmed UpdateProfile request, got {reqs:?}"
+        );
+        // Empty first name never submits.
+        state.edit_name = "   ".into();
+        state.submit_profile_edit();
+        assert!(drain(&mut req_rx).is_empty());
+    }
+
+    #[test]
+    fn sessions_arrive_and_revoke_removes_row() {
+        let (mut state, mut req_rx) = demo_state();
+        state.open_settings();
+        drain(&mut req_rx);
+        state.on_message(UiMessage::Sessions(vec![
+            SessionInfo {
+                device: "This device".into(),
+                platform: "Linux".into(),
+                country: "France".into(),
+                current: true,
+                hash: 111,
+            },
+            SessionInfo {
+                device: "iPhone".into(),
+                platform: "iOS".into(),
+                country: "France".into(),
+                current: false,
+                hash: 222,
+            },
+        ]));
+        assert_eq!(state.sessions.len(), 2);
+        state.revoke_session(222);
+        assert!(drain(&mut req_rx)
+            .iter()
+            .any(|r| matches!(r, Request::RevokeSession { hash: 222 })));
+        // Optimistic removal only via the authoritative echo.
+        assert_eq!(state.sessions.len(), 2);
+        state.on_message(UiMessage::SessionRevoked { hash: 222 });
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].hash, 111);
+    }
+
+    #[test]
+    fn clear_cache_confirmation_flow() {
+        let (mut state, mut req_rx) = demo_state();
+        state.ask_clear_cache();
+        assert!(state.confirm_clear_cache);
+        // Cancel path sends nothing.
+        state.cancel_clear_cache();
+        assert!(drain(&mut req_rx).is_empty());
+        state.ask_clear_cache();
+        state.confirm_clear_cache_now();
+        let reqs = drain(&mut req_rx);
+        assert!(reqs.iter().any(|r| matches!(r, Request::ClearCache)));
+        assert!(!state.confirm_clear_cache);
+        // The echo refreshes the size and keeps the confirmation down.
+        state.on_message(UiMessage::CacheCleared { bytes: 0 });
+        assert_eq!(state.cache_bytes, Some(0));
+        assert!(!state.confirm_clear_cache);
+        // Confirm without arming does nothing.
+        state.confirm_clear_cache_now();
+        assert!(drain(&mut req_rx).is_empty());
+    }
+
+    #[test]
+    fn notifications_flip_updates_shared_flag_and_persists() {
+        use std::sync::atomic::Ordering;
+        let dir = std::env::temp_dir().join(format!("tg-notif-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notifications");
+
+        assert!(read_notifications_at(&path), "missing file = enabled");
+        write_notifications_at(&path, false);
+        assert!(!read_notifications_at(&path));
+        write_notifications_at(&path, true);
+        assert!(read_notifications_at(&path));
+
+        let (mut state, _) = demo_state();
+        assert!(state.notifications_on);
+        state.toggle_notifications();
+        assert!(!state.notifications_on);
+        assert!(
+            !state.notify_pref.0.load(Ordering::SeqCst),
+            "shared flag flipped"
+        );
+        state.toggle_notifications();
+        assert!(state.notify_pref.0.load(Ordering::SeqCst));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn escape_closes_settings_before_context_menu() {
+        let (mut state, _) = demo_state();
+        state.open_settings();
+        state.context_menu = Some(ContextMenu { row: 0 });
+        state.escape();
+        assert!(!state.settings_open);
+        assert!(
+            state.context_menu.is_some(),
+            "settings closes first; menu untouched"
+        );
+        state.escape();
+        assert!(state.context_menu.is_none());
     }
 }

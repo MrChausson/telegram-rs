@@ -138,3 +138,25 @@ pub struct ParticipantRow {
     pub username: Option<String>,
     pub role: ParticipantRole,
 }
+
+/// The signed-in user's own profile (settings panel).
+#[derive(Debug, Clone, Default)]
+pub struct SelfProfile {
+    /// Display name ("First Last").
+    pub name: String,
+    pub username: Option<String>,
+    pub phone: Option<String>,
+    pub bio: Option<String>,
+}
+
+/// One active authorization (session) of the account.
+#[derive(Debug, Clone)]
+pub struct AuthSession {
+    pub device: String,
+    pub platform: String,
+    pub country: String,
+    /// True for the device making the query.
+    pub current: bool,
+    /// Server-side id used by `account.resetAuthorization`.
+    pub hash: i64,
+}

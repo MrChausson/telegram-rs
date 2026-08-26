@@ -178,6 +178,31 @@ pub struct ParticipantRow {
     pub role: ParticipantRole,
 }
 
+/// The signed-in user's own profile (settings panel).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MyProfile {
+    /// Display name ("First Last").
+    pub name: String,
+    /// @username without the sigil (`None` when unset).
+    pub username: Option<String>,
+    /// Phone in international format (`+336…`), `None` when hidden.
+    pub phone: Option<String>,
+    /// Self-description ("bio"), `None` when unset.
+    pub bio: Option<String>,
+}
+
+/// One active session of the account (settings panel > Sessions).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionInfo {
+    pub device: String,
+    pub platform: String,
+    pub country: String,
+    /// True for the device this client runs on.
+    pub current: bool,
+    /// Server-side id used to revoke this authorization.
+    pub hash: i64,
+}
+
 /// Request sent by the UI to the network.
 #[derive(Debug, Clone)]
 pub enum Request {
@@ -250,6 +275,20 @@ pub enum Request {
     LoginCode { code: String },
     /// Login step 3 (2FA): submit the account password.
     LoginPassword { password: String },
+    /// Fetches the signed-in user's profile (settings panel).
+    GetMe,
+    /// Updates the user's own profile (`None` leaves a field unchanged).
+    UpdateProfile {
+        first_name: Option<String>,
+        last_name: Option<String>,
+        bio: Option<String>,
+    },
+    /// Lists the account's active sessions (settings panel).
+    GetSessions,
+    /// Terminates another session of the account.
+    RevokeSession { hash: i64 },
+    /// Wipes the on-disk media cache (never the session or UI state).
+    ClearCache,
 }
 
 /// Message sent by the network to the UI.
@@ -355,6 +394,14 @@ pub enum UiMessage {
     LoginPasswordRequired { hint: String },
     /// Sign-in completed: the account is ready to use.
     LoginOk { name: String },
+    /// The signed-in user's own profile (settings panel).
+    MyProfile(MyProfile),
+    /// The account's active sessions arrived (settings panel).
+    Sessions(Vec<SessionInfo>),
+    /// A session was terminated server-side (`hash` = the revoked one).
+    SessionRevoked { hash: i64 },
+    /// The media cache was wiped; `bytes` = the remaining cache size.
+    CacheCleared { bytes: u64 },
     /// Error to display (status).
     Error(String),
 }
