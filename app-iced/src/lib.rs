@@ -235,6 +235,8 @@ pub enum Message {
     VoiceClicked { chat_id: i64, msg_id: i32, path: String },
     /// Periodic tick while a voice note is playing (progress + completion).
     VoiceTick,
+    /// The voice progress slider was moved: seek to `f32` seconds.
+    VoiceSeek(f32),
     /// A link inside a message was clicked: open it in the system browser.
     OpenUrl(String),
     /// Composer text changed.
@@ -418,6 +420,7 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             }
         }
         Message::VoiceTick => state.on_voice_tick(),
+        Message::VoiceSeek(secs) => state.voice_seek(secs),
         Message::OpenUrl(url) => {
             // Bare "www." links get a scheme so the opener accepts them.
             let url = if url.starts_with("www.") {
@@ -2237,29 +2240,44 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
                 } else {
                     0.0
                 };
-                let bar = container(
-                    container(iced::widget::Space::new())
-                        .width(Length::FillPortion((pct * 100.0).max(1.0) as u16))
-                        .height(Length::Fill)
-                        .style(|_| container::Style {
-                            background: Some(iced::Background::Color(rgb(theme::ACCENT))),
-                            border: iced::Border {
-                                radius: 2.0.into(),
-                                ..iced::Border::default()
-                            },
-                            ..container::Style::default()
-                        }),
-                )
-                .width(Length::Fill)
-                .height(4.0)
-                .style(|_| container::Style {
-                    background: Some(iced::Background::Color(rgb(theme::DIVIDER))),
-                    border: iced::Border {
-                        radius: 2.0.into(),
-                        ..iced::Border::default()
-                    },
-                    ..container::Style::default()
-                });
+                // Interactive progress: a real slider (click/drag to seek)
+                // when the duration is known; the flat indicator otherwise.
+                let total = doc.duration.unwrap_or(0.0).max(0.0) as f32;
+                let bar: Element<'a> = if total > 0.0 {
+                    iced::widget::slider(
+                        0.0..=total,
+                        state.voice_elapsed.clamp(0.0, total),
+                        Message::VoiceSeek,
+                    )
+                    .width(Length::Fill)
+                    .style(voice_slider_style)
+                    .into()
+                } else {
+                    container(
+                        container(iced::widget::Space::new())
+                            .width(Length::FillPortion((pct * 100.0).max(1.0) as u16))
+                            .height(Length::Fill)
+                            .style(|_| container::Style {
+                                background: Some(iced::Background::Color(rgb(theme::ACCENT))),
+                                border: iced::Border {
+                                    radius: 2.0.into(),
+                                    ..iced::Border::default()
+                                },
+                                ..container::Style::default()
+                            }),
+                    )
+                    .width(Length::Fill)
+                    .height(4.0)
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(rgb(theme::DIVIDER))),
+                        border: iced::Border {
+                            radius: 2.0.into(),
+                            ..iced::Border::default()
+                        },
+                        ..container::Style::default()
+                    })
+                    .into()
+                };
                 let play_icon = if is_this && state.voice_playing {
                     icon(Icon::Pause, theme::ACCENT, 18.0)
                 } else {
@@ -3419,6 +3437,35 @@ fn text_input_style(
         placeholder: rgb(theme::TEXT_SECONDARY),
         value: rgb(theme::TEXT_PRIMARY),
         selection: rgb(theme::ACCENT),
+    }
+}
+
+/// Voice-note progress slider: accent rail fill, subtle track, round thumb.
+fn voice_slider_style(
+    _theme: &iced::Theme,
+    status: iced::widget::slider::Status,
+) -> iced::widget::slider::Style {
+    let (rail_width, handle_r) = match status {
+        iced::widget::slider::Status::Dragged | iced::widget::slider::Status::Hovered => {
+            (5.0, 9.0)
+        }
+        _ => (4.0, 7.0),
+    };
+    iced::widget::slider::Style {
+        rail: iced::widget::slider::Rail {
+            width: rail_width,
+            backgrounds: (
+                iced::Background::Color(rgb(theme::ACCENT)),
+                iced::Background::Color(rgb(theme::DIVIDER)),
+            ),
+            border: iced::Border::default(),
+        },
+        handle: iced::widget::slider::Handle {
+            shape: iced::widget::slider::HandleShape::Circle { radius: handle_r },
+            background: iced::Background::Color(rgb(theme::ACCENT)),
+            border_width: 0.0,
+            border_color: Color::TRANSPARENT,
+        },
     }
 }
 

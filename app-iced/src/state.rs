@@ -236,6 +236,13 @@ pub struct State {
     pub voice_playing: bool,
     /// Seconds elapsed on the current voice note (drives the progress bar).
     pub voice_elapsed: f32,
+    /// Known duration of the current note (0.0 when unknown) — slider range.
+    pub voice_duration: f32,
+    /// Progress is SIMULATED (wall clock) because the payload went to the
+    /// system player (Opus fallback): we cannot poll its position.
+    pub voice_sim: bool,
+    /// When the simulated playback started (for pause-free progression).
+    voice_sim_started: Option<std::time::Instant>,
     /// The voice note we just stopped (so a paused→resume doesn't restart).
     pub voice_paused_path: Option<String>,
 
@@ -381,6 +388,9 @@ impl State {
             playing_voice: None,
             voice_playing: false,
             voice_elapsed: 0.0,
+            voice_duration: 0.0,
+            voice_sim: false,
+            voice_sim_started: None,
             voice_paused_path: None,
             next_media_token: 1,
             tray_actions: Arc::new(crate::tray::TrayActions::default()),
@@ -1034,6 +1044,15 @@ impl State {
     /// (the click on a non-cached voice note triggers a download instead).
     pub fn voice_click(&mut self, chat_id: i64, msg_id: i32, path: &str) {
         if self.playing_voice.as_ref() == Some(&(chat_id, msg_id, path.to_string())) {
+            // Simulated playback (external player): click stops it.
+            if self.voice_sim {
+                self.playing_voice = None;
+                self.voice_playing = false;
+                self.voice_sim = false;
+                self.voice_sim_started = None;
+                self.voice_elapsed = 0.0;
+                return;
+            }
             // Same note: toggle pause/play.
             if crate::audio::is_active() {
                 if self.voice_playing {
@@ -1053,8 +1072,18 @@ impl State {
         // Different note (or none): switch.
         self.playing_voice = Some((chat_id, msg_id, path.to_string()));
         self.voice_elapsed = 0.0;
+        self.voice_duration = self.note_duration(chat_id, msg_id);
         self.voice_playing = crate::audio::play(path);
         self.fallback_to_system_player_if_undecodable(path);
+    }
+
+    /// Duration of the note (chat_id, msg_id) per its message card, if known.
+    fn note_duration(&self, chat_id: i64, msg_id: i32) -> f32 {
+        self.messages
+            .iter()
+            .find(|m| m.id == msg_id && self.open_chat == Some(chat_id))
+            .and_then(|m| m.doc.as_ref().and_then(|d| d.duration))
+            .unwrap_or(0.0) as f32
     }
 
     /// Inline playback failed and the payload is Ogg (Opus voice note):
@@ -1069,6 +1098,16 @@ impl State {
         if !self.voice_playing && is_ogg {
             self.open_file = Some(path.to_string());
             self.status = "Opening with the system player…".to_string();
+            // Simulate the progress bar over the known duration: we cannot
+            // poll an external process. A second click stops the simulation.
+            self.voice_duration = match self.playing_voice.as_ref() {
+                Some((cid, mid, _)) => self.note_duration(*cid, *mid),
+                None => 0.0,
+            };
+            self.voice_sim = true;
+            self.voice_playing = true;
+            self.voice_sim_started = Some(std::time::Instant::now());
+            self.voice_elapsed = 0.0;
         }
     }
 
@@ -1640,10 +1679,38 @@ impl State {
                 self.playing_voice = None;
                 self.voice_playing = false;
                 self.voice_elapsed = 0.0;
+                self.voice_sim = false;
+                self.voice_sim_started = None;
                 crate::audio::stop();
             }
-        } else if !self.voice_playing {
-            // Paused: keep the bar where it is.
+        } else if self.voice_sim && self.voice_playing {
+            // External player: advance a simulated cursor; end at duration.
+            if let Some(started) = self.voice_sim_started {
+                self.voice_elapsed = started.elapsed().as_secs_f32();
+                if self.voice_duration > 0.0 && self.voice_elapsed >= self.voice_duration {
+                    self.playing_voice = None;
+                    self.voice_playing = false;
+                    self.voice_elapsed = 0.0;
+                    self.voice_sim = false;
+                    self.voice_sim_started = None;
+                }
+            }
+        }
+    }
+
+    /// Seek within the current voice note: `secs` from the start, clamped to
+    /// [0, duration]. Live for inline playback; rewinds the simulation clock
+    /// when progress is externally played.
+    pub fn voice_seek(&mut self, secs: f32) {
+        let max = if self.voice_duration > 0.0 { self.voice_duration } else { secs };
+        let t = secs.clamp(0.0, max);
+        if crate::audio::is_active() {
+            crate::audio::seek_to(t);
+        }
+        self.voice_elapsed = t;
+        if self.voice_sim {
+            self.voice_sim_started =
+                Some(std::time::Instant::now() - std::time::Duration::from_secs_f32(t));
         }
     }
 
@@ -1653,6 +1720,8 @@ impl State {
         self.playing_voice = None;
         self.voice_playing = false;
         self.voice_elapsed = 0.0;
+        self.voice_sim = false;
+        self.voice_sim_started = None;
         self.open_chat = Some(id);
         self.messages.clear();
         self.loading = true;

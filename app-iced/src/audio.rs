@@ -10,7 +10,6 @@ use rodio::{Decoder, OutputStream, Sink};
 use std::cell::RefCell;
 use std::fs::File;
 use std::io::BufReader;
-use std::time::Instant;
 
 thread_local! {
     /// The live audio device + sink, held by the UI thread for as long as one
@@ -21,7 +20,6 @@ thread_local! {
 
 struct Player {
     sink: Sink,
-    started: Instant,
     _stream: OutputStream,
 }
 
@@ -38,7 +36,6 @@ pub fn is_active() -> bool {
 /// there is no usable audio output or the file can't be decoded (the UI treats
 /// it as a silent no-op, never a crash).
 pub fn play(path: &str) -> bool {
-    let started = Instant::now();
     let Ok((stream, handle)) = OutputStream::try_default() else {
         eprintln!("voice play {path}: no audio output device");
         return false;
@@ -63,7 +60,6 @@ pub fn play(path: &str) -> bool {
         }
         *p = Some(Player {
             sink,
-            started,
             _stream: stream,
         });
     });
@@ -76,12 +72,23 @@ pub fn finished() -> bool {
     with_player(|p| p.as_ref().is_some_and(|pl| pl.sink.empty()))
 }
 
-/// Seconds elapsed on the current note (0.0 when idle).
+/// Seconds elapsed on the current note (0.0 when idle). Reads the decoder's
+/// real position — wall-clock time drifts across pauses and seeks.
 pub fn elapsed_secs() -> f32 {
     with_player(|p| match p {
-        Some(pl) => pl.started.elapsed().as_secs_f32(),
+        Some(pl) => pl.sink.get_pos().as_secs_f32(),
         None => 0.0,
     })
+}
+
+/// Seeks the current note to `secs` from the start. No-op when idle.
+/// Paused notes stay paused at the new position.
+pub fn seek_to(secs: f32) {
+    with_player(|p| {
+        if let Some(pl) = p {
+            let _ = pl.sink.try_seek(std::time::Duration::from_secs_f32(secs.max(0.0)));
+        }
+    });
 }
 
 /// Pause the current note.
