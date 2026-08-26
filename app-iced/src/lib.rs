@@ -2828,6 +2828,11 @@ fn context_menu_bar(state: &State) -> Element<'static> {
 /// one-frame-late `on_scroll` offset) never reveals a blank gap.
 const LIST_OVERSCAN: usize = 16;
 
+/// Breathing room kept BELOW the last message when the list is scrolled to
+/// the end: without it the snap-to-end pins the newest bubble flush against
+/// the viewport bottom (hard to read, no separation from the composer).
+const LIST_BOTTOM_PAD: f32 = 18.0;
+
 /// Number of items the open context menu shows.
 fn context_menu_items(state: &State) -> usize {
     let can_edit = state.context_can_edit();
@@ -2998,7 +3003,7 @@ pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
     scrollable(column![
         iced::widget::Space::new().height(top_pad),
         content,
-        iced::widget::Space::new().height(bottom_pad),
+        iced::widget::Space::new().height(bottom_pad + LIST_BOTTOM_PAD),
     ])
     .id(MSG_LIST_ID)
     .on_scroll(|viewport: iced::widget::scrollable::Viewport| {
