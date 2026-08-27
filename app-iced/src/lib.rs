@@ -304,6 +304,12 @@ pub enum Message {
     CancelClearCache,
     /// The inline clear-cache confirmation was accepted.
     ConfirmClearCache,
+    /// The "Log out" button was pressed (arms the confirmation).
+    AskLogout,
+    /// The inline logout confirmation was cancelled.
+    CancelLogout,
+    /// The inline logout confirmation was accepted.
+    DoLogout,
     /// "Terminate" was clicked on a session row.
     RevokeSession(i64),
     /// Flip dark ⇄ light (Settings panel). `State::toggle_theme` applies the
@@ -497,6 +503,9 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::AskClearCache => state.ask_clear_cache(),
         Message::CancelClearCache => state.cancel_clear_cache(),
         Message::ConfirmClearCache => state.confirm_clear_cache_now(),
+        Message::AskLogout => state.ask_logout(),
+        Message::CancelLogout => state.cancel_logout(),
+        Message::DoLogout => state.confirm_logout_now(),
         Message::RevokeSession(hash) => state.revoke_session(hash),
         Message::ToggleTheme => state.toggle_theme(),
         Message::Escape => {
@@ -1238,6 +1247,35 @@ fn settings_profile_tab(state: &State) -> Element<'_> {
         .padding([4, 12])
         .style(flat_button),
     ));
+
+    // Account: log out (inline Yes/No confirmation, Clear-cache pattern).
+    let logout_control: Element<'_> = if state.confirm_logout {
+        row![
+            button(text("Yes").size(theme::font::BADGE).color(rgb(theme::ERROR())))
+                .on_press(Message::DoLogout)
+                .padding([3, 10])
+                .style(flat_button),
+            button(text("No").size(theme::font::BADGE).color(rgb(theme::ICON())))
+                .on_press(Message::CancelLogout)
+                .padding([3, 10])
+                .style(flat_button),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
+    } else {
+        button(
+            text("Log out")
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(theme::ERROR())),
+        )
+        .on_press(Message::AskLogout)
+        .padding([4, 12])
+        .style(flat_button)
+        .into()
+    };
+    col = col.push(settings_divider());
+    col = col.push(settings_row("Account", logout_control));
 
     col.into()
 }

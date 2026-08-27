@@ -291,6 +291,8 @@ pub enum Request {
     RevokeSession { hash: i64 },
     /// Wipes the on-disk media cache (never the session or UI state).
     ClearCache,
+    /// Logs the account out (`auth.logOut`) and purges the local session.
+    LogOut,
 }
 
 /// Message sent by the network to the UI.
@@ -404,6 +406,8 @@ pub enum UiMessage {
     SessionRevoked { hash: i64 },
     /// The media cache was wiped; `bytes` = the remaining cache size.
     CacheCleared { bytes: u64 },
+    /// The session was logged out: the UI resets to the sign-in screen.
+    LoggedOut,
     /// Error to display (status).
     Error(String),
 }

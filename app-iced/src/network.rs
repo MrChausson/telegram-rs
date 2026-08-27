@@ -149,6 +149,18 @@ fn clear_cache_dirs() {
     }
 }
 
+/// Deletes the on-disk MTProto session (used on logout). A missing file
+/// already counts as signed out; other I/O failures are reported but never
+/// block the UI reset.
+fn purge_session_file() {
+    let path = session_path();
+    if let Err(e) = std::fs::remove_file(&path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("could not remove {}: {e}", path.display());
+        }
+    }
+}
+
 /// Maps chat ids to already-cached avatar files (no download needed).
 fn avatar_files() -> Vec<(i64, String)> {
     let dir = cache_dir().join("avatars");
@@ -989,6 +1001,9 @@ async fn serve_demo(
     // Next time an incoming message is delivered; typing starts 3 s earlier.
     let mut next_incoming = std::time::Instant::now() + std::time::Duration::from_secs(4);
     let mut typing_sent = false;
+    // Set once `Request::LogOut` is handled: stops the simulated peer
+    // activity so nothing keeps arriving while the UI shows sign-in.
+    let mut logged_out = false;
 
     loop {
         let mut pending: Vec<Request> =
@@ -1400,48 +1415,57 @@ Request::DownloadDoc { chat_id, msg_id } => {
                         bytes: cache_bytes_on_disk(),
                     });
                 }
+                Request::LogOut => {
+                    // Same local cleanup as the real path, minus the server
+                    // call (the demo has no session to tear down).
+                    purge_session_file();
+                    logged_out = true;
+                    let _ = ui_tx.send(UiMessage::LoggedOut);
+                }
                 _ => {}
             }
         }
         // Simulated peer activity in Camille's chat: typing burst → message.
-        let now_inst = std::time::Instant::now();
-        let typing_on = now_inst + std::time::Duration::from_secs(3) >= next_incoming
-            && now_inst < next_incoming;
-        if typing_on != typing_sent {
-            typing_sent = typing_on;
-            let _ = ui_tx.send(UiMessage::PeerTyping {
-                chat_id: 1001,
-                typing: typing_on,
-            });
-        }
-        if now_inst >= next_incoming {
-            let text = incoming[incoming_idx % incoming.len()].to_string();
-            incoming_idx += 1;
-            let _ = ui_tx.send(UiMessage::PeerTyping {
-                chat_id: 1001,
-                typing: false,
-            });
-            typing_sent = false;
-            let date = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i32;
-            let _ = ui_tx.send(UiMessage::NewMessage {
-                chat_id: 1001,
-                id: next_id,
-                text,
-                date,
-                out: false,
-                photo: None,
-                doc: None,
-                sticker: None,
-                reply_to: None,
-                forwarded_from: None,
-                sender_name: None,
-                sender_id: None,
-            });
-            next_id += 1;
-            next_incoming = now_inst + std::time::Duration::from_secs(45);
+        if !logged_out {
+            let now_inst = std::time::Instant::now();
+            let typing_on = now_inst + std::time::Duration::from_secs(3) >= next_incoming
+                && now_inst < next_incoming;
+            if typing_on != typing_sent {
+                typing_sent = typing_on;
+                let _ = ui_tx.send(UiMessage::PeerTyping {
+                    chat_id: 1001,
+                    typing: typing_on,
+                });
+            }
+            if now_inst >= next_incoming {
+                let text = incoming[incoming_idx % incoming.len()].to_string();
+                incoming_idx += 1;
+                let _ = ui_tx.send(UiMessage::PeerTyping {
+                    chat_id: 1001,
+                    typing: false,
+                });
+                typing_sent = false;
+                let date = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i32;
+                let _ = ui_tx.send(UiMessage::NewMessage {
+                    chat_id: 1001,
+                    id: next_id,
+                    text,
+                    date,
+                    out: false,
+                    photo: None,
+                    doc: None,
+                    sticker: None,
+                    reply_to: None,
+                    forwarded_from: None,
+                    sender_name: None,
+                    sender_id: None,
+                });
+                next_id += 1;
+                next_incoming = now_inst + std::time::Duration::from_secs(45);
+            }
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
@@ -2401,6 +2425,16 @@ async fn handle_request(
             let _ = ui_tx.send(UiMessage::CacheCleared {
                 bytes: cache_bytes_on_disk(),
             });
+        }
+        Request::LogOut => {
+            // Best-effort server-side logout; the local session is dropped
+            // either way so the next launch starts from the sign-in screen.
+            let _ = tg.log_out().await;
+            purge_session_file();
+            // NOTE(limitation): the running MTProto connection stays alive
+            // until the next app launch (no runtime re-init yet); pushes may
+            // still arrive while the UI shows the sign-in screen.
+            let _ = ui_tx.send(UiMessage::LoggedOut);
         }
         Request::Search { id, query } => {
             if query.is_empty() {

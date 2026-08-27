@@ -394,6 +394,8 @@ pub struct State {
     pub cache_bytes: Option<u64>,
     /// The "Clear cache" destructive action awaits inline confirmation.
     pub confirm_clear_cache: bool,
+    /// The "Log out" destructive action awaits inline confirmation.
+    pub confirm_logout: bool,
 
     /// Shared notifications preference (flipped by the panel, consulted by
     /// the network runtime before raising a desktop notification).
@@ -519,6 +521,7 @@ impl State {
             sessions: Vec::new(),
             cache_bytes: None,
             confirm_clear_cache: false,
+            confirm_logout: false,
             notify_pref: Arc::new(crate::network::NotifyPref::default()),
             notifications_on: true,
             scroll_offset: 0.0,
@@ -1143,6 +1146,7 @@ impl State {
                 self.cache_bytes = Some(bytes);
                 self.confirm_clear_cache = false;
             }
+            UiMessage::LoggedOut => self.reset_to_login(),
             UiMessage::Error(e) => {
                 self.loading = false;
                 if !self.authenticated {
@@ -1336,6 +1340,11 @@ impl State {
         // back handler) close it before touching the message rows.
         if self.search_open() {
             self.close_search();
+            return;
+        }
+        // An armed destructive confirmation is cancelled first.
+        if self.confirm_logout {
+            self.cancel_logout();
             return;
         }
         if self.sticker_picker_open {
@@ -1795,6 +1804,93 @@ impl State {
         }
         self.confirm_clear_cache = false;
         let _ = self.req_tx.send(Request::ClearCache);
+    }
+
+    /// "Log out" pressed: arms the inline Yes/No confirmation.
+    pub fn ask_logout(&mut self) {
+        self.confirm_logout = true;
+    }
+
+    /// Cancels the pending logout confirmation.
+    pub fn cancel_logout(&mut self) {
+        self.confirm_logout = false;
+    }
+
+    /// Confirms the logout: sends `LogOut` once; the authoritative
+    /// `LoggedOut` echo performs the UI reset ([`Self::reset_to_login`]).
+    pub fn confirm_logout_now(&mut self) {
+        if !self.confirm_logout {
+            return;
+        }
+        self.confirm_logout = false;
+        let _ = self.req_tx.send(Request::LogOut);
+    }
+
+    /// Handles `UiMessage::LoggedOut`: drops every conversation-scoped bit of
+    /// state and goes back to the sign-in screen. Theme and emoji recents are
+    /// kept on purpose.
+    pub fn reset_to_login(&mut self) {
+        // Sign-in flow.
+        self.authenticated = false;
+        self.login_step = LoginStep::Phone;
+        self.login_input.clear();
+        self.login_error = false;
+        self.status.clear();
+        // Conversations.
+        self.dialogs.clear();
+        self.dialog_short.clear();
+        self.messages.clear();
+        self.open_chat = None;
+        self.chat_title.clear();
+        self.loading = false;
+        self.typing = false;
+        self.scroll_offset = 0.0;
+        self.dialog_scroll_offset = 0.0;
+        self.scroll_to_bottom = false;
+        // Overlays + one-shot interactions.
+        self.context_menu = None;
+        self.editing = None;
+        self.composer.clear();
+        self.viewer = None;
+        self.reply_target = None;
+        self.forward_pick = None;
+        self.info_open = false;
+        self.chat_info = None;
+        self.participants.clear();
+        self.kick_confirm = None;
+        self.muted = false;
+        self.pinned_id = None;
+        self.create_menu_open = false;
+        self.create_dialog = None;
+        self.create_title.clear();
+        self.create_about.clear();
+        self.member_pick.clear();
+        self.row_menu = None;
+        self.confirm_leave = None;
+        self.confirm_clear_cache = false;
+        self.sticker_picker_open = false;
+        self.emoji_panel_open = false;
+        self.open_file = None;
+        self.playing_voice = None;
+        self.voice_playing = false;
+        // Search UI.
+        self.search_mode = None;
+        self.search_query.clear();
+        self.search_hits.clear();
+        self.search_pending = false;
+        self.scroll_target = None;
+        // Settings panel (profile/sessions inputs).
+        self.settings_open = false;
+        self.settings_tab = SettingsTab::Profile;
+        self.my_profile = None;
+        self.edit_name.clear();
+        self.edit_last_name.clear();
+        self.edit_bio.clear();
+        self.sessions.clear();
+        self.cache_bytes = None;
+        self.confirm_logout = false;
+        // The cached message-list metrics are stale now.
+        self.invalidate_layout();
     }
 
     /// "Terminate" on a session row: the authoritative `SessionRevoked` echo
@@ -3580,6 +3676,95 @@ mod tests {
         // Confirm without arming does nothing.
         state.confirm_clear_cache_now();
         assert!(drain(&mut req_rx).is_empty());
+    }
+
+    #[test]
+    fn logout_confirmation_flow() {
+        let (mut state, mut req_rx) = demo_state();
+        state.ask_logout();
+        assert!(state.confirm_logout);
+        // Cancel path sends nothing.
+        state.cancel_logout();
+        assert!(drain(&mut req_rx).is_empty());
+        state.ask_logout();
+        state.confirm_logout_now();
+        let reqs = drain(&mut req_rx);
+        assert!(reqs.iter().any(|r| matches!(r, Request::LogOut)));
+        assert!(!state.confirm_logout);
+        // Confirm without arming does nothing.
+        state.confirm_logout_now();
+        assert!(drain(&mut req_rx).is_empty());
+    }
+
+    #[test]
+    fn logged_out_resets_to_sign_in() {
+        let (mut state, _) = demo_state();
+        state.on_message(UiMessage::Dialogs(vec![ChatRow {
+            id: 42,
+            title: "Camille".into(),
+            subtitle: "Hello!".into(),
+            date: 100,
+            unread: 1,
+            avatar_path: None,
+        }]));
+        state.on_message(UiMessage::Messages {
+            id: 42,
+            title: "Camille".into(),
+            rows: vec![MsgRow::text(1, "incoming", 100, false)],
+        });
+        state.my_profile = Some(MyProfile {
+            name: "Demo User".into(),
+            ..MyProfile::default()
+        });
+        state.sessions.push(SessionInfo {
+            device: "This device".into(),
+            platform: "Linux".into(),
+            country: "France".into(),
+            current: true,
+            hash: 111,
+        });
+        state.settings_open = true;
+        state.settings_tab = SettingsTab::Sessions;
+        state.edit_name = "Demo".into();
+        state.search_mode = Some(SearchMode::Global);
+        state.search_query = "rust".into();
+        state.reply_target = Some(ReplyTarget { msg_id: 1, snippet: "s".into() });
+        state.scroll_offset = 250.0;
+        let epoch_before = state.layout_epoch;
+
+        state.on_message(UiMessage::LoggedOut);
+
+        assert!(!state.authenticated);
+        assert_eq!(state.login_step, LoginStep::Phone);
+        assert!(state.login_input.is_empty());
+        assert!(state.dialogs.is_empty());
+        assert!(state.messages.is_empty());
+        assert_eq!(state.open_chat, None);
+        assert!(state.chat_title.is_empty());
+        assert!(!state.loading);
+        assert!(state.dialog_short.is_empty());
+        assert_eq!(state.scroll_offset, 0.0);
+        assert_eq!(state.dialog_scroll_offset, 0.0);
+        assert!(state.context_menu.is_none());
+        assert!(state.composer.is_empty());
+        assert!(state.viewer.is_none());
+        assert!(state.reply_target.is_none());
+        assert!(!state.info_open);
+        assert!(state.chat_info.is_none());
+        assert!(state.participants.is_empty());
+        assert!(state.search_mode.is_none());
+        assert!(state.search_query.is_empty());
+        assert!(state.search_hits.is_empty());
+        assert!(state.my_profile.is_none());
+        assert!(state.sessions.is_empty());
+        assert!(!state.settings_open);
+        assert_eq!(state.settings_tab, SettingsTab::Profile);
+        assert!(state.edit_name.is_empty());
+        assert_ne!(state.layout_epoch, epoch_before, "layout cache invalidated");
+        // Kept on purpose.
+        let theme_before = state.theme_mode;
+        state.on_message(UiMessage::LoggedOut);
+        assert_eq!(state.theme_mode, theme_before, "theme survives logout");
     }
 
     #[test]
