@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Real logo everywhere**: the accent-disc + send-plane mark (already used
+  in-app and by the tray) now backs the window/taskbar icon (`window::icon`,
+  rendered off the same code path), the install/AUR hicolor SVG
+  (`assets/icon.svg`) and the AppImage icon (drawn in CI, no font).
+  Tray strings that still said "tg" (id, title, tooltip, "Open tg",
+  thread name) now say Telegram RS.
+
 ### Added
 - **AUR package `telegram-rs-bin`**: Arch users install via `paru/yay -S
   telegram-rs-bin`; the release workflow publishes the PKGBUILD to the AUR

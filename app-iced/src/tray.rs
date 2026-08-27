@@ -50,17 +50,17 @@ struct TgTray {
 
 impl ksni::Tray for TgTray {
     fn id(&self) -> String {
-        "tg".into()
+        "telegram-rs".into()
     }
     fn title(&self) -> String {
-        "tg".into()
+        "Telegram RS".into()
     }
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         tray_icons()
     }
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            title: "tg".into(),
+            title: "Telegram RS".into(),
             description: "Telegram client".into(),
             ..Default::default()
         }
@@ -69,7 +69,7 @@ impl ksni::Tray for TgTray {
         use ksni::menu::{MenuItem, StandardItem};
         vec![
             MenuItem::Standard(StandardItem {
-                label: "Open tg".into(),
+                label: "Open Telegram RS".into(),
                 activate: Box::new(|tray: &mut Self| {
                     tray.actions.open.store(true, Ordering::SeqCst);
                 }),
@@ -91,7 +91,7 @@ impl ksni::Tray for TgTray {
 /// return `Err`, and the thread silently exits.
 pub fn start(actions: Arc<TrayActions>) {
     std::thread::Builder::new()
-        .name("tg-tray".into())
+        .name("telegram-rs-tray".into())
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

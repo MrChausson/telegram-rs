@@ -62,9 +62,12 @@ jobs:
           EOF
           chmod +x AppDir/AppRun
           # Icon (PNG) + menu entry
-          convert -size 256x256 xc:'#1e1f22' -fill '#32a852' \
-            -font DejaVu-Sans-Bold -pointsize 140 -gravity center \
-            -annotate 0 'TR' AppDir/telegram-rs.png
+          # App logo (accent disc + white send-plane) — same geometry as
+          # assets/icon.svg / app-iced/src/icons.rs Icon::Logo, scaled 2x.
+          convert -size 256x256 xc:none -fill '#3390ec' \
+            -draw 'circle 128,128 128,0' -fill white \
+            -draw 'polygon 64.4,187.5 203.3,128 64.4,68.5 64.4,114.8 157,128 64.4,161.2' \
+            AppDir/telegram-rs.png
           cat > AppDir/telegram-rs.desktop <<'EOF'
           [Desktop Entry]
           Type=Application
