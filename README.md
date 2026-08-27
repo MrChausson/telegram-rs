@@ -1,4 +1,4 @@
-# tg — a feather-light Telegram client
+# Telegram RS — a feather-light Telegram client
 
 A fast, minimalist **Telegram desktop client** written in Rust, real-time via
 MTProto push. Rendered with a **GPU by default** (wgpu, GL backend) with an
@@ -14,7 +14,7 @@ automatic software fallback — a fraction of the RAM of mainstream clients.
 
 Measured on a real session (HiDPI 1.6×, Arch Linux, NVIDIA/Wayland, `--release`):
 
-| Metric | tg | Telegram Desktop |
+| Metric | Telegram RS | Telegram Desktop |
 |---|---|---|
 | **Resident memory (RSS)** | **~40-50 MB** | 300-500 MB |
 | **PSS** (proportional size, +NVIDIA driver) | **~47 MB** | — |
@@ -44,35 +44,35 @@ Download → run → sign in.
 
 ```bash
 # AppImage (no install needed)
-chmod +x tg-x86_64.AppImage
-./tg-x86_64.AppImage
+chmod +x telegram-rs-x86_64.AppImage
+./telegram-rs-x86_64.AppImage
 
 # Or tarball + installer:
-tar xzf tg-linux-x86_64.tar.gz        # extracts app + install.sh
-./install.sh                          # → ~/.local/bin/tg + menu entry
+tar xzf telegram-rs-linux-x86_64.tar.gz   # extracts app + install.sh
+./install.sh                              # → ~/.local/bin/telegram-rs + menu entry
 ```
 
 **macOS** (universal: Intel & Apple Silicon):
 
 ```bash
-tar xzf tg-macos-universal.tar.gz
-./tg
+tar xzf telegram-rs-macos-universal.tar.gz
+./telegram-rs
 # Unsigned build → first launch: right-click → Open, or
-# xattr -dr com.apple.quarantine tg
+# xattr -dr com.apple.quarantine telegram-rs
 ```
 
 **Windows**:
 
 ```powershell
-Expand-Archive tg-windows-x86_64.zip -DestinationPath tg
-tg\tg.exe  # or right-click → Extract and double-click tg.exe (SmartScreen: "More info" → "Run anyway")
+Expand-Archive telegram-rs-windows-x86_64.zip -DestinationPath telegram-rs
+telegram-rs\telegram-rs.exe  # or right-click → Extract and double-click tg.exe (SmartScreen: "More info" → "Run anyway")
 ```
 
 ### 2. First launch: sign in inside the app (any OS)
 
 On first launch the window shows a **sign-in screen** — enter your phone
 number, then the code you receive by Telegram, and (if enabled) your
-two-step verification password. The session is stored per-user (`tg` data
+two-step verification password. The session is stored per-user (a `telegram-rs` data
 directory), and the app starts signed in next time.
 
 No configuration file is needed for the released binaries: API credentials

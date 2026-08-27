@@ -7,19 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- **Last name editing**: the profile edit form gains a "Last name" field.
-  `SelfProfile`/`MyProfile` carry the server's `last_name` end-to-end
-  (tg → network → bridge → state) instead of re-splitting the display name,
-  and Save now sends it (`None` semantics dropped: an emptied field clears it).
+- **Arch Linux packaging groundwork**: the public identity is now unique
+  (`telegram-rs`) so a future AUR package needs no `conflicts` — `tg` was
+  already taken on the AUR by an unrelated watch-timing tool.
 
 ### Changed
-- **Emoji picker** pops above the composer like a context menu (300×240,
-  bottom-left anchored) so the conversation behind it stays readable.
-
-### Fixed
-- Chat header search/info buttons sit flush against the right edge again:
-  a stray `Length::Fill` spacer (plus the idle perf-badge slot) was splitting
-  the free width and floating the icons mid-header.
+- **Public identity renamed to "Telegram RS"**: window title, installed
+  binary (`telegram-rs`, from the crate's `[[bin]]` target), menu entry +
+  icon (monogram TR), release asset names (`telegram-rs-linux-x86_64.tar.gz`,
+  `telegram-rs-x86_64.AppImage`, `telegram-rs-macos-universal.tar.gz`,
+  `telegram-rs-windows-x86_64.zip`) and README. Internal crates stay
+  `tg`/`app-iced` and env vars stay `TG_*`.
+- **Data dir migration**: existing installs move `~/.local/share/tg` →
+  `~/.local/share/telegram-rs` once on first launch (session + `.env` +
+  cache ride along; nobody gets logged out).
 
 ## [v0.8.0] - 2026-08-26
 
