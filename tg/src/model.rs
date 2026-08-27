@@ -144,6 +144,8 @@ pub struct ParticipantRow {
 pub struct SelfProfile {
     /// Display name ("First Last").
     pub name: String,
+    /// Last name (`None` when unset).
+    pub last_name: Option<String>,
     pub username: Option<String>,
     pub phone: Option<String>,
     pub bio: Option<String>,
