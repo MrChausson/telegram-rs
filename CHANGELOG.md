@@ -7,11 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **Opening a composer picker blanked the conversation**: the emoji/sticker
+  stack wrapper was mounted only while a picker was open, which re-parented
+  the message list's scrollable and reset its scroll position — with the
+  bottom-anchored list, every message vanished ("the picker hides the chat").
+  The stack now exists every frame and layers are just pushed/popped.
 - **Emoji rendering in messages**: emoji inside message bubbles and captions
   now render with the system color-emoji font (Noto Color Emoji & co)
   instead of the default sans font's monochrome outlines. The segmenter
   handles ZWJ sequences (👨‍👩‍👧), skin tones (👍🏽), flags (🇫🇷), keycaps
-  (#️⃣) and VS16; messages without emoji keep the plain-text fast path.
+  (#️⃣) and VS16; chat-list previews get the same treatment. Messages
+  without emoji keep the plain-text fast path.
 
 ## [v0.8.1] - 2026-08-27
 

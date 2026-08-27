@@ -116,6 +116,33 @@ fn linkify(s: &str) -> Option<Vec<iced::widget::text::Span<'_, String>>> {
     Some(spans)
 }
 
+/// One-line list-row text (chat names / previews): emoji runs get the
+/// color-emoji font; `None` keeps the cheap plain `text` widget.
+///
+/// Same rationale as [`body_spans`] but without link handling — preview
+/// lines are single-line, pre-ellipsized labels.
+fn line_spans(t: &str) -> Option<Vec<iced::widget::text::Span<'_, String>>> {
+    use iced::widget::text::Span;
+
+    let runs = crate::emoji::emoji_ranges(t);
+    if runs.is_empty() {
+        return None;
+    }
+    let mut spans: Vec<Span<'_, String>> = Vec::new();
+    let mut cursor = 0;
+    for run in runs {
+        if run.start > cursor {
+            spans.push(Span::new(&t[cursor..run.start]));
+        }
+        spans.push(Span::new(&t[run.clone()]).font(emoji_font()));
+        cursor = run.end;
+    }
+    if cursor < t.len() {
+        spans.push(Span::new(&t[cursor..]));
+    }
+    Some(spans)
+}
+
 /// Message body / caption spans: `None` when the text is plain (no link, no
 /// emoji) so callers keep the cheap `text` widget (scroll-perf: most rows
 /// stay on the plain-text hot path).
@@ -1576,16 +1603,36 @@ fn chat_row_button<'a>(row: &'a ChatRow, selected: bool, title: &'a str, sub: &'
     // Matching the winit client: names and previews stay on one line (miss of
     // a built-in ellipsis in iced is handled by `ellipsize` + no wrapping).
     // `title`/`sub` are the pre-ellipsized strings from `State::dialog_short`.
-    let name = text(title)
-        .size(theme::font::NAME)
-        .color(rgb(theme::TEXT_PRIMARY()))
-        .wrapping(iced::widget::text::Wrapping::None)
-        .width(Length::Fill);
-    let sub_text = text(sub)
-        .size(theme::font::MESSAGE)
-        .color(rgb(theme::TEXT_SECONDARY()))
-        .wrapping(iced::widget::text::Wrapping::None)
-        .width(Length::Fill);
+    // Emoji runs go through the color-emoji font (rich spans); plain labels
+    // keep the cheap text widget.
+    let name: Element<'_> = match line_spans(title) {
+        Some(spans) => rich_text(spans)
+            .size(theme::font::NAME)
+            .color(rgb(theme::TEXT_PRIMARY()))
+            .wrapping(iced::widget::text::Wrapping::None)
+            .width(Length::Fill)
+            .into(),
+        None => text(title)
+            .size(theme::font::NAME)
+            .color(rgb(theme::TEXT_PRIMARY()))
+            .wrapping(iced::widget::text::Wrapping::None)
+            .width(Length::Fill)
+            .into(),
+    };
+    let sub_text: Element<'_> = match line_spans(sub) {
+        Some(spans) => rich_text(spans)
+            .size(theme::font::MESSAGE)
+            .color(rgb(theme::TEXT_SECONDARY()))
+            .wrapping(iced::widget::text::Wrapping::None)
+            .width(Length::Fill)
+            .into(),
+        None => text(sub)
+            .size(theme::font::MESSAGE)
+            .color(rgb(theme::TEXT_SECONDARY()))
+            .wrapping(iced::widget::text::Wrapping::None)
+            .width(Length::Fill)
+            .into(),
+    };
 
     // The right meta column (timestamp + unread badge) gets a RESERVED
     // fixed width so long previews can never run under it.
@@ -1706,41 +1753,40 @@ fn conversation_pane(state: &State) -> Element<'_> {
         .into()
     };
 
-    // Emoji picker floats over the conversation area while open: clicks
-    // outside it land on the backdrop layer and close it; scrolling still
-    // reaches the underlying list (the backdrop only captures buttons), and
-    // the composer below the stack stays fully interactive.
-    // Composer panels float over the message list only (never over header or
-    // composer): a body-level stack keeps the chrome interactive and visible.
-    let body: Element<'_> = if state.sticker_picker_open {
-        iced::widget::Stack::with_children(vec![
-            body,
+    // Composer pickers float over the conversation area while open: clicks
+    // outside them land on the backdrop layer and close the panel; scrolling
+    // still reaches the underlying list (the backdrop only captures buttons),
+    // and the composer below the stack stays fully interactive. Pickers float
+    // over the message list only (never header or composer).
+    //
+    // The stack wrapper exists EVERY frame, not only while a picker is up:
+    // mounting it conditionally re-parents the scrollable below (different
+    // widget-tree shape) which resets its scroll position to 0 — with the
+    // bottom-anchored list that blanked every message as soon as a picker
+    // opened ("the picker hides the chat").
+    let mut stack = iced::widget::Stack::with_children(vec![body]);
+    if state.sticker_picker_open {
+        stack = stack.push(
             mouse_area(
                 iced::widget::Space::new()
                     .width(Length::Fill)
                     .height(Length::Fill),
             )
-            .on_press(Message::CloseStickerPicker)
-            .into(),
-            sticker_picker_card(state),
-        ])
-        .into()
+            .on_press(Message::CloseStickerPicker),
+        );
+        stack = stack.push(sticker_picker_card(state));
     } else if state.emoji_panel_open {
-        iced::widget::Stack::with_children(vec![
-            body,
+        stack = stack.push(
             mouse_area(
                 iced::widget::Space::new()
                     .width(Length::Fill)
                     .height(Length::Fill),
             )
-            .on_press(Message::EmojiDismiss)
-            .into(),
-            emoji_panel_floated(state),
-        ])
-        .into()
-    } else {
-        body
-    };
+            .on_press(Message::EmojiDismiss),
+        );
+        stack = stack.push(emoji_panel_floated(state));
+    }
+    let body: Element<'_> = stack.into();
 
     let composer = composer_bar(state);
 
@@ -4062,6 +4108,22 @@ mod tests {
     fn body_spans_plain_text_stays_none() {
         assert!(body_spans("just words").is_none());
         assert!(body_spans("").is_none());
+    }
+
+    #[test]
+    fn line_spans_cover_previews() {
+        // Plain preview: no rich-text cost.
+        assert!(line_spans("novel review of the PR?").is_none());
+        assert!(line_spans("").is_none());
+        // Ellipsis-only decorations stay plain.
+        assert!(line_spans("…").is_none());
+        // Emoji in a preview split into text/emoji/text spans.
+        use iced::font::Font;
+        let spans = line_spans("Great! see you tomorrow 👋").unwrap();
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].text, "Great! see you tomorrow ");
+        assert_eq!(spans[1].text, "👋");
+        assert_eq!(spans[1].font, Some(Font::with_name("Noto Color Emoji")));
     }
 
     #[test]
