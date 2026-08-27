@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Emoji rendering in messages**: emoji inside message bubbles and captions
+  now render with the system color-emoji font (Noto Color Emoji & co)
+  instead of the default sans font's monochrome outlines. The segmenter
+  handles ZWJ sequences (👨‍👩‍👧), skin tones (👍🏽), flags (🇫🇷), keycaps
+  (#️⃣) and VS16; messages without emoji keep the plain-text fast path.
+
 ## [v0.8.1] - 2026-08-27
 
 ### Added

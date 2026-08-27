@@ -116,11 +116,44 @@ fn linkify(s: &str) -> Option<Vec<iced::widget::text::Span<'_, String>>> {
     Some(spans)
 }
 
-/// Message body / caption text: plain `text` when there is no URL, clickable
-/// rich spans otherwise. `WordOrGlyph` wrapping: a word longer than the
-/// bubble (a long URL) breaks at glyph level instead of overflowing.
+/// Message body / caption spans: `None` when the text is plain (no link, no
+/// emoji) so callers keep the cheap `text` widget (scroll-perf: most rows
+/// stay on the plain-text hot path).
+///
+/// Link spans come from [`linkify`]; emoji runs get the color-emoji font —
+/// without it the text engine's fallback resolves emoji codepoints to the
+/// monochrome outlines of the default sans font (DejaVu), which looks bad.
+fn body_spans(t: &str) -> Option<Vec<iced::widget::text::Span<'_, String>>> {
+    use iced::widget::text::Span;
+
+    let runs = crate::emoji::emoji_ranges(t);
+    if runs.is_empty() {
+        return linkify(t);
+    }
+
+    let mut spans: Vec<Span<'_, String>> = Vec::new();
+    let mut cursor = 0;
+    for run in runs {
+        let before = &t[cursor..run.start];
+        if !before.is_empty() {
+            spans.extend(linkify(before).unwrap_or_else(|| vec![Span::new(before)]));
+        }
+        spans.push(Span::new(&t[run.clone()]).font(emoji_font()));
+        cursor = run.end;
+    }
+    let rest = &t[cursor..];
+    if !rest.is_empty() {
+        spans.extend(linkify(rest).unwrap_or_else(|| vec![Span::new(rest)]));
+    }
+    Some(spans)
+}
+
+/// Message body / caption text: plain `text` when there is no URL and no
+/// emoji, clickable/color rich spans otherwise. `WordOrGlyph` wrapping: a
+/// word longer than the bubble (a long URL) breaks at glyph level instead
+/// of overflowing.
 fn message_body<'a>(t: &'a str) -> Element<'a> {
-    match linkify(t) {
+    match body_spans(t) {
         Some(spans) => {
             rich_text(spans)
                 .on_link_click(Message::OpenUrl)
@@ -4024,6 +4057,33 @@ fn window_size_from_args() -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn body_spans_plain_text_stays_none() {
+        assert!(body_spans("just words").is_none());
+        assert!(body_spans("").is_none());
+    }
+
+    #[test]
+    fn body_spans_link_only_uses_linkify() {
+        let spans = body_spans("see https://rust-lang.org").unwrap();
+        assert!(spans.iter().any(|s| s.link.is_some()));
+    }
+
+    #[test]
+    fn body_spans_emoji_get_emoji_font() {
+        use iced::font::Font;
+        let spans = body_spans("Salut 👋 !").unwrap();
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].text, "Salut ");
+        assert_eq!(spans[1].text, "👋");
+        assert_eq!(spans[1].font, Some(Font::with_name("Noto Color Emoji")));
+        assert_eq!(spans[2].text, " !");
+        // Emoji + link in one message: both treatments compose.
+        let spans = body_spans("docs 👉 https://doc.rust-lang.org").unwrap();
+        assert!(spans.iter().any(|s| s.link.is_some()));
+        assert!(spans.iter().any(|s| s.font.is_some()));
+    }
 
     #[test]
     fn message_list_virtualizes_without_panicking() {
