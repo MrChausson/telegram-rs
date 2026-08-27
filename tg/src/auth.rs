@@ -57,7 +57,6 @@ impl Telegram {
 
     /// Logs this session out server-side (`auth.logOut`).
     pub async fn log_out(&self) -> Result<()> {
-        use grammers_client::tl;
         self.client()
             .invoke(&tl::functions::auth::LogOut {})
             .await

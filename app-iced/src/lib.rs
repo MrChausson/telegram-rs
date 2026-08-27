@@ -357,8 +357,6 @@ pub enum Message {
     // QR sign-in pane
     /// The [Phone | QR] switcher was pressed (toggles + starts/stops polling).
     ToggleLoginScreen,
-    /// The QR pane requested a fresh login-token session.
-    QrLoginStart,
     /// Leaving the QR pane ("Use phone number instead"): stop token polling.
     QrCancel,
     /// The message list was scrolled: carries the absolute Y offset of the
@@ -594,10 +592,6 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
                 Request::QrLoginCancel
             };
             let _ = state.req_tx.send(req);
-        }
-        Message::QrLoginStart => {
-            state.qr_started();
-            let _ = state.req_tx.send(Request::QrLoginStart);
         }
         Message::QrCancel => {
             state.qr_cancelled();

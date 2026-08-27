@@ -1024,6 +1024,9 @@ async fn serve_demo(
     // Set once `Request::LogOut` is handled: stops the simulated peer
     // activity so nothing keeps arriving while the UI shows sign-in.
     let mut logged_out = false;
+    // Previous demo QR PNG (unique name per token — the UI caches decoded
+    // images by path); removed once the replacement is on screen.
+    let mut demo_qr_last: Option<std::path::PathBuf> = None;
 
     loop {
         let mut pending: Vec<Request> =
@@ -1443,7 +1446,9 @@ Request::DownloadDoc { chat_id, msg_id } => {
                     let _ = ui_tx.send(UiMessage::LoggedOut);
                 }
                 Request::QrLoginStart => {
-                    // Deterministic pseudo-token (stable PNG within a run).
+                    // Pseudo-token derived from the current time: every Start
+                    // produces a fresh code (unique filename per token so the
+                    // path-cached image re-decodes).
                     let seed = now as u64 ^ 0x5eed;
                     let token: Vec<u8> = (0..32u8)
                         .map(|i| ((seed >> (i % 8)) as u8).wrapping_mul(31 + i).wrapping_add(i))
@@ -1452,11 +1457,17 @@ Request::DownloadDoc { chat_id, msg_id } => {
                     if let Ok(bytes) = png {
                         let dir = cache_dir().join("demo");
                         let _ = std::fs::create_dir_all(&dir);
-                        let path = dir.join("login-qr.png");
+                        let path =
+                            dir.join(format!("login-qr-{}.png", short_hash(&token)));
                         let _ = std::fs::write(&path, bytes);
                         let _ = ui_tx.send(UiMessage::QrCodeReady {
                             path: path.to_string_lossy().into_owned(),
                         });
+                        // UI already switched paths; the old file can go.
+                        if let Some(old) = demo_qr_last.take() {
+                            let _ = std::fs::remove_file(old);
+                        }
+                        demo_qr_last = Some(path);
                     }
                     // Auto-complete after ~8 s so QA can close the flow offline
                     // ("confirmed" flashes midway to exercise the status line).
@@ -1532,6 +1543,11 @@ Request::DownloadDoc { chat_id, msg_id } => {
 }
 
 /// Sign-in flow (phone → code → 2FA), plus QR sign-in start/cancel routing.
+///
+/// Returns once the user is signed in (phone/2FA arm, or the QR poller
+/// flipping `qr_success`) so the caller can save the session and enter the
+/// main `serve()` loop. The QR poller runs detached; it signals completion
+/// through a `watch` channel instead of holding `req_rx` hostage.
 #[allow(clippy::too_many_arguments)]
 async fn serve_login(
     tg: &Telegram,
@@ -1543,8 +1559,17 @@ async fn serve_login(
 ) {
     let mut token: Option<LoginToken> = None;
     let mut password: Option<PasswordToken> = None;
+    // Flipped to true by the QR poller on `auth.LoginToken#Success`; the
+    // generation-counter cancellation (`qr_cancel`) stays the only way a
+    // poller stops otherwise.
+    let (qr_success_tx, qr_success_rx) = tokio::sync::watch::channel(false);
 
     loop {
+        // QR sign-in succeeded elsewhere: the login phase is over, hand
+        // control (and `req_rx`) back to the caller.
+        if *qr_success_rx.borrow() {
+            return;
+        }
         let pending: Vec<Request> = std::iter::from_fn(|| req_rx.try_recv().ok()).collect();
         for req in pending {
             match req {
@@ -1642,6 +1667,7 @@ async fn serve_login(
                         hash.to_string(),
                         ui_tx.clone(),
                         qr_cancel.clone(),
+                        qr_success_tx.clone(),
                     );
                 }
                 Request::QrLoginCancel => {
@@ -1659,6 +1685,7 @@ async fn serve_login(
 /// (server flips the token to a confirmed state), another device authorizes
 /// (success), or the session fails/is cancelled. Runs on its own task so the
 /// request loop stays responsive while the server holds the polls.
+#[allow(clippy::too_many_arguments)]
 fn start_qr_login(
     client: grammers_client::Client,
     gen: u64,
@@ -1666,10 +1693,14 @@ fn start_qr_login(
     api_hash: String,
     ui_tx: mpsc::UnboundedSender<UiMessage>,
     cancel: Arc<std::sync::atomic::AtomicU64>,
+    success: tokio::sync::watch::Sender<bool>,
 ) {
     tokio::spawn(async move {
         use std::sync::atomic::Ordering;
         let mut current: Option<Vec<u8>> = None;
+        // Previous QR PNG on disk; deleted once the replacement is on screen
+        // so rotations don't accumulate files in the cache dir.
+        let mut last_png: Option<std::path::PathBuf> = None;
         let dir = cache_dir().join("media");
         loop {
             if cancel.load(Ordering::SeqCst) != gen {
@@ -1687,12 +1718,24 @@ fn start_qr_login(
                         match png {
                             Ok(bytes) => {
                                 let _ = std::fs::create_dir_all(&dir);
-                                let path = dir.join("login-qr.png");
+                                // Unique name per token: the UI caches the
+                                // decoded image by path (`Handle::from_path`),
+                                // so rewriting one file would show a stale QR
+                                // after a token refresh.
+                                let path =
+                                    dir.join(format!("login-qr-{}.png", short_hash(&tok.token)));
                                 match std::fs::write(&path, bytes) {
                                     Ok(()) => {
                                         let _ = ui_tx.send(UiMessage::QrCodeReady {
                                             path: path.to_string_lossy().into_owned(),
                                         });
+                                        // The UI has already switched to the new
+                                        // path (messages are processed in order),
+                                        // so the previous file can go.
+                                        if let Some(old) = last_png.take() {
+                                            let _ = std::fs::remove_file(old);
+                                        }
+                                        last_png = Some(path);
                                     }
                                     Err(e) => {
                                         let _ = ui_tx.send(UiMessage::QrLoginFailed {
@@ -1714,13 +1757,18 @@ fn start_qr_login(
                     // polling for a scan without re-sending the image.
                 }
                 Ok(tl::enums::auth::LoginToken::MigrateTo(mig)) => {
-                    // Sender pool follows the DC switch; keep polling with the
-                    // migrated token.
+                    // `mig.dc_id` is intentionally ignored: the client's
+                    // sender pool re-targets on the next invoke (grammers
+                    // follows the migration error path), so we just keep
+                    // polling with the migrated token.
                     current = Some(mig.token);
                 }
-                Ok(tl::enums::auth::LoginToken::Success(success)) => {
-                    let name = authorization_user_name(&success.authorization);
+                Ok(tl::enums::auth::LoginToken::Success(success_res)) => {
+                    let name = authorization_user_name(&success_res.authorization);
                     let _ = ui_tx.send(UiMessage::LoginOk { name });
+                    // Tell serve_login to return: the caller then saves the
+                    // session, refreshes dialogs and enters the main loop.
+                    let _ = success.send(true);
                     return;
                 }
                 Err(e) => {
@@ -1733,6 +1781,17 @@ fn start_qr_login(
             tokio::time::sleep(QR_POLL_INTERVAL).await;
         }
     });
+}
+
+/// 64-bit FNV-1a, hex-encoded: short collision-resistant suffix used to give
+/// each QR token its own PNG filename (the UI caches decoded images by path).
+fn short_hash(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
 }
 
 /// Display name ("First Last") of the user inside an `auth.Authorization`.
@@ -3145,6 +3204,24 @@ mod tests {
             fresh.join("telegram-rs")
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn short_hash_is_stable_and_token_sensitive() {
+        let a = [0u8; 32];
+        let b = {
+            let mut t = a;
+            t[31] = 1;
+            t
+        };
+        // Stable for the same token (idempotent re-renders keep one file)…
+        assert_eq!(short_hash(&a), short_hash(&a));
+        // …distinct per token (rotation must produce a new filename, else the
+        // path-cached UI image would go stale), and always filename-safe.
+        assert_ne!(short_hash(&a), short_hash(&b));
+        let h = short_hash(&a);
+        assert_eq!(h.len(), 16);
+        assert!(h.bytes().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
