@@ -1,9 +1,10 @@
-//! MTProto client: grammers wrapper (auth, connect, dialogs, messages).
+//! MTProto client: grammers wrapper (connect, dialogs, messages, media).
+//!
+//! Authentication flows live in the sibling [`crate::auth`] module.
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use grammers_client::client::{LoginToken, PasswordToken, SignInError};
 use grammers_client::media::{Downloadable, Media, Photo, PhotoSize};
 use grammers_client::Client;
 use grammers_client::tl;
@@ -52,48 +53,6 @@ impl Telegram {
     pub fn take_updates(&mut self) -> tokio::sync::mpsc::UnboundedReceiver<UpdatesLike> {
         let empty = tokio::sync::mpsc::unbounded_channel::<UpdatesLike>().1;
         std::mem::replace(&mut self.updates, empty)
-    }
-
-    /// Returns true if a valid session is already connected.
-    pub async fn is_authorized(&self) -> Result<bool> {
-        self.client
-            .is_authorized()
-            .await
-            .context("checking authorization")
-    }
-
-    /// Step 1: request a verification code for a phone number.
-    pub async fn request_login_code(&self, api_hash: &str, phone: &str) -> Result<LoginToken> {
-        self.client
-            .request_login_code(phone, api_hash)
-            .await
-            .context("requesting code")
-    }
-
-    /// Step 2: sign in with the received code (may require a 2FA password).
-    pub async fn sign_in(
-        &self,
-        token: &LoginToken,
-        code: &str,
-    ) -> Result<Result<(), SignInError>> {
-        Ok(self.client.sign_in(token, code).await.map(|_| ()))
-    }
-
-    /// Step 2b: sign in with the 2FA password.
-    ///
-    /// `Ok(Ok(()))` means signed in; `Ok(Err(new_token))` means the password
-    /// was wrong and Telegram supplied a fresh token to retry with.
-    pub async fn check_password(
-        &self,
-        password_token: PasswordToken,
-        password: &str,
-    ) -> Result<Result<(), PasswordToken>, anyhow::Error> {
-        match self.client.check_password(password_token, password).await {
-            Ok(_) => Ok(Ok(())),
-            Err(SignInError::InvalidPassword(new_token)) => Ok(Err(new_token)),
-            Err(SignInError::PasswordRequired(new_token)) => Ok(Err(new_token)),
-            Err(e) => Err(anyhow::anyhow!("2FA sign in: {e}")),
-        }
     }
 
     /// Lists the user's chats (dialogs), ordered by activity.
