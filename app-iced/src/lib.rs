@@ -230,6 +230,8 @@ pub enum Message {
     SettingsTab(state::SettingsTab),
     /// The First name field of the profile edit form changed.
     SettingsNameChanged(String),
+    /// The Last name field of the profile edit form changed.
+    SettingsLastNameChanged(String),
     /// The Bio field of the profile edit form changed.
     SettingsBioChanged(String),
     /// The profile edit form's Save button.
@@ -428,6 +430,7 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::CloseSettings => state.close_settings(),
         Message::SettingsTab(tab) => state.set_settings_tab(tab),
         Message::SettingsNameChanged(t) => state.edit_name = t,
+        Message::SettingsLastNameChanged(t) => state.edit_last_name = t,
         Message::SettingsBioChanged(b) => state.edit_bio = b,
         Message::SaveProfile => state.submit_profile_edit(),
         Message::ToggleNotifications => state.toggle_notifications(),
@@ -1120,6 +1123,13 @@ fn settings_profile_tab(state: &State) -> Element<'_> {
     col = col.push(
         text_input("First name", &state.edit_name)
             .on_input(Message::SettingsNameChanged)
+            .size(theme::font::TIMESTAMP)
+            .padding(8)
+            .style(text_input_style),
+    );
+    col = col.push(
+        text_input("Last name", &state.edit_last_name)
+            .on_input(Message::SettingsLastNameChanged)
             .size(theme::font::TIMESTAMP)
             .padding(8)
             .style(text_input_style),
@@ -2305,30 +2315,47 @@ fn chat_header(
             .into()
     };
 
-    let perf_badge: Element<'static> = match perf {
-        Some(fps) => container(
-            text(fps)
-                .size(theme::font::TIMESTAMP)
-                .color(rgb(theme::ACCENT())),
-        )
-        .padding([2, 6])
-        .style(move |_theme| container::Style {
-            background: Some(iced::Background::Color(rgb(theme::PERF_BADGE_BG()))),
-            border: iced::Border {
-                radius: 6.0.into(),
-                ..iced::Border::default()
-            },
-            ..container::Style::default()
-        })
-        .into(),
-        None => horizontal_spacer(),
-    };
+    let mut actions = row![]
+        .spacing(6)
+        .align_y(Alignment::Center);
+    actions = actions.push(
+        button(icon(Icon::Search, theme::ICON(), 20.0))
+            .on_press(Message::OpenInChatSearch)
+            .padding(6)
+            .style(flat_button),
+    );
+    actions = actions.push(
+        button(icon(Icon::Info, theme::ICON(), 20.0))
+            .on_press(Message::ToggleInfo)
+            .padding(6)
+            .style(flat_button),
+    );
+    if let Some(fps) = perf {
+        actions = actions.push(
+            container(
+                text(fps)
+                    .size(theme::font::TIMESTAMP)
+                    .color(rgb(theme::ACCENT())),
+            )
+            .padding([2, 6])
+            .style(move |_theme| container::Style {
+                background: Some(iced::Background::Color(rgb(theme::PERF_BADGE_BG()))),
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..iced::Border::default()
+                },
+                ..container::Style::default()
+            }),
+        );
+    }
 
     container(
         row![
             // No back button: like Telegram Desktop, a chat always stays
             // open (the first one auto-opens at startup).
             // Avatar + name open/close the info panel (same as the ℹ️ icon).
+            // The name column fills the leftover width, pushing the search/info
+            // buttons flush against the right edge like Telegram Desktop.
             button(
                 row![
                     avatar_circle(avatar_path, title, theme::layout::AVATAR_CHAT),
@@ -2339,24 +2366,21 @@ fn chat_header(
             )
             .on_press(Message::ToggleInfo)
             .padding(4)
+            .width(Length::Fill)
             .style(flat_button),
-            horizontal_spacer(),
-            button(icon(Icon::Search, theme::ICON(), 20.0))
-                .on_press(Message::OpenInChatSearch)
-                .padding(6)
-                .style(flat_button),
-            button(icon(Icon::Info, theme::ICON(), 20.0))
-                .on_press(Message::ToggleInfo)
-                .padding(6)
-                .style(flat_button),
-            perf_badge,
+            actions,
         ]
         .spacing(6)
         .align_y(Alignment::Center),
     )
     .width(Length::Fill)
     .height(theme::layout::CHAT_HEADER_H)
-    .padding([4.0, 14.0])
+    .padding(iced::Padding {
+        top: 4.0,
+        right: 8.0,
+        bottom: 4.0,
+        left: 14.0,
+    })
     .align_y(Alignment::Center)
     .style(header_bg)
     .into()
@@ -2366,11 +2390,13 @@ fn chat_header(
 // Emoji picker panel (composer)
 // ---------------------------------------------------------------------------
 
-/// Size of the floating emoji panel (logical px).
-const EMOJI_PANEL_W: f32 = 340.0;
-const EMOJI_PANEL_H: f32 = 280.0;
+/// Size of the floating emoji panel (logical px). Kept small on purpose:
+/// it pops above the composer like a context menu and must not swallow the
+/// conversation behind it.
+const EMOJI_PANEL_W: f32 = 300.0;
+const EMOJI_PANEL_H: f32 = 240.0;
 /// Emoji grid columns.
-const EMOJI_COLS: usize = 8;
+const EMOJI_COLS: usize = 7;
 /// Rendered size of one emoji glyph in the grid.
 const EMOJI_FONT_SIZE: f32 = 22.0;
 
@@ -2441,7 +2467,7 @@ fn emoji_font() -> iced::Font {
     }
 }
 
-/// One 8-column grid of emoji buttons (transparent, light hover).
+/// One 7-column grid of emoji buttons (transparent, light hover).
 ///
 /// Cells explicitly request the system color-emoji font: the default
 /// font chain resolves some codepoints (❤ ⚠ ✂ …) to monochrome outlines

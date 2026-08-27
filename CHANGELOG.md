@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Last name editing**: the profile edit form gains a "Last name" field.
+  `SelfProfile`/`MyProfile` carry the server's `last_name` end-to-end
+  (tg → network → bridge → state) instead of re-splitting the display name,
+  and Save now sends it (`None` semantics dropped: an emptied field clears it).
+
+### Changed
+- **Emoji picker** pops above the composer like a context menu (300×240,
+  bottom-left anchored) so the conversation behind it stays readable.
+
+### Fixed
+- Chat header search/info buttons sit flush against the right edge again:
+  a stray `Length::Fill` spacer (plus the idle perf-badge slot) was splitting
+  the free width and floating the icons mid-header.
+
 ## [v0.8.0] - 2026-08-26
 
 ### Added
