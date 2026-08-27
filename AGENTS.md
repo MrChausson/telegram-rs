@@ -43,7 +43,9 @@ cargo clippy --workspace --all-targets
 
 **Never measure UI speed in a debug build.** Release render is ~3 ms/frame at
 1250×1514; debug is ~25.6 ms/frame (~10 fps) — a debug `cargo run` alone looks
-like a perf bug.
+like a perf bug. Conversely, visual QA (screenshots, layout checks) does NOT
+need a release build: `cargo run -p app-iced -- --demo` in debug is slow but
+perfect for inspection. Release builds are for perf measurement only.
 
 ## Runtime flags (in `app-iced`)
 
