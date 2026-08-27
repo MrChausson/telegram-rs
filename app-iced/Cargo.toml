@@ -35,6 +35,8 @@ rodio = { version = "0.19", default-features = false, features = ["flac", "vorbi
 notify-rust = "4"
 # System tray (StatusNotifier on Wayland/X11, no GTK): open/quit from the icon.
 ksni = { version = "0.3", default-features = false, features = ["tokio"] }
+# QR sign-in: dependency-free bool-matrix generator (rasterized in qr_png.rs).
+qrcodegen = "1"
 
 # Perf regression harness: `cargo bench -p app-iced` builds the real view
 # headlessly (lib target) and measures build/layout/raster time vs message count.
