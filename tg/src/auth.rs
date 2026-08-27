@@ -52,4 +52,14 @@ impl Telegram {
             Err(e) => Err(anyhow::anyhow!("2FA sign in: {e}")),
         }
     }
+
+    /// Logs this session out server-side (`auth.logOut`).
+    pub async fn log_out(&self) -> Result<()> {
+        use grammers_client::tl;
+        self.client()
+            .invoke(&tl::functions::auth::LogOut {})
+            .await
+            .map(|_: tl::enums::auth::LoggedOut| ())
+            .context("logging out")
+    }
 }

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Account sign-out**: a "Log out" action in Settings ▸ Profile runs the
+  server-side `auth.logOut` (best-effort), deletes the local session file and
+  returns to the sign-in screen (theme and emoji recents are kept). Gated by
+  an inline Yes/No confirmation; Escape cancels it. Known limitation: the
+  MTProto connection stays alive until the next app launch, so pushes may
+  still arrive while the sign-in screen is shown.
 - **AUR package `telegram-rs-bin`**: Arch users install via `paru/yay -S
   telegram-rs-bin`; the release workflow publishes the PKGBUILD to the AUR
   automatically on every `v*` tag (deploy key in the `AUR_SSH_PRIVATE_KEY`
