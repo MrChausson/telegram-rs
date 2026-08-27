@@ -4064,6 +4064,11 @@ pub fn run() -> iced::Result {
     let (w, h) = window_size_from_args();
     iced::application(boot, update, view)
         .subscription(subscription)
+        .window(iced::window::Settings {
+            // Taskbar/compositor icon: the same code-drawn logo as the tray.
+            icon: Some(window_icon()),
+            ..Default::default()
+        })
         .window_size((w, h))
         .title("Telegram RS")
         // Base iced palette follows our mode: default-styled widgets (and
@@ -4071,6 +4076,14 @@ pub fn run() -> iced::Result {
         // Custom colors all come from `theme::*()` regardless.
         .theme(app_theme)
         .run()
+}
+
+/// The window icon: the app logo rasterized off the shared `Icon::Logo`
+/// renderer (accent disc + white send-plane), same mark as the tray.
+fn window_icon() -> iced::window::Icon {
+    const PX: u32 = 128;
+    let pixmap = crate::icons::render_logo_rgba(PX);
+    iced::window::icon::from_rgba(pixmap.data().to_vec(), PX, PX).expect("window icon")
 }
 
 /// The application theme: iced's own palette follows our light/dark mode so

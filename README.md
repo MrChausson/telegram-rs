@@ -43,6 +43,9 @@ Download → run → sign in.
 **Linux** — pick one:
 
 ```bash
+# Arch Linux / Manjaro (AUR, updated automatically on every release)
+paru -S telegram-rs-bin        # or: yay -S telegram-rs-bin
+
 # AppImage (no install needed)
 chmod +x telegram-rs-x86_64.AppImage
 ./telegram-rs-x86_64.AppImage
@@ -65,7 +68,7 @@ tar xzf telegram-rs-macos-universal.tar.gz
 
 ```powershell
 Expand-Archive telegram-rs-windows-x86_64.zip -DestinationPath telegram-rs
-telegram-rs\telegram-rs.exe  # or right-click → Extract and double-click tg.exe (SmartScreen: "More info" → "Run anyway")
+telegram-rs\telegram-rs.exe  # or right-click → Extract and double-click telegram-rs.exe (SmartScreen: "More info" → "Run anyway")
 ```
 
 ### 2. First launch: sign in inside the app (any OS)
