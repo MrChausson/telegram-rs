@@ -2698,7 +2698,12 @@ fn chat_header(
                 .align_y(Alignment::Center),
             )
             .on_press(Message::ToggleInfo)
-            .padding(4)
+            // Vertical padding 2, not 4: the 40 px avatar + 2×4 uniform
+            // padding overflowed the header's 44 px content area (52 minus
+            // the container's 4 px top/bottom), clipping the circle's top
+            // and bottom. 40 + 2×2 = 44 fits exactly, 6 px clear of both
+            // header edges.
+            .padding([2, 4])
             .width(Length::Fill)
             .style(flat_button),
             actions,
