@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **AUR package `telegram-rs-bin`**: Arch users install via `paru/yay -S
+  telegram-rs-bin`; the release workflow publishes the PKGBUILD to the AUR
+  automatically on every `v*` tag (deploy key in the `AUR_SSH_PRIVATE_KEY`
+  secret; template: openwhispr-appimage). Ships the prebuilt tarball binary
+  plus menu entry, icon and license; `ffmpeg` is an optdepend for voice
+  notes. Initial publication: v0.8.1.
+
 ### Changed
 - **Real logo everywhere**: the accent-disc + send-plane mark (already used
   in-app and by the tray) now backs the window/taskbar icon (`window::icon`,
@@ -14,13 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Tray strings that still said "tg" (id, title, tooltip, "Open tg",
   thread name) now say Telegram RS.
 
-### Added
-- **AUR package `telegram-rs-bin`**: Arch users install via `paru/yay -S
-  telegram-rs-bin`; the release workflow publishes the PKGBUILD to the AUR
-  automatically on every `v*` tag (deploy key in the `AUR_SSH_PRIVATE_KEY`
-  secret; template: openwhispr-appimage). Ships the prebuilt tarball binary
-  plus menu entry, icon and license; `ffmpeg` is an optdepend for voice
-  notes. Initial publication: v0.8.1.
+### Fixed
+- **Opening a composer picker blanked the conversation**: the emoji/sticker
+  stack wrapper was mounted only while a picker was open, which re-parented
+  the message list's scrollable and reset its scroll position — with the
+  bottom-anchored list, every message vanished ("the picker hides the chat").
+  The stack now exists every frame and layers are just pushed/popped.
+- **Emoji rendering in messages**: emoji inside message bubbles and captions
+  now render with the system color-emoji font (Noto Color Emoji & co)
+  instead of the default sans font's monochrome outlines. The segmenter
+  handles ZWJ sequences (👨‍👩‍👧), skin tones (👍🏽), flags (🇫🇷), keycaps
+  (#️⃣) and VS16; chat-list previews get the same treatment. Messages
+  without emoji keep the plain-text fast path.
 
 ## [v0.8.1] - 2026-08-27
 
