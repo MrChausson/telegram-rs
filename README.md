@@ -136,14 +136,12 @@ batches — each release moves the needle, not dribbles.
 
 | Area | In V1 |
 |---|---|
-| 📤 Media | Custom emoji *(stickers, photos, documents, videos, GIFs + voice playback already shipped)* |
-| 💬 Messaging | Custom emoji in composer *(replies + forwards already shipped)* |
-| 🔍 Search | *(global + in-chat already shipped)* |
-| 👥 Groups | Create and manage groups/channels, admin tools, topics *(member list with roles already shipped)* |
-| 🎨 Experience | Light theme, settings *(notifications + tray already shipped)* |
-| 👤 Accounts | QR login, logout, multiple accounts |
-| 🔐 Privacy | Secret (end-to-end) chats |
+| 👤 Accounts | Logout, QR login *(multi-account: not planned for now)* |
+| 👥 Groups | Admin tools (promote/demote, ban/kick), then forum topics *(create/manage groups & channels, member list with roles already shipped)* |
+| 🔐 Privacy | Secret (end-to-end) chats *(later)* |
 | 📞 Calls | Voice and video calls |
+
+> Custom emoji is premium-gated upstream and deliberately out of scope.
 
 ## Why it's light
 
