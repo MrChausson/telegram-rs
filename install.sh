@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Linux installation of `tg` (minimalist Telegram client).
+# Linux installation of Telegram RS (minimalist Telegram client in Rust).
 # Installs the binary into ~/.local/bin and adds a menu entry.
 # Usage: ./install.sh
 set -euo pipefail
 
-BIN="${TGRAPH:-$(dirname "$0")/target/release/app-iced}"
+BIN="${TG_BIN:-$(dirname "$0")/target/release/telegram-rs}"
 PREFIX="${PREFIX:-$HOME/.local}"
 
 if [[ ! -x "$BIN" ]]; then
@@ -16,15 +16,15 @@ fi
 BINDIR="$PREFIX/bin"
 APPDIR="$PREFIX/share/applications"
 ICONDIR="$PREFIX/share/icons/hicolor/64x64/apps"
-DEST="$BINDIR/tg"
+DEST="$BINDIR/telegram-rs"
 
 install -d "$BINDIR" "$APPDIR" "$ICONDIR"
 install -m 0755 "$BIN" "$DEST"
 
-cat > "$APPDIR/tg.desktop" <<EOF
+cat > "$APPDIR/telegram-rs.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=tg
+Name=Telegram RS
 Comment=Minimalist Telegram client in Rust
 Exec=$DEST
 Terminal=false
@@ -33,12 +33,12 @@ StartupNotify=true
 EOF
 
 # Icon: a small hand-written SVG so the .desktop entry never shows a blank image.
-ICON="$ICONDIR/tg.svg"
+ICON="$ICONDIR/telegram-rs.svg"
 cat > "$ICON" <<'EOF'
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128">
   <rect x="4" y="4" width="120" height="120" rx="28" fill="#1e1f22"/>
   <circle cx="64" cy="64" r="48" fill="#2b2f36"/>
-  <text x="64" y="82" font-family="sans-serif" font-size="56" font-weight="bold" fill="#32a852" text-anchor="middle">tg</text>
+  <text x="64" y="82" font-family="sans-serif" font-size="48" font-weight="bold" fill="#32a852" text-anchor="middle">TR</text>
 </svg>
 EOF
 
@@ -48,5 +48,5 @@ if command -v update-desktop-database >/dev/null 2>&1; then
 fi
 
 echo "Installed: $DEST"
-echo "Menu entry: $APPDIR/tg.desktop"
-echo "Launch with: tg (or from the application menu)."
+echo "Menu entry: $APPDIR/telegram-rs.desktop"
+echo "Launch with: telegram-rs (or from the application menu)."

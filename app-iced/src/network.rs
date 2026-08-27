@@ -41,7 +41,10 @@ const DEFAULT_API_HASH: Option<&str> = option_env!("TG_API_HASH");
 static UI_RX: std::sync::Mutex<Option<mpsc::UnboundedReceiver<UiMessage>>> =
     std::sync::Mutex::new(None);
 
-/// Per-user data directory (same logic as the custom `app`).
+/// Per-user data directory under the XDG base (`…/telegram-rs`). A one-shot
+/// migration moves a legacy `…/tg` directory aside on first run so existing
+/// sessions (`.env`, `.tg.session`) and the media cache survive the rename
+/// to "Telegram RS" without logging anyone out.
 pub fn data_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("TG_DATA_DIR") {
         return PathBuf::from(p);
@@ -70,8 +73,25 @@ pub fn data_dir() -> PathBuf {
             home
         }
     };
-    base.map(|b| b.join("tg"))
+    base.map(migrate_legacy_data_dir)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Directory name used for the per-user data since the Telegram RS rename.
+const DATA_SUBDIR: &str = "telegram-rs";
+/// Pre-rename directory name, migrated away once.
+const LEGACY_DATA_SUBDIR: &str = "tg";
+
+fn migrate_legacy_data_dir(base: PathBuf) -> PathBuf {
+    let new = base.join(DATA_SUBDIR);
+    let old = base.join(LEGACY_DATA_SUBDIR);
+    // First launch after the rename (and only that): move the whole tree —
+    // session, .env and cache ride along. Both live under the same parent,
+    // so the rename cannot cross filesystems.
+    if !new.exists() && old.is_dir() {
+        let _ = std::fs::rename(&old, &new);
+    }
+    new
 }
 
 pub fn env_path() -> PathBuf {
@@ -2881,8 +2901,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_data_dir_migrates_once() {
+        let base = std::env::temp_dir().join(format!("telegram-rs-mig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("tg")).unwrap();
+        std::fs::write(base.join("tg").join(".tg.session"), "s").unwrap();
+
+        // First call moves the legacy tree under the new name.
+        let dir = migrate_legacy_data_dir(base.clone());
+        assert_eq!(dir, base.join("telegram-rs"));
+        assert!(dir.join(".tg.session").exists());
+        assert!(!base.join("tg").exists());
+
+        // Later calls are no-ops (existing dir is never clobbered).
+        assert_eq!(migrate_legacy_data_dir(base.clone()), dir);
+
+        // A fresh install has no legacy tree: nothing to do.
+        let fresh = base.join("fresh-base");
+        std::fs::create_dir_all(&fresh).unwrap();
+        assert_eq!(
+            migrate_legacy_data_dir(fresh.clone()),
+            fresh.join("telegram-rs")
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn demo_voice_wav_is_a_decodable_wave_file() {
-        let dir = std::env::temp_dir().join("tg-wav-test");
+        let dir = std::env::temp_dir().join("telegram-rs-wav-test");
         let _ = std::fs::create_dir_all(&dir);
         let p = demo_voice_wav(&dir);
         // The file exists, has a plausible RIFF header, and rodio can decode it.

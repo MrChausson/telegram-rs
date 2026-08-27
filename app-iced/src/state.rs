@@ -2274,7 +2274,7 @@ mod tests {
 
     #[test]
     fn last_chat_marker_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("tg-lastchat-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("telegram-rs-lastchat-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("last-chat");
@@ -3257,7 +3257,7 @@ mod tests {
 
     #[test]
     fn emoji_recents_persistence_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("tg-emoji-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("telegram-rs-emoji-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("emoji-recents");
@@ -3293,7 +3293,7 @@ mod tests {
 
     #[test]
     fn theme_mode_persistence_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("tg-theme-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("telegram-rs-theme-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("theme-mode");
@@ -3585,7 +3585,7 @@ mod tests {
     #[test]
     fn notifications_flip_updates_shared_flag_and_persists() {
         use std::sync::atomic::Ordering;
-        let dir = std::env::temp_dir().join(format!("tg-notif-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("telegram-rs-notif-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("notifications");

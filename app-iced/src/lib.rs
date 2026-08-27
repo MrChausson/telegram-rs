@@ -3986,7 +3986,7 @@ pub fn run() -> iced::Result {
     iced::application(boot, update, view)
         .subscription(subscription)
         .window_size((w, h))
-        .title("tg — Iced prototype")
+        .title("Telegram RS")
         // Base iced palette follows our mode: default-styled widgets (and
         // the login screen, which has no explicit background) adapt too.
         // Custom colors all come from `theme::*()` regardless.
