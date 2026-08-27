@@ -45,32 +45,33 @@ jobs:
       - name: Tarball Linux
         run: |
           mkdir -p dist
-          tar -C target/release -czf dist/tg-linux-$(uname -m).tar.gz app-iced
+          cp target/release/telegram-rs dist/telegram-rs
+          tar -C dist -czf dist/telegram-rs-linux-$(uname -m).tar.gz telegram-rs
           cp install.sh dist/install.sh
           chmod +x dist/install.sh
 
       - name: AppImage - AppDir layout
         run: |
           rm -rf AppDir && mkdir -p AppDir/usr/bin
-          cp target/release/app-iced AppDir/usr/bin/tg
+          cp target/release/telegram-rs AppDir/usr/bin/telegram-rs
           # AppImage runtime entry point (required for the image to launch)
           cat > AppDir/AppRun <<'EOF'
           #!/bin/sh
           SELF="$(dirname "$(readlink -f "$0")")"
-          exec "$SELF/usr/bin/tg" "$@"
+          exec "$SELF/usr/bin/telegram-rs" "$@"
           EOF
           chmod +x AppDir/AppRun
           # Icon (PNG) + menu entry
           convert -size 256x256 xc:'#1e1f22' -fill '#32a852' \
             -font DejaVu-Sans-Bold -pointsize 140 -gravity center \
-            -annotate 0 'tg' AppDir/tg.png
-          cat > AppDir/tg.desktop <<'EOF'
+            -annotate 0 'TR' AppDir/telegram-rs.png
+          cat > AppDir/telegram-rs.desktop <<'EOF'
           [Desktop Entry]
           Type=Application
-          Name=tg
+          Name=Telegram RS
           Comment=Minimal Telegram client in Rust
           Exec=AppRun
-          Icon=tg
+          Icon=telegram-rs
           Terminal=false
           Categories=Network;Chat;
           EOF
@@ -79,12 +80,12 @@ jobs:
         run: |
           wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O /tmp/appimagetool
           chmod +x /tmp/appimagetool
-          ARCH=x86_64 /tmp/appimagetool --appimage-extract-and-run AppDir dist/tg-x86_64.AppImage
+          ARCH=x86_64 /tmp/appimagetool --appimage-extract-and-run AppDir dist/telegram-rs-x86_64.AppImage
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: tg-linux
+          name: telegram-rs-linux
           path: dist/
           if-no-files-found: error
 
@@ -119,15 +120,15 @@ jobs:
         run: |
           mkdir -p dist
           lipo -create \
-            target/x86_64-apple-darwin/release/app-iced \
-            target/aarch64-apple-darwin/release/app-iced \
-            -output dist/tg
-          tar -C dist -czf dist/tg-macos-universal.tar.gz tg
+            target/x86_64-apple-darwin/release/telegram-rs \
+            target/aarch64-apple-darwin/release/telegram-rs \
+            -output dist/telegram-rs
+          tar -C dist -czf dist/telegram-rs-macos-universal.tar.gz telegram-rs
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: tg-macos
+          name: telegram-rs-macos
           path: dist/
           if-no-files-found: error
 
@@ -153,13 +154,13 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist, pkg | Out-Null
-          Copy-Item target/release/app-iced.exe pkg/tg.exe
-          Compress-Archive -Path pkg/tg.exe -DestinationPath dist/tg-windows-x86_64.zip
+          Copy-Item target/release/telegram-rs.exe pkg/telegram-rs.exe
+          Compress-Archive -Path pkg/telegram-rs.exe -DestinationPath dist/telegram-rs-windows-x86_64.zip
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: tg-windows
+          name: telegram-rs-windows
           path: dist/
           if-no-files-found: error
 
@@ -173,7 +174,7 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: tg-*
+          pattern: telegram-rs-*
           path: dist
           merge-multiple: true
 

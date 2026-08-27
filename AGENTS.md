@@ -1,4 +1,4 @@
-# AGENTS.md — tg (Rust Telegram client)
+# AGENTS.md — Telegram RS (Rust Telegram client)
 
 Session bootstrap guide: architecture, commands, hard-won build/perf knowledge,
 and environment quirks. Read top-to-bottom before touching code.
@@ -6,6 +6,12 @@ and environment quirks. Read top-to-bottom before touching code.
 ## Project at a glance
 
 Minimal Telegram desktop client in Rust, real-time via MTProto push.
+
+> Naming: the public identity is **Telegram RS** (window title, installed
+> binary `telegram-rs`, data dir `~/.local/share/telegram-rs`, release assets
+> `telegram-rs-*`). Internal crates keep their short names (`tg`, `app-iced`)
+> and env vars stay `TG_*`. The old per-user dir `~/.local/share/tg` is
+> migrated automatically on first launch of the renamed build.
 
 - **`tg/`** — core networking: wrapper around `grammers` (MTProto), persisted
   session, dialogs/messages/avatars/photos, typing/read-receipts.
