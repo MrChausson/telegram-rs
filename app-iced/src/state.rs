@@ -186,6 +186,42 @@ pub enum ConfirmKind {
     Delete,
 }
 
+/// Destructive member-admin action awaiting its inline Yes/No confirmation
+/// (info panel member rows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminConfirm {
+    /// Ban the member forever (cannot rejoin).
+    Ban,
+    /// Remove the member from the group (may rejoin).
+    Remove,
+}
+
+/// One admin action offered by a member row's context menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminAction {
+    /// Grant every admin right.
+    Promote,
+    /// Revoke every admin right.
+    Demote,
+    /// Ban the member forever.
+    Ban,
+    /// Remove the member (kick only).
+    Remove,
+}
+
+/// Menu items for a member row, as data (pure; unit-tested): the owner and
+/// yourself get no menu at all, an admin offers Demote+Ban, a plain member
+/// offers Promote+Ban+Remove.
+pub fn admin_menu_items(role: crate::bridge::ParticipantRole, is_self: bool) -> Vec<AdminAction> {
+    if is_self || role == crate::bridge::ParticipantRole::Creator {
+        return Vec::new();
+    }
+    match role {
+        crate::bridge::ParticipantRole::Admin => vec![AdminAction::Demote, AdminAction::Ban],
+        _ => vec![AdminAction::Promote, AdminAction::Ban, AdminAction::Remove],
+    }
+}
+
 /// Which tab of the settings panel is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
@@ -368,6 +404,13 @@ pub struct State {
     pub participants: Vec<ParticipantRow>,
     /// Member id awaiting kick confirmation (inline Yes/No on its row).
     pub kick_confirm: Option<i64>,
+    /// Member id whose admin context menu is open (right-click on a row).
+    pub admin_menu: Option<i64>,
+    /// Destructive admin action pending confirmation: (kind, member id).
+    pub admin_confirm: Option<(AdminConfirm, i64)>,
+    /// Bot-api id of the signed-in user (`MemberSelfId`); admin actions
+    /// never apply to yourself.
+    pub admin_self_id: Option<i64>,
     /// Local mute flag of the open chat (optimistic; drives the button label).
     pub muted: bool,
 
@@ -533,6 +576,9 @@ impl State {
             chat_info: None,
             participants: Vec::new(),
             kick_confirm: None,
+            admin_menu: None,
+            admin_confirm: None,
+            admin_self_id: None,
             muted: false,
             theme_mode: ThemeMode::Dark,
             emoji_panel_open: false,
@@ -1112,6 +1158,20 @@ impl State {
                     self.kick_confirm = None;
                 }
             }
+            UiMessage::MemberUpdated { chat_id, user_id } => {
+                // An admin action landed server-side: refresh the member
+                // list of the open chat.
+                if self.open_chat == Some(chat_id) && self.info_open {
+                    if self.admin_confirm.is_some_and(|(_, u)| u == user_id) {
+                        self.admin_confirm = None;
+                    }
+                    if self.admin_menu == Some(user_id) {
+                        self.admin_menu = None;
+                    }
+                    let _ = self.req_tx.send(Request::GetParticipants { id: chat_id });
+                }
+            }
+            UiMessage::MemberSelfId { id } => self.admin_self_id = Some(id),
             UiMessage::LoginCodeRequired => {
                 self.login_step = LoginStep::Code;
                 self.login_input.clear();
@@ -1357,7 +1417,10 @@ impl State {
     }
 
     /// Dismisses the context menu (a click outside, or opening another one).
+    /// Also closes the info panel's member admin menu (same dismissal
+    /// contract: click-outside).
     pub fn dismiss_menu(&mut self) {
+        self.admin_menu = None;
         if self.context_menu.is_none() {
             return;
         }
@@ -1386,6 +1449,12 @@ impl State {
         }
         if self.kick_confirm.take().is_some() {
             return; // only cancel the confirmation
+        }
+        if self.admin_confirm.take().is_some() {
+            return; // only cancel the admin confirmation
+        }
+        if self.admin_menu.take().is_some() {
+            return; // only close the admin menu
         }
         if self.info_open {
             self.close_info();
@@ -1721,6 +1790,8 @@ impl State {
         self.chat_info = None;
         self.participants.clear();
         self.kick_confirm = None;
+        self.admin_menu = None;
+        self.admin_confirm = None;
         if let Some(id) = self.open_chat {
             let _ = self.req_tx.send(Request::GetChatInfo { id });
             let _ = self.req_tx.send(Request::GetParticipants { id });
@@ -1731,6 +1802,8 @@ impl State {
     pub fn close_info(&mut self) {
         self.info_open = false;
         self.kick_confirm = None;
+        self.admin_menu = None;
+        self.admin_confirm = None;
     }
 
     /// The Mute button: flips the local flag and pushes it server-side.
@@ -1757,6 +1830,68 @@ impl State {
             return;
         };
         let _ = self.req_tx.send(Request::KickParticipant { id, user_id });
+    }
+
+    // Admin tools (member rows of the info panel)
+    // -------------------------------------------------------------------
+
+    /// Right-click on a member row: opens its admin menu — unless the row
+    /// is the group owner or yourself (no menu items there).
+    pub fn admin_open_menu(&mut self, user_id: i64) {
+        let Some(p) = self.participants.iter().find(|p| p.id == user_id) else {
+            return;
+        };
+        let is_self = self.admin_self_id == Some(user_id);
+        if admin_menu_items(p.role, is_self).is_empty() {
+            return;
+        }
+        self.admin_menu = Some(user_id);
+        self.admin_confirm = None;
+        self.kick_confirm = None;
+    }
+
+    /// Applies a menu action: promote/demote fire immediately; the
+    /// destructive ban/remove arm the inline Yes/No confirmation instead.
+    pub fn admin_action(&mut self, user_id: i64, action: AdminAction) {
+        match action {
+            AdminAction::Promote | AdminAction::Demote => {
+                self.admin_menu = None;
+                let Some(id) = self.open_chat else {
+                    return;
+                };
+                let req = match action {
+                    AdminAction::Promote => Request::AdminPromote { id, user_id },
+                    _ => Request::AdminDemote { id, user_id },
+                };
+                let _ = self.req_tx.send(req);
+            }
+            AdminAction::Ban | AdminAction::Remove => {
+                if self.participants.iter().any(|p| p.id == user_id) {
+                    let kind = if action == AdminAction::Ban {
+                        AdminConfirm::Ban
+                    } else {
+                        AdminConfirm::Remove
+                    };
+                    self.admin_confirm = Some((kind, user_id));
+                }
+                self.admin_menu = None;
+            }
+        }
+    }
+
+    /// Confirms the pending ban/remove: sends the request; the
+    /// `MemberUpdated` echo refreshes the member list.
+    pub fn admin_confirmed(&mut self) {
+        let Some((kind, user_id)) = self.admin_confirm.take() else {
+            return;
+        };
+        let Some(id) = self.open_chat else {
+            return;
+        };
+        let _ = self.req_tx.send(match kind {
+            AdminConfirm::Ban => Request::AdminBan { id, user_id, kick_only: false },
+            AdminConfirm::Remove => Request::AdminBan { id, user_id, kick_only: true },
+        });
     }
 
     /// The @username line was clicked: returns the text to copy.
@@ -1891,6 +2026,8 @@ impl State {
         self.chat_info = None;
         self.participants.clear();
         self.kick_confirm = None;
+        self.admin_menu = None;
+        self.admin_confirm = None;
         self.muted = false;
         self.pinned_id = None;
         self.create_menu_open = false;
@@ -2179,6 +2316,8 @@ impl State {
         self.chat_info = None;
         self.participants.clear();
         self.kick_confirm = None;
+        self.admin_menu = None;
+        self.admin_confirm = None;
         self.muted = false;
         self.emoji_panel_open = false;
         self.sticker_picker_open = false;
@@ -2202,6 +2341,8 @@ impl State {
         self.chat_info = None;
         self.participants.clear();
         self.kick_confirm = None;
+        self.admin_menu = None;
+        self.admin_confirm = None;
         self.muted = false;
         self.emoji_panel_open = false;
         self.sticker_picker_open = false;
@@ -3343,6 +3484,169 @@ mod tests {
         // Kicking an unknown member must not arm anything.
         state.kick(9999);
         assert_eq!(state.kick_confirm, None);
+    }
+
+    fn part(id: i64, role: crate::bridge::ParticipantRole) -> crate::bridge::ParticipantRow {
+        crate::bridge::ParticipantRow {
+            id,
+            name: format!("Member {id}"),
+            username: None,
+            role,
+        }
+    }
+
+    #[test]
+    fn admin_menu_items_follow_the_role() {
+        use crate::bridge::ParticipantRole;
+        // Plain members: promote + ban + remove.
+        assert_eq!(
+            admin_menu_items(ParticipantRole::Member, false),
+            vec![AdminAction::Promote, AdminAction::Ban, AdminAction::Remove]
+        );
+        // Admins: demote + ban.
+        assert_eq!(
+            admin_menu_items(ParticipantRole::Admin, false),
+            vec![AdminAction::Demote, AdminAction::Ban]
+        );
+        // The owner and yourself: no menu at all.
+        assert!(admin_menu_items(ParticipantRole::Creator, false).is_empty());
+        assert!(admin_menu_items(ParticipantRole::Member, true).is_empty());
+        assert!(admin_menu_items(ParticipantRole::Admin, true).is_empty());
+    }
+
+    #[test]
+    fn admin_menu_hidden_on_owner_and_self() {
+        let (mut state, _) = demo_state();
+        state.open_info();
+        state.on_message(UiMessage::Participants(vec![
+            part(2001, crate::bridge::ParticipantRole::Creator),
+            part(2002, crate::bridge::ParticipantRole::Member),
+            part(2003, crate::bridge::ParticipantRole::Admin),
+        ]));
+
+        state.admin_open_menu(2001);
+        assert_eq!(state.admin_menu, None, "the owner gets no menu");
+
+        state.admin_open_menu(2003);
+        assert_eq!(state.admin_menu, Some(2003));
+        state.admin_menu = None;
+
+        // Yourself: no menu even as a plain member.
+        state.admin_self_id = Some(2002);
+        state.admin_open_menu(2002);
+        assert_eq!(state.admin_menu, None, "you get no menu on yourself");
+
+        state.admin_self_id = None;
+        state.admin_open_menu(2002);
+        assert_eq!(state.admin_menu, Some(2002));
+    }
+
+    #[test]
+    fn admin_promote_and_demote_fire_immediately() {
+        let (mut state, mut req_rx) = demo_state();
+        state.open_info();
+        state.on_message(UiMessage::Participants(vec![
+            part(2002, crate::bridge::ParticipantRole::Member),
+            part(2003, crate::bridge::ParticipantRole::Admin),
+        ]));
+
+        state.admin_open_menu(2002);
+        state.admin_action(2002, AdminAction::Promote);
+        assert!(state.admin_menu.is_none(), "menu closes");
+        assert!(
+            drain(&mut req_rx).iter().any(|r| matches!(r, Request::AdminPromote { id: 42, user_id: 2002 })),
+            "expected AdminPromote"
+        );
+
+        state.admin_open_menu(2003);
+        state.admin_action(2003, AdminAction::Demote);
+        assert!(
+            drain(&mut req_rx).iter().any(|r| matches!(r, Request::AdminDemote { id: 42, user_id: 2003 })),
+            "expected AdminDemote"
+        );
+    }
+
+    #[test]
+    fn admin_ban_and_remove_go_through_inline_confirmation() {
+        let (mut state, mut req_rx) = demo_state();
+        state.open_info();
+        state.on_message(UiMessage::Participants(vec![
+            part(2002, crate::bridge::ParticipantRole::Member),
+        ]));
+        drain(&mut req_rx);
+
+        // Ban arms the confirmation; nothing is sent yet.
+        state.admin_open_menu(2002);
+        state.admin_action(2002, AdminAction::Ban);
+        assert_eq!(state.admin_confirm, Some((AdminConfirm::Ban, 2002)));
+        assert!(drain(&mut req_rx).is_empty());
+
+        // Escape cancels without sending.
+        state.escape();
+        assert_eq!(state.admin_confirm, None);
+        assert!(drain(&mut req_rx).is_empty());
+
+        // Yes on a remove sends kick_only=true.
+        state.admin_open_menu(2002);
+        state.admin_action(2002, AdminAction::Remove);
+        assert_eq!(state.admin_confirm, Some((AdminConfirm::Remove, 2002)));
+        state.admin_confirmed();
+        assert!(
+            drain(&mut req_rx).iter().any(|r| matches!(r, Request::AdminBan { id: 42, user_id: 2002, kick_only: true })),
+            "expected AdminBan kick_only=true"
+        );
+        assert_eq!(state.admin_confirm, None);
+
+        // Yes on a ban sends kick_only=false.
+        state.admin_open_menu(2002);
+        state.admin_action(2002, AdminAction::Ban);
+        state.admin_confirmed();
+        assert!(
+            drain(&mut req_rx).iter().any(|r| matches!(r, Request::AdminBan { id: 42, user_id: 2002, kick_only: false })),
+            "expected AdminBan kick_only=false"
+        );
+    }
+
+    #[test]
+    fn member_updated_refreshes_the_member_list() {
+        let (mut state, mut req_rx) = demo_state();
+        state.open_info();
+        drain(&mut req_rx);
+
+        state.on_message(UiMessage::MemberUpdated { chat_id: 42, user_id: 2002 });
+        assert!(
+            drain(&mut req_rx).iter().any(|r| matches!(r, Request::GetParticipants { id: 42 })),
+            "expected the member list to be re-requested"
+        );
+
+        // Another chat's update must not touch this panel.
+        state.on_message(UiMessage::MemberUpdated { chat_id: 99, user_id: 2002 });
+        assert!(drain(&mut req_rx).is_empty());
+    }
+
+    #[test]
+    fn escape_closes_admin_menu_before_the_info_panel() {
+        let (mut state, _) = demo_state();
+        state.open_info();
+        state.on_message(UiMessage::Participants(vec![
+            part(2002, crate::bridge::ParticipantRole::Member),
+        ]));
+        state.admin_open_menu(2002);
+
+        state.escape();
+        assert_eq!(state.admin_menu, None);
+        assert!(state.info_open, "only the menu closes first");
+
+        state.escape();
+        assert!(!state.info_open);
+    }
+
+    #[test]
+    fn member_self_id_hides_admin_actions_on_yourself() {
+        let (mut state, _) = demo_state();
+        assert_eq!(state.admin_self_id, None);
+        state.on_message(UiMessage::MemberSelfId { id: 2002 });
+        assert_eq!(state.admin_self_id, Some(2002));
     }
 
     #[test]

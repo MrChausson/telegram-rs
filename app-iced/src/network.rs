@@ -690,7 +690,7 @@ fn demo_chat_detail(id: i64) -> Option<ChatDetail> {
             username: None,
             bio: Some("Weekly project reviews — Fridays at 18:00.".into()),
             phone: None,
-            members_count: Some(5),
+            members_count: Some(6),
         },
         1003 => ChatDetail {
             id,
@@ -724,8 +724,13 @@ fn demo_chat_detail(id: i64) -> Option<ChatDetail> {
     Some(d)
 }
 
-/// Canned member list of a demo group/channel (empty = hidden/none).
-fn demo_participants(id: i64) -> Vec<ParticipantRow> {
+/// Bot-api id the demo account ("Demo User") carries in every canned member
+/// list; sent to the UI so admin actions hide on yourself.
+const DEMO_SELF_ID: i64 = 2006;
+
+/// Canned member lists of the demo groups/channels, as a mutable seed: the
+/// demo admin actions flip roles/remove members in this store.
+fn demo_participants_init() -> HashMap<i64, Vec<ParticipantRow>> {
     let p = |id: i64, name: &str, role| ParticipantRow {
         id,
         name: name.to_string(),
@@ -738,26 +743,36 @@ fn demo_participants(id: i64) -> Vec<ParticipantRow> {
         username: Some(username.to_string()),
         role,
     };
-    match id {
-        1002 => vec![
-            named(2001, "Camille", "camille_dev", ParticipantRole::Creator),
-            named(2002, "Léo", "leo_builds", ParticipantRole::Admin),
-            named(2003, "Thomas", "thomas_rs", ParticipantRole::Member),
-            p(2004, "Sofia", ParticipantRole::Member),
-            p(2005, "Marc", ParticipantRole::Member),
-        ],
-        1003 => vec![
-            p(2201, "Camille", ParticipantRole::Creator),
-            p(2202, "Léo", ParticipantRole::Admin),
-        ],
-        1004 => vec![
-            p(2101, "Maman", ParticipantRole::Creator),
-            p(2102, "Papa", ParticipantRole::Member),
-            p(2103, "Sophie", ParticipantRole::Member),
-            p(2104, "Toi", ParticipantRole::Member),
-        ],
-        _ => Vec::new(),
-    }
+    HashMap::from([
+        (
+            1002,
+            vec![
+                named(2001, "Camille", "camille_dev", ParticipantRole::Creator),
+                named(2002, "Léo", "leo_builds", ParticipantRole::Admin),
+                named(2003, "Thomas", "thomas_rs", ParticipantRole::Member),
+                p(2004, "Sofia", ParticipantRole::Member),
+                p(2005, "Marc", ParticipantRole::Member),
+                p(DEMO_SELF_ID, "Demo User", ParticipantRole::Member),
+            ],
+        ),
+        (
+            1003,
+            vec![
+                p(2201, "Camille", ParticipantRole::Creator),
+                p(2202, "Léo", ParticipantRole::Admin),
+                p(DEMO_SELF_ID, "Demo User", ParticipantRole::Member),
+            ],
+        ),
+        (
+            1004,
+            vec![
+                p(2101, "Maman", ParticipantRole::Creator),
+                p(2102, "Papa", ParticipantRole::Member),
+                p(2103, "Sophie", ParticipantRole::Member),
+                p(DEMO_SELF_ID, "Demo User", ParticipantRole::Member),
+            ],
+        ),
+    ])
 }
 
 /// Offline "backend" for `--demo`: replays canned dialogs/messages, echoes
@@ -784,6 +799,10 @@ async fn serve_demo(
     // Shared with the request handlers below so create/leave/delete/rename
     // can mutate the list at runtime (the closures only borrow it).
     let chats = std::rc::Rc::new(std::cell::RefCell::new(chats));
+
+    // Member lists (info panel), mutable so demo admin actions visibly
+    // flip roles / remove members and the refresh re-serves the mutation.
+    let parts = std::rc::Rc::new(std::cell::RefCell::new(demo_participants_init()));
 
     // Canned own-profile, mutated by UpdateProfile so the edit flow echoes.
     struct DemoProfile {
@@ -1324,7 +1343,36 @@ Request::DownloadDoc { chat_id, msg_id } => {
                     }
                 }
                 Request::GetParticipants { id } => {
-                    let _ = ui_tx.send(UiMessage::Participants(demo_participants(id)));
+                    // Tell the UI who we are (admin actions hide on self),
+                    // then serve the current member list.
+                    let _ = ui_tx.send(UiMessage::MemberSelfId { id: DEMO_SELF_ID });
+                    let rows = parts.borrow().get(&id).cloned().unwrap_or_default();
+                    let _ = ui_tx.send(UiMessage::Participants(rows));
+                }
+                Request::AdminPromote { id, user_id } | Request::AdminDemote { id, user_id } => {
+                    let promote = matches!(req, Request::AdminPromote { .. });
+                    if let Some(rows) = parts.borrow_mut().get_mut(&id) {
+                        if let Some(p) = rows.iter_mut().find(|p| p.id == user_id) {
+                            if p.role != ParticipantRole::Creator {
+                                p.role = if promote {
+                                    ParticipantRole::Admin
+                                } else {
+                                    ParticipantRole::Member
+                                };
+                            }
+                        }
+                    }
+                    // The server would answer through an update; pause briefly
+                    // so the demo feels round-trippy, then echo.
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    let _ = ui_tx.send(UiMessage::MemberUpdated { chat_id: id, user_id });
+                }
+                Request::AdminBan { id, user_id, .. } => {
+                    if let Some(rows) = parts.borrow_mut().get_mut(&id) {
+                        rows.retain(|p| p.id != user_id);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    let _ = ui_tx.send(UiMessage::MemberUpdated { chat_id: id, user_id });
                 }
                 Request::SetMuted { .. } => {}
                 Request::KickParticipant { user_id, .. } => {
@@ -2058,6 +2106,9 @@ async fn serve(
     let mut last_refresh = std::time::Instant::now();
     let mut open_id: Option<i64> = None;
     let mut open_sig: Option<(usize, String)> = None;
+    // Bot-api id of the signed-in user, resolved lazily on the first
+    // member-list fetch (sent to the UI as `MemberSelfId`).
+    let mut self_id: Option<i64> = None;
 
     let save_every = std::time::Duration::from_secs(30);
     let mut last_save = std::time::Instant::now();
@@ -2093,7 +2144,7 @@ async fn serve(
                 open_id = Some(id);
                 open_sig = None;
             }
-            handle_request(&tg, ui_tx, req, peers, &downloads).await;
+            handle_request(&tg, ui_tx, req, peers, &downloads, &mut self_id).await;
         }
         // Run throttled searches: re-running the same query within the window
         // is skipped (typing floods → one MTProto round-trip per pause).
@@ -2111,6 +2162,7 @@ async fn serve(
                 Request::Search { id: *mode, query: query.clone() },
                 peers,
                 &downloads,
+                &mut self_id,
             )
             .await;
         }
@@ -2401,6 +2453,7 @@ async fn handle_request(
     req: Request,
     peers: &mut HashMap<i64, (String, PeerRef)>,
     downloads: &Arc<Downloads>,
+    self_id: &mut Option<i64>,
 ) {
     match req {
         Request::MarkRead { id } => {
@@ -2886,6 +2939,15 @@ async fn handle_request(
         Request::GetParticipants { id } => match peers.get(&id) {
             Some((_, peer_ref)) => match tg.get_participants(peer_ref, 200).await {
                 Ok(rows) => {
+                    // The UI hides admin actions on yourself; resolve the
+                    // self id once per session (best effort — without it the
+                    // menu simply stays available on every row).
+                    if self_id.is_none() {
+                        *self_id = tg.self_user_id().await.ok();
+                        if let Some(sid) = *self_id {
+                            let _ = ui_tx.send(UiMessage::MemberSelfId { id: sid });
+                        }
+                    }
                     let _ = ui_tx.send(UiMessage::Participants(
                         rows.into_iter().map(participant_to_bridge).collect(),
                     ));
@@ -2906,6 +2968,48 @@ async fn handle_request(
                 }
                 Err(e) => {
                     let _ = ui_tx.send(UiMessage::Error(format!("Kick failed: {e}")));
+                }
+            },
+            None => {
+                let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+            }
+        },
+        Request::AdminPromote { id, user_id } | Request::AdminDemote { id, user_id } => {
+            let promote = matches!(req, Request::AdminPromote { .. });
+            let result = match peers.get(&id) {
+                Some((_, peer_ref)) => {
+                    if promote {
+                        tg.promote_admin(peer_ref, user_id).await
+                    } else {
+                        tg.demote_admin(peer_ref, user_id).await
+                    }
+                }
+                None => Err(anyhow::anyhow!("unknown chat")),
+            };
+            match result {
+                Ok(()) => {
+                    let _ = ui_tx.send(UiMessage::MemberUpdated { chat_id: id, user_id });
+                }
+                Err(e) => {
+                    let _ = ui_tx.send(UiMessage::Error(if promote {
+                        format!("Promote failed: {e}")
+                    } else {
+                        format!("Demote failed: {e}")
+                    }));
+                }
+            }
+        }
+        Request::AdminBan { id, user_id, kick_only } => match peers.get(&id) {
+            Some((_, peer_ref)) => match tg.ban_member(peer_ref, user_id, kick_only).await {
+                Ok(()) => {
+                    let _ = ui_tx.send(UiMessage::MemberUpdated { chat_id: id, user_id });
+                }
+                Err(e) => {
+                    let _ = ui_tx.send(UiMessage::Error(if kick_only {
+                        format!("Remove failed: {e}")
+                    } else {
+                        format!("Ban failed: {e}")
+                    }));
                 }
             },
             None => {

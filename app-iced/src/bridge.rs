@@ -297,6 +297,13 @@ pub enum Request {
     ClearCache,
     /// Logs the account out (`auth.logOut`) and purges the local session.
     LogOut,
+    /// Grants every admin right to a member of the open group/channel.
+    AdminPromote { id: i64, user_id: i64 },
+    /// Revokes every admin right from a member of the open group/channel.
+    AdminDemote { id: i64, user_id: i64 },
+    /// Bans a member forever (`kick_only=false`) or just removes them from
+    /// the group, letting them rejoin (`kick_only=true`).
+    AdminBan { id: i64, user_id: i64, kick_only: bool },
 }
 
 /// Message sent by the network to the UI.
@@ -418,6 +425,12 @@ pub enum UiMessage {
     CacheCleared { bytes: u64 },
     /// The session was logged out: the UI resets to the sign-in screen.
     LoggedOut,
+    /// A member of the open chat changed server-side (promoted, demoted,
+    /// banned or removed); the UI re-requests the participant list.
+    MemberUpdated { chat_id: i64, user_id: i64 },
+    /// Bot-api id of the signed-in user (so admin actions can hide on
+    /// yourself). Sent by the network layer when the member list is served.
+    MemberSelfId { id: i64 },
     /// Error to display (status).
     Error(String),
 }

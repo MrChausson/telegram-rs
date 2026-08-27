@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Group admin tools**: right-clicking a member row in the chat info panel
+  opens an admin menu — "Promote to admin"/"Demote admin" (applied
+  immediately via `channels.editAdmin`) and "Ban member"/"Remove from group"
+  (via `channels.editBanned`; remove = already-expired ban, so the member can
+  rejoin), the destructive ones gated by an inline Yes/No confirmation. The
+  menu never shows on the group's owner or on your own row, and the member
+  list refreshes after every server-side change. Demo groups mirror the
+  whole flow (roles flip, banned members vanish).
+
 ## [v0.9.0] - 2026-08-27
 
 ### Added

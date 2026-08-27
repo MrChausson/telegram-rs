@@ -262,6 +262,12 @@ pub enum Message {
     KickMember(i64),
     /// The inline kick confirmation was accepted.
     ConfirmKick,
+    /// A member row was right-clicked: open its admin context menu.
+    MemberMenu(i64),
+    /// An admin action was picked in the member context menu.
+    AdminAction(state::AdminAction, i64),
+    /// "Yes" was pressed on the destructive admin confirmation (ban/remove).
+    AdminConfirmYes,
     /// The reply bar's ✕ was pressed (cancel the armed reply).
     CancelReply,
     /// "Forward" pressed in the context menu (opens the chat picker).
@@ -466,6 +472,9 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         }
         Message::KickMember(user_id) => state.kick(user_id),
         Message::ConfirmKick => state.kick_confirmed(),
+        Message::MemberMenu(user_id) => state.admin_open_menu(user_id),
+        Message::AdminAction(action, user_id) => state.admin_action(user_id, action),
+        Message::AdminConfirmYes => state.admin_confirmed(),
         Message::CancelReply => state.reply_target = None,
         Message::ContextForward => state.context_forward(),
         Message::ForwardTo(chat) => {
@@ -2107,7 +2116,7 @@ fn info_panel(state: &State) -> Element<'_> {
                 .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
         );
         for p in &state.participants {
-            col = col.push(member_row(p, state.kick_confirm == Some(p.id)));
+            col = col.push(member_row(state, p));
         }
         if state.participants.is_empty() {
             col = col.push(
@@ -2140,11 +2149,21 @@ fn info_subtitle(state: &State) -> String {
     }
 }
 
-/// A member row: letter avatar, name (+ role badge) and a remove action that
-/// flips into an inline Yes/No confirmation when armed.
-fn member_row(p: &bridge::ParticipantRow, confirming: bool) -> Element<'static> {
+/// A member row: letter avatar, name (+ role badge), a remove action that
+/// flips into an inline Yes/No confirmation when armed, and a right-click
+/// admin menu (promote/demote/ban/remove) rendered inline under the row.
+/// The owner and yourself get neither the ✕ nor the menu.
+fn member_row(state: &State, p: &bridge::ParticipantRow) -> Element<'static> {
     let name = p.name.clone();
-    let trailing: Element<'static> = if confirming {
+    let is_self = state.admin_self_id == Some(p.id);
+    let untouchable = is_self || p.role == bridge::ParticipantRole::Creator;
+    let kick_confirming = state.kick_confirm == Some(p.id);
+    let admin_confirm = state
+        .admin_confirm
+        .is_some_and(|(_, u)| u == p.id);
+    let menu_open = state.admin_menu == Some(p.id);
+
+    let trailing: Element<'static> = if kick_confirming {
         row![
             button(text("Remove").size(theme::font::BADGE).color(rgb(theme::ERROR())))
                 .on_press(Message::ConfirmKick)
@@ -2157,6 +2176,21 @@ fn member_row(p: &bridge::ParticipantRow, confirming: bool) -> Element<'static> 
         ]
         .spacing(4)
         .into()
+    } else if admin_confirm {
+        row![
+            button(text("Yes").size(theme::font::BADGE).color(rgb(theme::ERROR())))
+                .on_press(Message::AdminConfirmYes)
+                .padding([3, 8])
+                .style(flat_button),
+            button(text("No").size(theme::font::BADGE).color(rgb(theme::ICON())))
+                .on_press(Message::Escape)
+                .padding([3, 8])
+                .style(flat_button),
+        ]
+        .spacing(4)
+        .into()
+    } else if untouchable {
+        horizontal_spacer()
     } else {
         button(icon(Icon::Close, theme::ICON(), 14.0))
             .on_press(Message::KickMember(p.id))
@@ -2164,7 +2198,8 @@ fn member_row(p: &bridge::ParticipantRow, confirming: bool) -> Element<'static> 
             .style(flat_button)
             .into()
     };
-    button(
+
+    let row_button = button(
         row![
             avatar_circle(None, &name, 34.0),
             column![
@@ -2182,8 +2217,60 @@ fn member_row(p: &bridge::ParticipantRow, confirming: bool) -> Element<'static> 
     )
     .width(Length::Fill)
     .padding([4, 0])
-    .style(|_theme, status| row_style(_theme, status, false))
+    .style(|_theme, status| row_style(_theme, status, false));
+    // An open admin menu makes the row left-click a click-outside dismissal;
+    // right-click (re)opens the menu, mirroring the chat-list rows.
+    let row_button = if state.admin_menu.is_some() {
+        row_button.on_press(Message::DismissMenu)
+    } else {
+        row_button
+    };
+
+    let menu: Element<'static> = if menu_open {
+        let mut items = iced::widget::column![].padding(4).spacing(2);
+        for action in state::admin_menu_items(p.role, is_self) {
+            let (ic, label, destructive) = admin_menu_item_meta(action);
+            items = items.push(menu_item(
+                Message::AdminAction(action, p.id),
+                ic,
+                label,
+                destructive,
+            ));
+        }
+        container(items)
+            .width(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(rgb(theme::MENU_BG()))),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    color: rgb(theme::MENU_BORDER()),
+                    width: 1.0,
+                },
+                ..container::Style::default()
+            })
+            .into()
+    } else {
+        horizontal_spacer()
+    };
+
+    mouse_area(
+        column![row_button, menu]
+            .width(Length::Fill)
+            .spacing(2),
+    )
+    .on_right_press(Message::MemberMenu(p.id))
     .into()
+}
+
+/// Rendering metadata of one admin menu action (icon + English label +
+/// destructive styling), resolved from the state-level menu-items data.
+fn admin_menu_item_meta(action: state::AdminAction) -> (Icon, &'static str, bool) {
+    match action {
+        state::AdminAction::Promote => (Icon::Plus, "Promote to admin", false),
+        state::AdminAction::Demote => (Icon::Close, "Demote admin", false),
+        state::AdminAction::Ban => (Icon::Trash, "Ban member", true),
+        state::AdminAction::Remove => (Icon::Close, "Remove from group", true),
+    }
 }
 
 /// Small role chip next to a member's name ("Owner"/"Admin"; none for plain
