@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.8.1] - 2026-08-27
+
 ### Added
 - **Arch Linux packaging groundwork**: the public identity is now unique
   (`telegram-rs`) so a future AUR package needs no `conflicts` — `tg` was
