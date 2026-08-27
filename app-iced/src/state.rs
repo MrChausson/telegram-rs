@@ -129,6 +129,18 @@ pub enum LoginStep {
     Password,
 }
 
+/// Progress of the QR sign-in pane (runs beside the phone `LoginStep` flow;
+/// the two are independent and [`LoginStep`] is never touched by QR logic).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QrStage {
+    /// Nothing requested yet (pane just switched in / after a failure).
+    Idle,
+    /// A QR image is shown; waiting for the phone to scan it.
+    AwaitingScan,
+    /// The phone scanned the code; the server is confirming this device.
+    ScanConfirmed,
+}
+
 // ---------------------------------------------------------------------------
 // Notifications preference persistence ("on"/"off" file in the data dir)
 // ---------------------------------------------------------------------------
@@ -316,6 +328,18 @@ pub struct State {
 
     pub login_step: LoginStep,
     pub login_input: String,
+
+    // QR sign-in pane (`login_qr_selected` picks the screen; everything else
+    // is reset on toggle/complete so a retry always starts clean).
+    /// True when the sign-in screen shows the QR pane instead of the phone form.
+    pub login_qr_selected: bool,
+    /// QR sign-in progress.
+    pub qr_stage: QrStage,
+    /// On-disk PNG of the current login QR code, once generated.
+    pub qr_png_path: Option<String>,
+    /// Last QR sign-in failure (shown under the card; `None` = no failure).
+    pub qr_error: Option<String>,
+
     /// Composer text (fresh message, or the edited text).
     pub composer: String,
     /// Full-screen photo viewer path, if any.
@@ -494,6 +518,10 @@ impl State {
             tray_actions: Arc::new(crate::tray::TrayActions::default()),
             login_step: LoginStep::Phone,
             login_input: String::new(),
+            login_qr_selected: false,
+            qr_stage: QrStage::Idle,
+            qr_png_path: None,
+            qr_error: None,
             composer: String::new(),
             viewer: None,
             auto_open_first: false,
@@ -1104,12 +1132,17 @@ impl State {
                 self.authenticated = true;
                 self.login_input.clear();
                 self.login_error = false;
+                self.qr_cancelled();
+                self.login_qr_selected = false;
                 self.status = if self.dialogs.is_empty() {
                     format!("Signed in as {name}")
                 } else {
                     format!("Signed in as {name} — {} chats", self.dialogs.len())
                 };
             }
+            UiMessage::QrCodeReady { path } => self.qr_code_ready(path),
+            UiMessage::QrScanConfirmed => self.qr_scan_confirmed(),
+            UiMessage::QrLoginFailed { error } => self.qr_failed(error),
             UiMessage::MyProfile(p) => {
                 // Seed the edit inputs only while they're untouched, so a
                 // profile echo never clobbers text being typed.
@@ -1988,6 +2021,53 @@ impl State {
         self.invalidate_layout();
     }
 
+    // -----------------------------------------------------------------
+    // QR sign-in pane (namespaced `qr_`; see `QrStage`)
+    // -----------------------------------------------------------------
+
+    /// Switches the sign-in screen between the phone form and the QR pane.
+    pub fn toggle_login_screen(&mut self) {
+        self.login_qr_selected = !self.login_qr_selected;
+        if !self.login_qr_selected {
+            self.qr_cancelled();
+        }
+        self.login_error = false;
+    }
+
+    /// A QR session was requested; clear stale data and wait for the code.
+    pub fn qr_started(&mut self) {
+        self.qr_stage = QrStage::AwaitingScan;
+        self.qr_png_path = None;
+        self.qr_error = None;
+    }
+
+    /// A fresh QR PNG is on disk: show it.
+    pub fn qr_code_ready(&mut self, path: String) {
+        self.qr_png_path = Some(path);
+        self.qr_stage = QrStage::AwaitingScan;
+        self.qr_error = None;
+    }
+
+    /// The phone scanned the code; waiting for server-side confirmation.
+    pub fn qr_scan_confirmed(&mut self) {
+        self.qr_stage = QrStage::ScanConfirmed;
+    }
+
+    /// The QR session failed: drop the code and surface the error.
+    pub fn qr_failed(&mut self, error: String) {
+        self.qr_stage = QrStage::Idle;
+        self.qr_png_path = None;
+        self.qr_error = Some(error);
+    }
+
+    /// Stops the QR pane without a failure (back to the phone screen).
+    /// State cleanup only; sending `Request::QrLoginCancel` is the caller's job.
+    pub fn qr_cancelled(&mut self) {
+        self.qr_stage = QrStage::Idle;
+        self.qr_png_path = None;
+        self.qr_error = None;
+    }
+
     /// Sends a picked file to the open chat: optimistic media row with a
     /// live upload progress, then the server echo replaces it.
     pub fn send_media(&mut self, path: String) {
@@ -2729,6 +2809,60 @@ mod tests {
         state.escape();
         assert!(state.reply_target.is_none());
         assert_eq!(state.composer, "brouillon");
+    }
+
+    #[test]
+    fn qr_toggle_switches_screen_and_cleans_up_on_leave() {
+        let (mut state, _) = demo_state();
+        // Entering the QR pane: screen flips, then the UI layer starts a
+        // session (qr_started mirrors lib.rs's update arm).
+        state.toggle_login_screen();
+        assert!(state.login_qr_selected);
+        state.qr_started();
+        assert_eq!(state.qr_stage, QrStage::AwaitingScan);
+
+        state.on_message(UiMessage::QrCodeReady { path: "/tmp/q.png".into() });
+        assert_eq!(state.qr_png_path.as_deref(), Some("/tmp/q.png"));
+
+        // Leaving via the switcher stops the poller with no error shown.
+        state.toggle_login_screen();
+        assert!(!state.login_qr_selected);
+        assert_eq!(state.qr_stage, QrStage::Idle);
+        assert!(state.qr_png_path.is_none());
+    }
+
+    #[test]
+    fn qr_code_ready_scan_confirmed_then_login_ok_resets() {
+        let (mut state, _) = demo_state();
+        state.login_qr_selected = true;
+        state.qr_started();
+        state.on_message(UiMessage::QrCodeReady { path: "/tmp/q.png".into() });
+        assert_eq!(state.qr_png_path.as_deref(), Some("/tmp/q.png"));
+
+        state.on_message(UiMessage::QrScanConfirmed);
+        assert_eq!(state.qr_stage, QrStage::ScanConfirmed);
+
+        state.on_message(UiMessage::LoginOk { name: "QR Demo".into() });
+        assert!(state.authenticated);
+        assert!(!state.login_qr_selected, "back on phone pane next login");
+        assert_eq!(state.qr_stage, QrStage::Idle);
+        assert!(state.qr_png_path.is_none());
+    }
+
+    #[test]
+    fn qr_failure_clears_the_code_and_shows_the_error() {
+        let (mut state, _) = demo_state();
+        state.login_qr_selected = true;
+        state.qr_started();
+        state.on_message(UiMessage::QrCodeReady { path: "/tmp/q.png".into() });
+        state.on_message(UiMessage::QrLoginFailed {
+            error: "QR sign-in failed".into(),
+        });
+        assert_eq!(state.qr_stage, QrStage::Idle);
+        assert!(state.qr_png_path.is_none());
+        assert_eq!(state.qr_error.as_deref(), Some("QR sign-in failed"));
+        // The phone LoginStep flow is untouched by everything QR.
+        assert_eq!(state.login_step, LoginStep::Phone);
     }
 
     #[test]

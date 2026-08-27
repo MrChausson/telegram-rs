@@ -277,6 +277,10 @@ pub enum Request {
     LoginCode { code: String },
     /// Login step 3 (2FA): submit the account password.
     LoginPassword { password: String },
+    /// Login (QR): start the export/poll login-token session.
+    QrLoginStart,
+    /// Login (QR): stop any running token-polling task.
+    QrLoginCancel,
     /// Fetches the signed-in user's profile (settings panel).
     GetMe,
     /// Updates the user's own profile (`None` leaves a field unchanged).
@@ -398,6 +402,12 @@ pub enum UiMessage {
     LoginPasswordRequired { hint: String },
     /// Sign-in completed: the account is ready to use.
     LoginOk { name: String },
+    /// Login (QR): a scannable QR image is ready on disk.
+    QrCodeReady { path: String },
+    /// Login (QR): the phone scanned the code; sign-in is being confirmed.
+    QrScanConfirmed,
+    /// Login (QR): the token session failed (message shown on the QR pane).
+    QrLoginFailed { error: String },
     /// The signed-in user's own profile (settings panel).
     MyProfile(MyProfile),
     /// The account's active sessions arrived (settings panel).

@@ -13,6 +13,7 @@ pub mod emoji;
 pub mod tray;
 pub mod icons;
 pub mod network;
+pub mod qr_png;
 pub mod state;
 pub mod theme;
 use std::collections::HashMap;
@@ -25,7 +26,7 @@ use iced::{Alignment, Color, Length, Task};
 
 use bridge::{ChatKind, ChatRow, MsgRow, Request, UiMessage};
 use icons::{icon, Icon};
-use state::{LoginStep, SearchMode, State};
+use state::{LoginStep, QrStage, SearchMode, State};
 
 /// Id of the open chat's message list, used to auto-scroll to the bottom.
 const MSG_LIST_ID: &str = "msg-list";
@@ -353,6 +354,13 @@ pub enum Message {
     LoginSubmit,
     /// Login "back" pressed.
     LoginBack,
+    // QR sign-in pane
+    /// The [Phone | QR] switcher was pressed (toggles + starts/stops polling).
+    ToggleLoginScreen,
+    /// The QR pane requested a fresh login-token session.
+    QrLoginStart,
+    /// Leaving the QR pane ("Use phone number instead"): stop token polling.
+    QrCancel,
     /// The message list was scrolled: carries the absolute Y offset of the
     /// scrollable's viewport (content coordinates). Feeds message-list
     /// virtualization so only the visible rows are built/layed-out per frame.
@@ -577,6 +585,24 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::LoginChanged(text) => state.login_input = text,
         Message::LoginSubmit => submit_login(state),
         Message::LoginBack => login_back(state),
+        Message::ToggleLoginScreen => {
+            state.toggle_login_screen();
+            let req = if state.login_qr_selected {
+                state.qr_started();
+                Request::QrLoginStart
+            } else {
+                Request::QrLoginCancel
+            };
+            let _ = state.req_tx.send(req);
+        }
+        Message::QrLoginStart => {
+            state.qr_started();
+            let _ = state.req_tx.send(Request::QrLoginStart);
+        }
+        Message::QrCancel => {
+            state.qr_cancelled();
+            let _ = state.req_tx.send(Request::QrLoginCancel);
+        }
         Message::PerfTickC => {
             // Continuous redraw loop: the message alone already scheduled a
             // redraw; also keep the cadence log (renders/sec) honest.
@@ -873,8 +899,43 @@ fn viewer_view(state: &State) -> Element<'_> {
 // Login screen (mirrors the custom `draw_login`)
 // ---------------------------------------------------------------------------
 
+/// One pill of the [Phone | QR] sign-in switcher; `active` uses the accent.
+fn login_segment(label: &'static str, active: bool) -> iced::widget::Button<'static, Message> {
+    button(
+        text(label).size(13).color(if active {
+            Color::WHITE
+        } else {
+            rgb(theme::TEXT_SECONDARY())
+        }),
+    )
+    .padding([6, 18])
+    .on_press(Message::ToggleLoginScreen)
+    .style(move |t, s| {
+        let mut st = if active {
+            accent_button(t, s)
+        } else {
+            flat_button(t, s)
+        };
+        if active {
+            st.border = iced::Border {
+                radius: iced::border::Radius::new(14.0),
+                ..iced::Border::default()
+            };
+        }
+        st
+    })
+}
+
 fn login_view(state: &State) -> Element<'_> {
-    let s = 1.0f32; // logical pixels (Iced handles HiDPI internally)
+    let _s = 1.0f32; // logical pixels (Iced handles HiDPI internally)
+
+    // [Phone | QR] segmented switcher, shown on top of both screens.
+    let switcher = row![
+        login_segment("Phone", !state.login_qr_selected),
+        login_segment("QR", state.login_qr_selected),
+    ];
+
+    // Phone pane (original form) — untouched by the QR flow.
     let title = match state.login_step {
         LoginStep::Phone => "Sign in to Telegram",
         LoginStep::Code => "Check your phone",
@@ -916,7 +977,80 @@ fn login_view(state: &State) -> Element<'_> {
     .width(76)
     .height(76);
 
-    let mut input = text_input(field_placeholder, &state.login_input)
+    // QR pane: fixed-white rounded card so the code stays scannable in both
+    // themes; caption/status live outside the card in theme colors.
+    let qr_pane: Element<'_> = {
+        let card_inner: Element<'_> = if let Some(path) = &state.qr_png_path {
+            image(image::Handle::from_path(path))
+                .width(260)
+                .height(260)
+                .content_fit(iced::ContentFit::Contain)
+                .into()
+        } else {
+            // Placeholder keeps the card size stable while rendering/scanning.
+            container(horizontal_spacer())
+                .width(260)
+                .height(260)
+                .into()
+        };
+        let card = container(card_inner)
+            .width(276)
+            .height(276)
+            .center_x(Length::Fill)
+            .center_y(Length::Shrink)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(Color::WHITE)),
+                border: iced::Border {
+                    radius: iced::border::Radius::new(16.0),
+                    ..iced::Border::default()
+                },
+                ..container::Style::default()
+            });
+        let qr_status: Element<'_> = if let Some(err) = &state.qr_error {
+            text(err).size(13).color(rgb(theme::ERROR())).into()
+        } else {
+            match state.qr_stage {
+                QrStage::ScanConfirmed => {
+                    text("Device confirmed — finishing sign-in…")
+                        .size(13)
+                        .color(rgb(theme::TEXT_SECONDARY()))
+                        .into()
+                }
+                _ if state.qr_png_path.is_some() => {
+                    text("Point your phone camera at the code")
+                        .size(13)
+                        .color(rgb(theme::TEXT_SECONDARY()))
+                        .into()
+                }
+                _ => {
+                    text("Generating QR code…")
+                        .size(13)
+                        .color(rgb(theme::TEXT_SECONDARY()))
+                        .into()
+                }
+            }
+        };
+        column![
+            card,
+            text("Open Telegram on your phone:\nSettings ▸ Devices ▸ Link Desktop Device")
+                .size(13)
+                .color(rgb(theme::TEXT_SECONDARY()))
+                .align_x(Alignment::Center),
+            qr_status,
+            button(text("Use phone number instead").size(13).color(rgb(theme::ICON())))
+                .on_press(Message::QrCancel)
+                .padding(8)
+                .style(flat_button),
+        ]
+        .align_x(Alignment::Center)
+        .spacing(12)
+        .into()
+    };
+
+    let body: Element<'_> = if state.login_qr_selected {
+        qr_pane
+    } else {
+        let mut input = text_input(field_placeholder, &state.login_input)
             .on_input(Message::LoginChanged)
             .on_submit(Message::LoginSubmit)
             .width(400)
@@ -942,37 +1076,38 @@ fn login_view(state: &State) -> Element<'_> {
     .align_x(Alignment::Center)
     .spacing(12);
 
-    if let Some(st) = status {
-        card = card.push(st);
-    }
+        if let Some(st) = status {
+            card = card.push(st);
+        }
 
-    let back = if state.login_step != LoginStep::Phone {
-        Some(
-            button(row![
-                icon(Icon::Back, theme::ICON(), 18.0),
-                text("Back").size(13).color(rgb(theme::ICON())),
-            ])
-            .on_press(Message::LoginBack)
-            .padding(8)
-            .style(flat_button),
-        )
-    } else {
-        None
+        let back = if state.login_step != LoginStep::Phone {
+            Some(
+                button(row![
+                    icon(Icon::Back, theme::ICON(), 18.0),
+                    text("Back").size(13).color(rgb(theme::ICON())),
+                ])
+                .on_press(Message::LoginBack)
+                .padding(8)
+                .style(flat_button),
+            )
+        } else {
+            None
+        };
+
+        let mut col = column![card];
+        if let Some(b) = back {
+            col = col.push(b);
+        }
+        col.align_x(Alignment::Center).spacing(8).into()
     };
 
-    let mut col = column![card];
-    if let Some(b) = back {
-        col = col.push(b);
-    }
-    let _ = s;
-    container(
-        col.align_x(Alignment::Center).spacing(8).padding(48),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .center_x(Length::Fill)
-    .center_y(Length::Fill)
-    .into()
+    container(column![switcher, body].align_x(Alignment::Center).spacing(16))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .padding(48)
+        .into()
 }
 
 // ---------------------------------------------------------------------------

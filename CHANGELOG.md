@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   an inline Yes/No confirmation; Escape cancels it. Known limitation: the
   MTProto connection stays alive until the next app launch, so pushes may
   still arrive while the sign-in screen is shown.
+- **QR-code sign-in**: the login screen gained a [Phone | QR] switcher; the
+  QR pane shows a black-on-white code (`tg://login?token=…` PNG, white card
+  in both themes) refreshed automatically while the desktop polls
+  `auth.exportLoginToken`/`importLoginToken` — scanning it from
+  Settings ▸ Devices ▸ Link Desktop Device signs the client in without
+  typing a phone number or code. "Use phone number instead" returns to the
+  phone flow and stops polling; the demo build fakes the whole flow.
 - **AUR package `telegram-rs-bin`**: Arch users install via `paru/yay -S
   telegram-rs-bin`; the release workflow publishes the PKGBUILD to the AUR
   automatically on every `v*` tag (deploy key in the `AUR_SSH_PRIVATE_KEY`

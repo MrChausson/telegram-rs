@@ -7,6 +7,8 @@
 
 use anyhow::{Context, Result};
 use grammers_client::client::{LoginToken, PasswordToken, SignInError};
+use grammers_client::tl;
+use grammers_client::Client;
 
 use super::client::Telegram;
 
@@ -62,4 +64,46 @@ impl Telegram {
             .map(|_: tl::enums::auth::LoggedOut| ())
             .context("logging out")
     }
+
+    /// Starts a QR-login session (raw `auth.exportLoginToken`).
+    pub async fn export_login_token(
+        &self,
+        api_id: i32,
+        api_hash: &str,
+    ) -> Result<tl::enums::auth::LoginToken> {
+        export_login_token(self.client(), api_id, api_hash).await
+    }
+
+    /// Polls a QR-login session (`auth.importLoginToken`).
+    pub async fn import_login_token(&self, token: Vec<u8>) -> Result<tl::enums::auth::LoginToken> {
+        import_login_token(self.client(), token).await
+    }
+}
+
+/// Raw `auth.exportLoginToken`. Free-standing over any [`Client`] because
+/// the QR-login poller runs detached with its own client clone.
+pub async fn export_login_token(
+    client: &Client,
+    api_id: i32,
+    api_hash: &str,
+) -> Result<tl::enums::auth::LoginToken> {
+    client
+        .invoke(&tl::functions::auth::ExportLoginToken {
+            except_ids: Vec::new(),
+            api_id,
+            api_hash: api_hash.to_string(),
+        })
+        .await
+        .context("exporting login token")
+}
+
+/// Raw `auth.importLoginToken` (QR-login polling step).
+pub async fn import_login_token(
+    client: &Client,
+    token: Vec<u8>,
+) -> Result<tl::enums::auth::LoginToken> {
+    client
+        .invoke(&tl::functions::auth::ImportLoginToken { token })
+        .await
+        .context("importing login token")
 }

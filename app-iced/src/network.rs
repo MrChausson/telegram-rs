@@ -15,12 +15,15 @@ use grammers_session::types::PeerRef;
 use grammers_session::updates::UpdatesLike;
 use tg::client::Telegram;
 use tg::session::load_or_new;
+use tg::auth::{export_login_token, import_login_token};
+use grammers_client::tl;
 use tokio::sync::mpsc;
 
 use crate::bridge::{
     ChatDetail, ChatKind, ChatRow, DocKind, DocMeta, MsgRow, MyProfile, ParticipantRole,
     ParticipantRow, Request, SearchHit, SessionInfo, StickerMeta, StickerSetBridge, UiMessage,
 };
+use crate::qr_png::{login_payload, qr_png_bytes};
 
 const ENV_FILE: &str = ".env";
 const SESSION_FILE: &str = ".tg.session";
@@ -36,6 +39,9 @@ const DOWNLOAD_CONCURRENCY: usize = 4;
 
 const DEFAULT_API_ID: Option<&str> = option_env!("TG_API_ID");
 const DEFAULT_API_HASH: Option<&str> = option_env!("TG_API_HASH");
+
+/// QR sign-in: pause between `export`/`import` token polls.
+const QR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// Receiver end of the UI feed, taken once by the Iced subscription.
 static UI_RX: std::sync::Mutex<Option<mpsc::UnboundedReceiver<UiMessage>>> =
@@ -258,7 +264,19 @@ pub fn spawn_network(demo: bool, big: bool, notify: Arc<NotifyPref>) -> Unbounde
                 };
 
                 if !tg.is_authorized().await.unwrap_or(false) {
-                    serve_login(&tg, api_hash.as_deref(), &ui_tx, &mut req_rx).await;
+                    // Generation counter: every Start/Cancel invalidates any
+                    // still-running QR poller of a previous generation.
+                    let qr_cancel =
+                        Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    serve_login(
+                        &tg,
+                        api_id,
+                        api_hash.as_deref(),
+                        &ui_tx,
+                        &mut req_rx,
+                        qr_cancel,
+                    )
+                    .await;
                     let _ = tg::session::save(&session, &session_path);
                 }
 
@@ -784,6 +802,8 @@ async fn serve_demo(
     }));
 
     let assets = ensure_demo_assets(&chats.borrow());
+    // Fake QR sign-in flow (demo): current run generation, 0 = none active.
+    let demo_qr_gen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     // "First Last" echo name for the canned profile (empty parts dropped).
     let demo_display_name = |p: &DemoProfile| -> String {
         [
@@ -1422,6 +1442,46 @@ Request::DownloadDoc { chat_id, msg_id } => {
                     logged_out = true;
                     let _ = ui_tx.send(UiMessage::LoggedOut);
                 }
+                Request::QrLoginStart => {
+                    // Deterministic pseudo-token (stable PNG within a run).
+                    let seed = now as u64 ^ 0x5eed;
+                    let token: Vec<u8> = (0..32u8)
+                        .map(|i| ((seed >> (i % 8)) as u8).wrapping_mul(31 + i).wrapping_add(i))
+                        .collect();
+                    let png = qr_png_bytes(&login_payload(&token));
+                    if let Ok(bytes) = png {
+                        let dir = cache_dir().join("demo");
+                        let _ = std::fs::create_dir_all(&dir);
+                        let path = dir.join("login-qr.png");
+                        let _ = std::fs::write(&path, bytes);
+                        let _ = ui_tx.send(UiMessage::QrCodeReady {
+                            path: path.to_string_lossy().into_owned(),
+                        });
+                    }
+                    // Auto-complete after ~8 s so QA can close the flow offline
+                    // ("confirmed" flashes midway to exercise the status line).
+                    let gen =
+                        demo_qr_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    let ui_tx2 = ui_tx.clone();
+                    let running = demo_qr_gen.clone();
+                    tokio::spawn(async move {
+                        use std::sync::atomic::Ordering;
+                        for i in 0..8 {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            if running.load(Ordering::SeqCst) != gen {
+                                return;
+                            }
+                            if i == 3 {
+                                let _ = ui_tx2.send(UiMessage::QrScanConfirmed);
+                            }
+                        }
+                        running.store(0, Ordering::SeqCst);
+                        let _ = ui_tx2.send(UiMessage::LoginOk { name: "QR Demo".to_string() });
+                    });
+                }
+                Request::QrLoginCancel => {
+                    demo_qr_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 _ => {}
             }
         }
@@ -1471,12 +1531,15 @@ Request::DownloadDoc { chat_id, msg_id } => {
     }
 }
 
-/// Sign-in flow (phone → code → 2FA).
+/// Sign-in flow (phone → code → 2FA), plus QR sign-in start/cancel routing.
+#[allow(clippy::too_many_arguments)]
 async fn serve_login(
     tg: &Telegram,
+    api_id: i32,
     api_hash: Option<&str>,
     ui_tx: &mpsc::UnboundedSender<UiMessage>,
     req_rx: &mut mpsc::UnboundedReceiver<Request>,
+    qr_cancel: Arc<std::sync::atomic::AtomicU64>,
 ) {
     let mut token: Option<LoginToken> = None;
     let mut password: Option<PasswordToken> = None;
@@ -1560,10 +1623,133 @@ async fn serve_login(
                         }
                     }
                 }
+                Request::QrLoginStart => {
+                    let Some(hash) = api_hash else {
+                        let _ = ui_tx.send(UiMessage::QrLoginFailed {
+                            error: "API_HASH is missing — rebuild with TG_API_HASH or add it to .env"
+                                .to_string(),
+                        });
+                        continue;
+                    };
+                    // A new generation invalidates any previous poll loop.
+                    let gen = qr_cancel
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        + 1;
+                    start_qr_login(
+                        tg.client().clone(),
+                        gen,
+                        api_id,
+                        hash.to_string(),
+                        ui_tx.clone(),
+                        qr_cancel.clone(),
+                    );
+                }
+                Request::QrLoginCancel => {
+                    qr_cancel.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 _ => {}
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// Detached QR sign-in poller: exports a login token, shows it as a QR PNG,
+/// then keeps re-importing it every [`QR_POLL_INTERVAL`] until the phone scans
+/// (server flips the token to a confirmed state), another device authorizes
+/// (success), or the session fails/is cancelled. Runs on its own task so the
+/// request loop stays responsive while the server holds the polls.
+fn start_qr_login(
+    client: grammers_client::Client,
+    gen: u64,
+    api_id: i32,
+    api_hash: String,
+    ui_tx: mpsc::UnboundedSender<UiMessage>,
+    cancel: Arc<std::sync::atomic::AtomicU64>,
+) {
+    tokio::spawn(async move {
+        use std::sync::atomic::Ordering;
+        let mut current: Option<Vec<u8>> = None;
+        let dir = cache_dir().join("media");
+        loop {
+            if cancel.load(Ordering::SeqCst) != gen {
+                return;
+            }
+            let res = match current.as_ref() {
+                None => export_login_token(&client, api_id, &api_hash).await,
+                Some(bytes) => import_login_token(&client, bytes.clone()).await,
+            };
+            match res {
+                Ok(tl::enums::auth::LoginToken::Token(tok)) => {
+                    if current.as_deref() != Some(&tok.token) {
+                        current = Some(tok.token.clone());
+                        let png = qr_png_bytes(&login_payload(&tok.token));
+                        match png {
+                            Ok(bytes) => {
+                                let _ = std::fs::create_dir_all(&dir);
+                                let path = dir.join("login-qr.png");
+                                match std::fs::write(&path, bytes) {
+                                    Ok(()) => {
+                                        let _ = ui_tx.send(UiMessage::QrCodeReady {
+                                            path: path.to_string_lossy().into_owned(),
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let _ = ui_tx.send(UiMessage::QrLoginFailed {
+                                            error: format!("Could not save the QR code: {e}"),
+                                        });
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let _ = ui_tx.send(UiMessage::QrLoginFailed {
+                                    error: format!("Could not render the QR code: {e}"),
+                                });
+                                return;
+                            }
+                        }
+                    }
+                    // Unchanged token: the code is already on screen; keep
+                    // polling for a scan without re-sending the image.
+                }
+                Ok(tl::enums::auth::LoginToken::MigrateTo(mig)) => {
+                    // Sender pool follows the DC switch; keep polling with the
+                    // migrated token.
+                    current = Some(mig.token);
+                }
+                Ok(tl::enums::auth::LoginToken::Success(success)) => {
+                    let name = authorization_user_name(&success.authorization);
+                    let _ = ui_tx.send(UiMessage::LoginOk { name });
+                    return;
+                }
+                Err(e) => {
+                    let _ = ui_tx.send(UiMessage::QrLoginFailed {
+                        error: format!("QR sign-in failed: {e}"),
+                    });
+                    return;
+                }
+            }
+            tokio::time::sleep(QR_POLL_INTERVAL).await;
+        }
+    });
+}
+
+/// Display name ("First Last") of the user inside an `auth.Authorization`.
+fn authorization_user_name(authorization: &tl::enums::auth::Authorization) -> String {
+    match authorization {
+        tl::enums::auth::Authorization::Authorization(a) => match &a.user {
+            tl::enums::User::User(u) => {
+                [u.first_name.clone().unwrap_or_default(),
+                 u.last_name.clone().unwrap_or_default()]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+            }
+            tl::enums::User::Empty(_) => String::new(),
+        },
+        tl::enums::auth::Authorization::SignUpRequired(_) => String::new(),
     }
 }
 
@@ -2661,7 +2847,8 @@ async fn handle_request(
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
             }
         },
-        Request::LoginPhone { .. } | Request::LoginCode { .. } | Request::LoginPassword { .. } => {}
+        Request::LoginPhone { .. } | Request::LoginCode { .. } | Request::LoginPassword { .. }
+        | Request::QrLoginStart | Request::QrLoginCancel => {}
     }
 }
 
