@@ -88,6 +88,42 @@ CHANGELOG.md          separate bullets, merged by lead
 - [ ] New UI strings are English; Escape/backdrop close works
 - Report format: PASS/FAIL + evidence paths + regressions noticed
 
+### Visual QA runbook (this dev box — battle-tested, follow exactly)
+
+1. **Sandbox first**: `TG_DATA_DIR=$(mktemp -d)` — never touch the real
+   `~/.local/share/telegram-rs` or the repo `.env`. Gotcha: with `TG_DATA_DIR`
+   unset AND a `.env` in the CWD, `data_dir()` resolves to `"."` (repo root)
+   — pre-existing demo-asset behavior, not a bug.
+2. **Launch for input injection**: `env -u WAYLAND_DISPLAY cargo run -p
+   app-iced -- --demo` (XWayland — `xdotool` cannot reach Wayland windows;
+   `ydotool` is broken on this box, don't try).
+3. **Locate the window fresh EVERY run**: `xdotool search --name "Telegram
+   RS"` then `xdotool getwindowgeometry --shell`. Position is NOT stable
+   between launches. Geometry is in **physical pixels** (logical × 1.6).
+4. **One coordinate system**: window-relative **physical px** — the same
+   space as a grim capture cropped at `(X, Y, X+W, Y+H)` with PIL. Do NOT
+   mix with `grim -g` which takes **logical** coords (applies the 1.6 scale
+   itself). If a crop looks shifted, you mixed the two.
+5. **Interactions**: `xdotool windowactivate` before the first action;
+   `xdotool mousemove --window $WID X Y sleep 0.3 click 1`; inject exactly
+   ONE key event per action (double-delivery was observed: one Escape
+   disarms, a second closes the panel — by design).
+6. **Never trust stale coordinates**: element positions move with layout
+   (e.g. the login pills sit at a different Y on the QR pane than on the
+   phone pane). Re-locate elements from a FRESH screenshot before each
+   click; verify the click landed by capturing again.
+7. **Verify by looking, then by measuring**: read the capture (vision) for
+   the state you expect; for "nothing changed" claims prefer pixel-diff
+   (`ImageChops.difference(...).getbbox()`), but beware **blinking carets**
+   and clock timestamps — a non-empty diff alone is NOT proof of change.
+8. **Demo-mode facts** (v0.8.1+): boots SIGNED-IN (LoginOk "Demo" at boot;
+   `--open-first` opens the first chat). To reach the sign-in screen:
+   Settings ▸ Account ▸ Log out ▸ Yes. Demo peer activity stops after
+   logout. QR-login demo auto-completes ~8 s after the pane opens
+   (ScanConfirmed flash at 4 s) and re-pushes the canned dialogs.
+9. **Evidence**: save captures as `/tmp/opencode/<run>-<step>.png`, list
+   paths in the report; reference them when claiming PASS/FAIL.
+
 ## Reviewer checklist (per diff)
 
 - [ ] Whitelist respected (no out-of-scope files touched)
@@ -101,4 +137,5 @@ CHANGELOG.md          separate bullets, merged by lead
 
 | Wave | Lots | Branches → PRs | Conflicts hit | Notes |
 |---|---|---|---|---|
-| 0 | auth.rs extraction + playbook + housekeeping | chore/wave0-prep | — | seed entry |
+| 0 | auth.rs extraction + playbook + housekeeping | chore/wave0-prep → #26 | — | seed entry |
+| 1 | A: logout (#27) · B: QR login (#28) | feat/logout, feat/qr-login2 | mechanical (Message enum, append regions) | builder session aborts ×2 → WIP patch rescue worked; usage-limit kills → lead ran final review+smoke; demo-QR parity fix (dialogs re-push) found only by runtime smoke |
