@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.9.0] - 2026-08-27
+
 ### Added
 - **Account sign-out**: a "Log out" action in Settings ▸ Profile runs the
   server-side `auth.logOut` (best-effort), deletes the local session file and
