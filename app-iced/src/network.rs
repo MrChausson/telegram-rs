@@ -738,18 +738,31 @@ async fn serve_demo(
     // Canned own-profile, mutated by UpdateProfile so the edit flow echoes.
     struct DemoProfile {
         first_name: Option<String>,
+        last_name: Option<String>,
         username: Option<String>,
         phone: Option<String>,
         bio: Option<String>,
     }
     let demo_profile = std::rc::Rc::new(std::cell::RefCell::new(DemoProfile {
-        first_name: Some("Demo User".into()),
+        first_name: Some("Demo".into()),
+        last_name: Some("User".into()),
         username: Some("demo_user".into()),
         phone: Some("+33612345678".into()),
         bio: Some("Just trying out tg.".into()),
     }));
 
     let assets = ensure_demo_assets(&chats.borrow());
+    // "First Last" echo name for the canned profile (empty parts dropped).
+    let demo_display_name = |p: &DemoProfile| -> String {
+        [
+            p.first_name.clone().unwrap_or_default(),
+            p.last_name.clone().unwrap_or_default(),
+        ]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+    };
     // Two canned sticker packs (512x512 generated PNGs) + their picker data.
     let demo_stickers = ensure_demo_stickers();
     // Snapshot of the chat list as dialog rows (also used by the
@@ -1330,23 +1343,26 @@ Request::DownloadDoc { chat_id, msg_id } => {
                 Request::GetMe => {
                     let p = demo_profile.borrow();
                     let _ = ui_tx.send(UiMessage::MyProfile(MyProfile {
-                        name: p.first_name.clone().unwrap_or_default(),
+                        name: demo_display_name(&p),
+                        last_name: p.last_name.clone(),
                         username: p.username.clone(),
                         phone: p.phone.clone(),
                         bio: p.bio.clone(),
                     }));
                 }
-                Request::UpdateProfile { first_name, bio, .. } => {
+                Request::UpdateProfile { first_name, last_name, bio } => {
                     {
                         let mut p = demo_profile.borrow_mut();
                         if first_name.is_some() {
                             p.first_name = first_name;
                         }
+                        p.last_name = last_name.filter(|s| !s.trim().is_empty());
                         p.bio = bio;
                     }
                     let p = demo_profile.borrow();
                     let _ = ui_tx.send(UiMessage::MyProfile(MyProfile {
-                        name: p.first_name.clone().unwrap_or_default(),
+                        name: demo_display_name(&p),
+                        last_name: p.last_name.clone(),
                         username: p.username.clone(),
                         phone: p.phone.clone(),
                         bio: p.bio.clone(),
@@ -2301,6 +2317,7 @@ async fn handle_request(
             Ok(p) => {
                 let _ = ui_tx.send(UiMessage::MyProfile(MyProfile {
                     name: p.name,
+                    last_name: p.last_name,
                     username: p.username,
                     phone: p.phone,
                     bio: p.bio,
@@ -2323,6 +2340,7 @@ async fn handle_request(
                 Ok(p) => {
                     let _ = ui_tx.send(UiMessage::MyProfile(MyProfile {
                         name: p.name,
+                        last_name: p.last_name,
                         username: p.username,
                         phone: p.phone,
                         bio: p.bio,

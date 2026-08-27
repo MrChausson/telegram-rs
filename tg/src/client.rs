@@ -1178,7 +1178,7 @@ impl Telegram {
             })
             .await
             .context("fetching own profile")?;
-        let (name, username, phone) = match users.pop() {
+        let (name, last_name, username, phone) = match users.pop() {
             Some(tl::enums::User::User(u)) => {
                 let name = [u.first_name.clone().unwrap_or_default(),
                     u.last_name.clone().unwrap_or_default()]
@@ -1186,6 +1186,10 @@ impl Telegram {
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
                 .join(" ");
+                let last_name = u
+                    .last_name
+                    .clone()
+                    .filter(|s| !s.trim().is_empty());
                 let username = u
                     .username
                     .clone()
@@ -1200,6 +1204,7 @@ impl Telegram {
                     .filter(|s| !s.is_empty());
                 (
                     name,
+                    last_name,
                     username,
                     u.phone
                         .clone()
@@ -1207,7 +1212,7 @@ impl Telegram {
                         .map(|p| format!("+{p}")),
                 )
             }
-            _ => ("Unknown".to_string(), None, None),
+            _ => ("Unknown".to_string(), None, None, None),
         };
         let bio = match self
             .client
@@ -1225,6 +1230,7 @@ impl Telegram {
         };
         Ok(SelfProfile {
             name,
+            last_name,
             username,
             phone,
             bio: bio.filter(|s| !s.trim().is_empty()),

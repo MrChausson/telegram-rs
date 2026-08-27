@@ -183,6 +183,8 @@ pub struct ParticipantRow {
 pub struct MyProfile {
     /// Display name ("First Last").
     pub name: String,
+    /// Last name (`None` when unset).
+    pub last_name: Option<String>,
     /// @username without the sigil (`None` when unset).
     pub username: Option<String>,
     /// Phone in international format (`+336…`), `None` when hidden.

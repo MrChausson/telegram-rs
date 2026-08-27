@@ -384,6 +384,8 @@ pub struct State {
     pub my_profile: Option<MyProfile>,
     /// First-name input of the profile edit form.
     pub edit_name: String,
+    /// Last-name input of the profile edit form.
+    pub edit_last_name: String,
     /// Bio input of the profile edit form.
     pub edit_bio: String,
     /// Active account sessions (`UiMessage::Sessions`).
@@ -512,6 +514,7 @@ impl State {
             settings_tab: SettingsTab::Profile,
             my_profile: None,
             edit_name: String::new(),
+            edit_last_name: String::new(),
             edit_bio: String::new(),
             sessions: Vec::new(),
             cache_bytes: None,
@@ -1107,10 +1110,22 @@ impl State {
             UiMessage::MyProfile(p) => {
                 // Seed the edit inputs only while they're untouched, so a
                 // profile echo never clobbers text being typed.
-                let untouched = self.edit_name.is_empty() && self.edit_bio.is_empty();
-                let first = p.name.split_once(' ').map(|(f, _)| f).unwrap_or(&p.name);
+                let untouched = self.edit_name.is_empty()
+                    && self.edit_last_name.is_empty()
+                    && self.edit_bio.is_empty();
                 if untouched {
+                    // First name = display name with the last-name suffix
+                    // removed (multi-word last names stay intact).
+                    let first = match &p.last_name {
+                        Some(last) => p
+                            .name
+                            .strip_suffix(last.as_str())
+                            .map(|s| s.trim_end())
+                            .unwrap_or(p.name.trim_end()),
+                        None => p.name.trim_end(),
+                    };
                     self.edit_name = first.to_string();
+                    self.edit_last_name = p.last_name.clone().unwrap_or_default();
                     self.edit_bio = p.bio.clone().unwrap_or_default();
                 }
                 self.my_profile = Some(p);
@@ -1745,18 +1760,19 @@ impl State {
         self.settings_tab = tab;
     }
 
-    /// Submits the profile edit form (First name / Bio). Telegram requires a
-    /// non-empty first name; the refreshed profile arrives as a `MyProfile`
-    /// echo. `last_name` is left unchanged (kept simple).
+    /// Submits the profile edit form (First name / Last name / Bio). Telegram
+    /// requires a non-empty first name; the refreshed profile arrives as a
+    /// `MyProfile` echo. An emptied last name clears it server-side.
     pub fn submit_profile_edit(&mut self) {
         let first = self.edit_name.trim();
         if first.is_empty() {
             return;
         }
+        let last = self.edit_last_name.trim().to_string();
         let bio = self.edit_bio.trim().to_string();
         let _ = self.req_tx.send(Request::UpdateProfile {
             first_name: Some(first.to_string()),
-            last_name: None,
+            last_name: Some(last),
             bio: Some(bio),
         });
     }
@@ -3462,16 +3478,19 @@ mod tests {
         let (mut state, _) = demo_state();
         state.on_message(UiMessage::MyProfile(MyProfile {
             name: "Demo User".into(),
+            last_name: Some("User".into()),
             username: Some("demo_user".into()),
             phone: Some("+33612345678".into()),
             bio: Some("Hello".into()),
         }));
         assert_eq!(state.edit_name, "Demo");
+        assert_eq!(state.edit_last_name, "User");
         assert_eq!(state.edit_bio, "Hello");
         // A later echo must NOT clobber typed text.
         state.edit_name = "Typed".into();
         state.on_message(UiMessage::MyProfile(MyProfile {
             name: "Demo User".into(),
+            last_name: Some("User".into()),
             username: None,
             phone: None,
             bio: None,
@@ -3487,6 +3506,7 @@ mod tests {
     fn profile_update_request_shape() {
         let (mut state, mut req_rx) = demo_state();
         state.edit_name = "  Alice  ".into();
+        state.edit_last_name = "  Smith  ".into();
         state.edit_bio = "  Rust dev  ".into();
         state.submit_profile_edit();
         let reqs = drain(&mut req_rx);
@@ -3495,9 +3515,9 @@ mod tests {
                 r,
                 Request::UpdateProfile {
                     first_name: Some(f),
-                    last_name: None,
+                    last_name: Some(l),
                     bio: Some(b),
-                } if f == "Alice" && b == "Rust dev"
+                } if f == "Alice" && l == "Smith" && b == "Rust dev"
             )),
             "expected trimmed UpdateProfile request, got {reqs:?}"
         );
