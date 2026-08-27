@@ -75,6 +75,10 @@ jobs:
           sudo -u builder sed -i "s/^pkgver=.*/pkgver=${VERSION}/; s/^pkgrel=.*/pkgrel=1/" PKGBUILD
           # Recompute every sha256 (tarball + LICENSE move with the tag).
           sudo -u builder bash -c "cd /home/builder/pkg && updpkgsums && makepkg --printsrcinfo > .SRCINFO"
+          # updpkgsums leaves downloaded sources in the repo dir; committing
+          # them trips the AUR's 500 KiB blob hook (the tarball lives on
+          # GitHub — the AUR fetches it at build time via the source= URL).
+          sudo -u builder rm -f *.tar.gz
 
       - name: Commit & push (only when changed)
         run: |
