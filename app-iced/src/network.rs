@@ -1471,10 +1471,15 @@ Request::DownloadDoc { chat_id, msg_id } => {
                     }
                     // Auto-complete after ~8 s so QA can close the flow offline
                     // ("confirmed" flashes midway to exercise the status line).
+                    // The canned dialogs ride along right after LoginOk — the
+                    // real path re-fetches them via `serve_login` returning;
+                    // the demo runtime has no such hand-off, so mirror it here
+                    // or the sidebar stays empty post-QR-login.
                     let gen =
                         demo_qr_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                     let ui_tx2 = ui_tx.clone();
                     let running = demo_qr_gen.clone();
+                    let rows = build_rows(&chats.borrow());
                     tokio::spawn(async move {
                         use std::sync::atomic::Ordering;
                         for i in 0..8 {
@@ -1488,6 +1493,7 @@ Request::DownloadDoc { chat_id, msg_id } => {
                         }
                         running.store(0, Ordering::SeqCst);
                         let _ = ui_tx2.send(UiMessage::LoginOk { name: "QR Demo".to_string() });
+                        let _ = ui_tx2.send(UiMessage::Dialogs(rows));
                     });
                 }
                 Request::QrLoginCancel => {
