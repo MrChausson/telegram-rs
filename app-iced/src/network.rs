@@ -697,17 +697,17 @@ fn demo_chat_detail(id: i64) -> Option<ChatDetail> {
         },
         1003 => ChatDetail {
             id,
-            title: "Canal Paysages".into(),
+            title: "Landscape Channel".into(),
             kind: ChatKind::Channel,
             is_forum: false,
             username: Some("paysages".into()),
-            bio: Some("Paysages du monde entier, une photo par jour 🌍".into()),
+            bio: Some("Landscapes from around the world, one photo a day 🌍".into()),
             phone: None,
             members_count: Some(1284),
         },
         1004 => ChatDetail {
             id,
-            title: "Groupe Famille".into(),
+            title: "Family Group".into(),
             kind: ChatKind::Group,
             is_forum: false,
             username: None,
@@ -772,8 +772,8 @@ fn demo_participants_init() -> HashMap<i64, Vec<ParticipantRow>> {
         (
             1004,
             vec![
-                p(2101, "Maman", ParticipantRole::Creator),
-                p(2102, "Papa", ParticipantRole::Member),
+                p(2101, "Mom", ParticipantRole::Creator),
+                p(2102, "Dad", ParticipantRole::Member),
                 p(2103, "Sophie", ParticipantRole::Member),
                 p(DEMO_SELF_ID, "Demo User", ParticipantRole::Member),
             ],

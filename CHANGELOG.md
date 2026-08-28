@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **i18n sweep**: the file-picker dialog title ("Send a file") and the demo
+  data are fully English — the info panel now matches the sidebar
+  ("Landscape Channel"/"Family Group" titles + bios, "Mom"/"Dad" members)
+  instead of leftover French variants.
+
 ## [v0.10.0] - 2026-08-28
 
 ### Added

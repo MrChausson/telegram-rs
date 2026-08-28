@@ -497,7 +497,7 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::AttachFile => {
             let task = iced::Task::future(async {
                 let picked = rfd::AsyncFileDialog::new()
-                    .set_title("Envoyer un fichier")
+                    .set_title("Send a file")
                     .pick_file()
                     .await
                     .map(|f| f.path().to_string_lossy().into_owned());
