@@ -21,7 +21,8 @@ use tokio::sync::mpsc;
 
 use crate::bridge::{
     ChatDetail, ChatKind, ChatRow, DocKind, DocMeta, MsgRow, MyProfile, ParticipantRole,
-    ParticipantRow, Request, SearchHit, SessionInfo, StickerMeta, StickerSetBridge, UiMessage,
+    ParticipantRow, Request, SearchHit, SessionInfo, StickerMeta, StickerSetBridge, TopicRow,
+    UiMessage,
 };
 use crate::qr_png::{login_payload, qr_png_bytes};
 
@@ -678,6 +679,7 @@ fn demo_chat_detail(id: i64) -> Option<ChatDetail> {
             id,
             title: "Camille".into(),
             kind: ChatKind::User,
+            is_forum: false,
             username: Some("camille_dev".into()),
             bio: Some("Rust & mountains. Weekend hike photos inside 🏔".into()),
             phone: Some("+33 6 12 34 56 78".into()),
@@ -687,6 +689,7 @@ fn demo_chat_detail(id: i64) -> Option<ChatDetail> {
             id,
             title: "Rust Group".into(),
             kind: ChatKind::Group,
+            is_forum: true,
             username: None,
             bio: Some("Weekly project reviews — Fridays at 18:00.".into()),
             phone: None,
@@ -696,6 +699,7 @@ fn demo_chat_detail(id: i64) -> Option<ChatDetail> {
             id,
             title: "Canal Paysages".into(),
             kind: ChatKind::Channel,
+            is_forum: false,
             username: Some("paysages".into()),
             bio: Some("Paysages du monde entier, une photo par jour 🌍".into()),
             phone: None,
@@ -705,6 +709,7 @@ fn demo_chat_detail(id: i64) -> Option<ChatDetail> {
             id,
             title: "Groupe Famille".into(),
             kind: ChatKind::Group,
+            is_forum: false,
             username: None,
             bio: None,
             phone: None,
@@ -714,6 +719,7 @@ fn demo_chat_detail(id: i64) -> Option<ChatDetail> {
             id,
             title: "Paris Bots".into(),
             kind: ChatKind::Bot,
+            is_forum: false,
             username: Some("parisbot".into()),
             bio: Some("Release news for Paris bots. /help for commands.".into()),
             phone: None,
@@ -803,6 +809,18 @@ async fn serve_demo(
     // Member lists (info panel), mutable so demo admin actions visibly
     // flip roles / remove members and the refresh re-serves the mutation.
     let parts = std::rc::Rc::new(std::cell::RefCell::new(demo_participants_init()));
+
+    // Forum topics (chips bar): only the Rust Group is a forum; created
+    // topics are appended at runtime so the bar echoes the mutation. The
+    // Family Group deliberately stays a plain group (mixed QA experience).
+    let demo_topics = std::rc::Rc::new(std::cell::RefCell::new(HashMap::from([(
+        1002i64,
+        vec![
+            TopicRow { id: 20, root_msg_id: 20, title: "Announcements".into(), icon_color: 0 },
+            TopicRow { id: 30, root_msg_id: 30, title: "PR review".into(), icon_color: 1 },
+            TopicRow { id: 40, root_msg_id: 40, title: "Random".into(), icon_color: 2 },
+        ],
+    )])));
 
     // Canned own-profile, mutated by UpdateProfile so the edit flow echoes.
     struct DemoProfile {
@@ -951,6 +969,28 @@ async fn serve_demo(
                 MsgRow::text(11, "Yes! see you tomorrow 👋", now - 42, true),
             ],
             1002 => vec![
+                // Canned forum-topic threads: a root row per topic (id ==
+                // topic id, as the server does) + replies carrying the
+                // thread's reply header (reply_to = topic root).
+                MsgRow::text(20, "Topic \u{201c}Announcements\u{201d} created", now - 20000, false),
+                MsgRow {
+                    reply_to: Some(20),
+                    ..MsgRow::text(21, "v0.9 shipped \u{1f389}", now - 19500, false)
+                },
+                MsgRow::text(30, "Topic \u{201c}PR review\u{201d} created", now - 19000, false),
+                MsgRow {
+                    reply_to: Some(30),
+                    ..MsgRow::text(31, "novel review of the PR?", now - 18500, false)
+                },
+                MsgRow {
+                    reply_to: Some(30),
+                    ..MsgRow::text(32, "LGTM once CI passes", now - 18000, true)
+                },
+                MsgRow::text(40, "Topic \u{201c}Random\u{201d} created", now - 17500, false),
+                MsgRow {
+                    reply_to: Some(40),
+                    ..MsgRow::text(41, "Random fact: Rust compiles \u{1f980}", now - 17000, false)
+                },
                 MsgRow {
                     sender_name: Some("Camille".into()),
                     sender_id: Some(2001),
@@ -1373,6 +1413,72 @@ Request::DownloadDoc { chat_id, msg_id } => {
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
                     let _ = ui_tx.send(UiMessage::MemberUpdated { chat_id: id, user_id });
+                }
+                Request::GetTopics { id } => {
+                    let topics = demo_topics.borrow().get(&id).cloned().unwrap_or_default();
+                    let _ = ui_tx.send(UiMessage::Topics {
+                        id,
+                        is_forum: id == 1002,
+                        topics,
+                    });
+                }
+                Request::CreateTopic { id, title } => {
+                    // New topic: its id is the root service message id, as
+                    // the server does (topic keyed by its root message).
+                    let nid = next_id;
+                    next_id += 1;
+                    let mut all = demo_topics.borrow_mut();
+                    let list = all.entry(id).or_default();
+                    let topic = TopicRow {
+                        id: nid as i64,
+                        root_msg_id: nid,
+                        icon_color: (list.len() % 7) as i32,
+                        title: title.clone(),
+                    };
+                    list.push(topic.clone());
+                    drop(all);
+                    // The server echoes the root service message.
+                    let _ = ui_tx.send(UiMessage::NewMessage {
+                        chat_id: id,
+                        id: nid,
+                        text: format!("Topic \u{201c}{title}\u{201d} created"),
+                        date: now,
+                        out: false,
+                        photo: None,
+                        doc: None,
+                        sticker: None,
+                        reply_to: None,
+                        forwarded_from: None,
+                        sender_name: None,
+                        sender_id: None,
+                    });
+                    let _ = ui_tx.send(UiMessage::Topics {
+                        id,
+                        is_forum: true,
+                        topics: demo_topics.borrow().get(&id).cloned().unwrap_or_default(),
+                    });
+                    let _ = ui_tx.send(UiMessage::TopicCreated { chat_id: id, topic });
+                }
+                Request::SendTopicMessage { id, text, topic_root } => {
+                    let nid = next_id;
+                    next_id += 1;
+                    // The server tags thread messages with a reply header
+                    // pointing at the topic root; the echo mirrors that so
+                    // the optimistic row merges and stays in the thread view.
+                    let _ = ui_tx.send(UiMessage::NewMessage {
+                        chat_id: id,
+                        id: nid,
+                        text,
+                        date: now,
+                        out: true,
+                        photo: None,
+                        doc: None,
+                        sticker: None,
+                        reply_to: Some(topic_root),
+                        forwarded_from: None,
+                        sender_name: None,
+                        sender_id: None,
+                    });
                 }
                 Request::SetMuted { .. } => {}
                 Request::KickParticipant { user_id, .. } => {
@@ -2429,6 +2535,17 @@ fn chat_detail_to_bridge(d: tg::model::ChatDetail) -> ChatDetail {
         bio: d.bio,
         phone: d.phone,
         members_count: d.members_count,
+        is_forum: d.is_forum,
+    }
+}
+
+/// Maps a core `TopicInfo` onto its bridge duplicate.
+fn topic_to_bridge(t: tg::model::TopicInfo) -> TopicRow {
+    TopicRow {
+        id: t.id,
+        root_msg_id: t.root_msg_id,
+        title: t.title,
+        icon_color: t.icon_color,
     }
 }
 
@@ -3012,6 +3129,63 @@ async fn handle_request(
                     }));
                 }
             },
+            None => {
+                let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+            }
+        },
+        Request::GetTopics { id } => match peers.get(&id) {
+            Some((_, peer_ref)) => {
+                let forum = tg.is_forum(peer_ref).await.unwrap_or(false);
+                let topics = if forum {
+                    tg.get_topics(peer_ref).await.unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let _ = ui_tx.send(UiMessage::Topics {
+                    id,
+                    is_forum: forum,
+                    topics: topics.into_iter().map(topic_to_bridge).collect(),
+                });
+            }
+            None => {
+                let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+            }
+        },
+        Request::CreateTopic { id, title } => match peers.get(&id) {
+            Some((_, peer_ref)) => match tg.create_topic(peer_ref, &title).await {
+                Ok(parsed) => {
+                    // The refreshed list is the server truth; the parsed
+                    // service message (when present) selects the new chip.
+                    let topics = tg
+                        .get_topics(peer_ref)
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(topic_to_bridge)
+                        .collect();
+                    let _ = ui_tx.send(UiMessage::Topics { id, is_forum: true, topics });
+                    if let Some(t) = parsed {
+                        let _ = ui_tx.send(UiMessage::TopicCreated {
+                            chat_id: id,
+                            topic: topic_to_bridge(t),
+                        });
+                    }
+                }
+                Err(e) => {
+                    let _ = ui_tx
+                        .send(UiMessage::Error(format!("Could not create topic: {e}")));
+                }
+            },
+            None => {
+                let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+            }
+        },
+        Request::SendTopicMessage { id, text, topic_root } => match peers.get(&id) {
+            Some((_, peer_ref)) => {
+                if let Err(e) = tg.send_to_topic(peer_ref, &text, topic_root).await {
+                    let _ = ui_tx.send(UiMessage::Error(format!("Send failed: {e}")));
+                }
+            }
             None => {
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
             }

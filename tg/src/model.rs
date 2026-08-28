@@ -119,6 +119,24 @@ pub struct ChatDetail {
     pub bio: Option<String>,
     pub phone: Option<String>,
     pub members_count: Option<u32>,
+    /// True for supergroups/channels with forums (topics) enabled
+    /// (`Channel.forum` flag).
+    pub is_forum: bool,
+}
+
+/// A forum topic of a supergroup (drives the chips bar of forum chats).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicInfo {
+    /// Server-side topic id — the same value as `root_msg_id` (Telegram keys
+    /// a topic by its root service message id).
+    pub id: i64,
+    /// Id of the topic's root message (the thread anchor; messages of the
+    /// thread carry a reply header pointing at it).
+    pub root_msg_id: i32,
+    /// Topic title as set at creation.
+    pub title: String,
+    /// Icon color index (Telegram's topic palette, 0-6).
+    pub icon_color: i32,
 }
 
 /// Role of a member inside a group/channel.

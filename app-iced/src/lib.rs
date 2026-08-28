@@ -375,6 +375,19 @@ pub enum Message {
     PerfTick,
     /// Continuous-redraw tick (see `--continuous`): only asks for a redraw.
     PerfTickC,
+    // -----------------------------------------------------------------
+    // Forum topics (chips bar of forum supergroups)
+    // -----------------------------------------------------------------
+    /// A topic chip was picked (`None` = the "All messages" chip).
+    TopicChipPicked(Option<i32>),
+    /// The "+" chip opened the inline create-topic field.
+    TopicCreateOpen,
+    /// The create-topic title field changed.
+    TopicCreateTitle(String),
+    /// The create-topic field was submitted (Enter / "Add").
+    TopicCreateSubmit,
+    /// The create-topic field was cancelled (✕).
+    TopicCreateCancel,
 }
 
 fn boot() -> (State, Task<Message>) {
@@ -620,6 +633,11 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
                 state.on_perf_tick();
             }
         }
+        Message::TopicChipPicked(root) => state.topic_select(root),
+        Message::TopicCreateOpen => state.topic_open_create(),
+        Message::TopicCreateTitle(t) => state.topic_title = t,
+        Message::TopicCreateSubmit => state.topic_submit_create(),
+        Message::TopicCreateCancel => state.topic_cancel_create(),
     }
     // A downloaded document was clicked: hand it to the system opener.
     if let Some(path) = state.open_file.take() {
@@ -1979,6 +1997,11 @@ fn conversation_pane(state: &State) -> Element<'_> {
     let mut top: iced::widget::Column<'_, Message> = column![];
     if let Some(b) = pinned_banner {
         top = top.push(b);
+    }
+    // Topic chips bar of forum chats: sits in the body zone, right between
+    // the pinned-banner zone and the message list.
+    if state.topic_bar_visible() {
+        top = top.push(topic_chips_bar(state));
     }
 
     let pane = pane.push(top).push(body).push(composer).height(Length::Fill);
@@ -3497,6 +3520,137 @@ fn pinned_banner(m: &MsgRow) -> Element<'static> {
         iced::widget::button::Style {
             background: Some(iced::Background::Color(bg)),
             border: iced::Border::default(),
+            ..iced::widget::button::Style::default()
+        }
+    })
+    .into()
+}
+
+// ---------------------------------------------------------------------------
+// Forum topics (chips bar)
+// ---------------------------------------------------------------------------
+
+/// Height of the topic chips bar (chips + vertical padding).
+const TOPIC_BAR_H: f32 = 34.0;
+
+/// The topic chips bar of a forum chat: an "All messages" chip, one chip
+/// per topic and a "+" chip that opens the inline create-topic field. Only
+/// rendered for forum chats with a loaded topic list
+/// (`State::topic_bar_visible`), between the pinned-banner zone and the
+/// message list.
+fn topic_chips_bar(state: &State) -> Element<'_> {
+    let mut chips = iced::widget::Row::new().spacing(6).align_y(Alignment::Center);
+    // The create field leads the row while open: appended at the end it can
+    // land past the horizontal-scroll viewport once the chips fill the bar,
+    // which reads as "the + chip does nothing".
+    if state.topic_creating {
+        chips = chips.push(
+            text_input("Topic title", &state.topic_title)
+                .on_input(Message::TopicCreateTitle)
+                .on_submit(Message::TopicCreateSubmit)
+                .size(theme::font::TIMESTAMP)
+                .width(160.0),
+        );
+        chips = chips.push(
+            button(
+                text("Add")
+                    .size(theme::font::TIMESTAMP)
+                    .color(rgb((255, 255, 255))),
+            )
+            .on_press(Message::TopicCreateSubmit)
+            .padding([3.0, 10.0])
+            .style(|_theme, _status| iced::widget::button::Style {
+                background: Some(iced::Background::Color(rgb(theme::ACCENT()))),
+                border: iced::Border {
+                    radius: 14.0.into(),
+                    ..iced::Border::default()
+                },
+                ..iced::widget::button::Style::default()
+            }),
+        );
+        chips = chips.push(
+            button(
+                text("\u{2715}")
+                    .size(theme::font::TIMESTAMP)
+                    .color(rgb(theme::TEXT_SECONDARY())),
+            )
+            .on_press(Message::TopicCreateCancel)
+            .padding([3.0, 6.0])
+            .style(|_theme, _status| iced::widget::button::Style {
+                background: None,
+                border: iced::Border::default(),
+                ..iced::widget::button::Style::default()
+            }),
+        );
+    }
+    chips = chips.push(topic_chip(
+        "All messages",
+        state.topic_selected.is_none(),
+        Message::TopicChipPicked(None),
+    ));
+    for t in &state.topic_topics {
+        chips = chips.push(topic_chip(
+            &t.title,
+            state.topic_selected == Some(t.root_msg_id),
+            Message::TopicChipPicked(Some(t.root_msg_id)),
+        ));
+    }
+    if !state.topic_creating {
+        chips = chips.push(topic_chip("+", false, Message::TopicCreateOpen));
+    }
+    container(
+        scrollable(chips).direction(iced::widget::scrollable::Direction::Horizontal(
+            iced::widget::scrollable::Scrollbar::default(),
+        )),
+    )
+    .width(Length::Fill)
+    .height(TOPIC_BAR_H)
+    .padding([0.0, theme::layout::MSG_PAD_X])
+    .align_y(Alignment::Center)
+    .style(|_theme| container::Style {
+        background: Some(iced::Background::Color(rgb(theme::LIST_BG()))),
+        border: iced::Border {
+            radius: 0.0.into(),
+            width: 0.0,
+            color: iced::Color::TRANSPARENT,
+        },
+        ..container::Style::default()
+    })
+    .into()
+}
+
+/// One rounded topic chip; the active one fills with the accent color.
+fn topic_chip<'a>(label: &'a str, active: bool, msg: Message) -> Element<'a> {
+    let fg = if active {
+        (255, 255, 255)
+    } else {
+        theme::TEXT_PRIMARY()
+    };
+    button(
+        text(label.to_string())
+            .size(theme::font::TIMESTAMP)
+            .color(rgb(fg)),
+    )
+    .on_press(msg)
+    .padding([3.0, 12.0])
+    .style(move |_theme, status| {
+        let (bg, border) = if active {
+            (theme::ACCENT(), theme::ACCENT())
+        } else {
+            let bg = match status {
+                iced::widget::button::Status::Hovered
+                | iced::widget::button::Status::Pressed => theme::ROW_HOVER(),
+                _ => theme::LIST_BG(),
+            };
+            (bg, theme::MENU_BORDER())
+        };
+        iced::widget::button::Style {
+            background: Some(iced::Background::Color(rgb(bg))),
+            border: iced::Border {
+                radius: 14.0.into(),
+                width: 1.0,
+                color: rgb(border),
+            },
             ..iced::widget::button::Style::default()
         }
     })

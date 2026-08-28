@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Forum topics (slice 1)**: supergroups with forums enabled show a topic
+  chips bar between the pinned-banner zone and the message list — "All
+  messages" plus one chip per topic and a "+" chip opening an inline
+  create-topic field (validated, Escape cancels). Selecting a chip filters
+  the visible messages to that thread and colors it with the accent; the
+  composer posts into the selected topic (`inputReplyToMessage.top_msg_id`).
+  Chat switches reset the selection; non-forum chats are unchanged (no bar).
+  Demo: the Rust Group is now a forum with three canned topics, the Family
+  Group stays a plain group. Trade-off: thread filtering runs over the
+  already-loaded history (fetch-on-demand for older thread pages is future
+  work).
 - **Group admin tools**: right-clicking a member row in the chat info panel
   opens an admin menu — "Promote to admin"/"Demote admin" (applied
   immediately via `channels.editAdmin`) and "Ban member"/"Remove from group"
