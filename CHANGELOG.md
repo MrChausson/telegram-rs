@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.10.0] - 2026-08-28
+
 ### Added
 - **Forum topics (slice 1)**: supergroups with forums enabled show a topic
   chips bar between the pinned-banner zone and the message list — "All
