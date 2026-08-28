@@ -926,6 +926,7 @@ impl Telegram {
                     bio: about.filter(|s| !s.trim().is_empty()),
                     phone,
                     members_count: None,
+                    is_forum: false,
                 })
             }
             PeerKind::Channel => {
@@ -942,11 +943,13 @@ impl Telegram {
                     })
                     .await
                     .context("fetching channel")?;
+                let mut forum = false;
                 let (title, username) = chats
                     .chats()
                     .into_iter()
                     .find_map(|c| match c {
                         tl::enums::Chat::Channel(ch) => {
+                            forum = ch.forum;
                             Some((ch.title.clone(), ch.username.clone()))
                         }
                         _ => None,
@@ -978,6 +981,7 @@ impl Telegram {
                     bio: about.filter(|s| !s.trim().is_empty()),
                     phone: None,
                     members_count,
+                    is_forum: forum,
                 })
             }
             PeerKind::Chat => {
@@ -1023,6 +1027,7 @@ impl Telegram {
                     bio: (!chat.about.trim().is_empty()).then(|| chat.about.clone()),
                     phone: None,
                     members_count,
+                    is_forum: false,
                 })
             }
         }

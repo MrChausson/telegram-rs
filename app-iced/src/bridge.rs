@@ -159,6 +159,8 @@ pub struct ChatDetail {
     pub bio: Option<String>,
     pub phone: Option<String>,
     pub members_count: Option<u32>,
+    /// True for supergroups/channels with forums (topics) enabled.
+    pub is_forum: bool,
 }
 
 /// Role of a member inside a group/channel.
@@ -176,6 +178,19 @@ pub struct ParticipantRow {
     pub name: String,
     pub username: Option<String>,
     pub role: ParticipantRole,
+}
+
+/// A forum topic of a supergroup (chips bar of forum chats). Duplicated from
+/// the `tg` model like the other bridge types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicRow {
+    /// Server-side topic id (same value as `root_msg_id`).
+    pub id: i64,
+    /// Id of the topic's root message — the thread anchor messages reply to.
+    pub root_msg_id: i32,
+    pub title: String,
+    /// Icon color index (Telegram's topic palette).
+    pub icon_color: i32,
 }
 
 /// The signed-in user's own profile (settings panel).
@@ -304,6 +319,12 @@ pub enum Request {
     /// Bans a member forever (`kick_only=false`) or just removes them from
     /// the group, letting them rejoin (`kick_only=true`).
     AdminBan { id: i64, user_id: i64, kick_only: bool },
+    /// Loads the forum topics of a chat (empty list for non-forum chats).
+    GetTopics { id: i64 },
+    /// Creates a forum topic titled `title` in the chat.
+    CreateTopic { id: i64, title: String },
+    /// Sends a text message into the topic thread anchored by `topic_root`.
+    SendTopicMessage { id: i64, text: String, topic_root: i32 },
 }
 
 /// Message sent by the network to the UI.
@@ -431,6 +452,16 @@ pub enum UiMessage {
     /// Bot-api id of the signed-in user (so admin actions can hide on
     /// yourself). Sent by the network layer when the member list is served.
     MemberSelfId { id: i64 },
+    /// The forum topics of the open chat arrived (`is_forum: false` means the
+    /// chat is not a forum and `topics` is empty).
+    Topics {
+        id: i64,
+        is_forum: bool,
+        topics: Vec<TopicRow>,
+    },
+    /// A forum topic was created server-side; the refreshed topic list was
+    /// sent right before it (`Topics`).
+    TopicCreated { chat_id: i64, topic: TopicRow },
     /// Error to display (status).
     Error(String),
 }

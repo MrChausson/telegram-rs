@@ -415,6 +415,28 @@ pub struct State {
     pub muted: bool,
 
     // -----------------------------------------------------------------
+    // Forum topics (chips bar of forum supergroups; namespaced `topic_`)
+    // -----------------------------------------------------------------
+    /// Topics of the open forum chat (`UiMessage::Topics`); empty until the
+    /// first `GetTopics` answer (non-forum chats always stay empty).
+    pub topic_topics: Vec<crate::bridge::TopicRow>,
+    /// True when the open chat is a forum (supergroup with topics enabled).
+    pub topic_is_forum: bool,
+    /// Selected topic's root message id (`None` = the "All messages" chip).
+    pub topic_selected: Option<i32>,
+    /// The inline create-topic field (title input) is open.
+    pub topic_creating: bool,
+    /// Title input of the inline create-topic field.
+    pub topic_title: String,
+    /// FULL history of the open chat; `messages` is the topic-filtered view
+    /// of it (identical when no topic is selected). Slice-1 trade-off: thread
+    /// filtering runs over the already-loaded history only — a topic whose
+    /// older messages were never fetched (beyond `MESSAGE_LIMIT`) shows a
+    /// partial thread; fetch-on-demand via `messages.getReplies` is future
+    /// work.
+    pub(crate) topic_all_messages: Vec<MsgRow>,
+
+    // -----------------------------------------------------------------
     // Theme (light/dark)
     // -----------------------------------------------------------------
     /// Current color scheme. Flipped by [`Self::toggle_theme`]; applied to
@@ -580,6 +602,12 @@ impl State {
             admin_confirm: None,
             admin_self_id: None,
             muted: false,
+            topic_topics: Vec::new(),
+            topic_is_forum: false,
+            topic_selected: None,
+            topic_creating: false,
+            topic_title: String::new(),
+            topic_all_messages: Vec::new(),
             theme_mode: ThemeMode::Dark,
             emoji_panel_open: false,
             emoji_recents: Vec::new(),
@@ -842,7 +870,10 @@ impl State {
                     // the authoritative `PinnedMessage` (fetched right after)
                     // overrides it.
                     self.pinned_id = rows.iter().rev().find(|m| m.pinned).map(|m| m.id);
-                    self.messages = rows;
+                    // `messages` is the topic-filtered view of the history.
+                    self.topic_all_messages = rows;
+                    self.messages =
+                        Self::topic_view(&self.topic_all_messages, self.topic_selected);
                     self.loading = false;
                     self.editing = None;
                     self.context_menu = None;
@@ -870,58 +901,46 @@ impl State {
                 sender_id,
             } => {
                 // Open chat? Merge the message (dedupe the optimistic local
-                // send, which is tagged id=0).
+                // send, which is tagged id=0) into the full history, then
+                // mirror it into the topic-filtered view when it belongs.
                 if self.open_chat == Some(chat_id) {
                     self.loading = false;
-                    let rows = &mut self.messages;
-                    if let Some(m) = rows.iter_mut().find(|m| m.id == id) {
-                        m.text = text;
-                        m.out = out;
-                        m.photo = photo;
-                        m.doc = doc;
-                        m.sticker = sticker;
-                        m.reply_to = reply_to;
-                        m.forwarded_from = forwarded_from;
-                        m.uploading = None;
-                    } else if let Some(i) = rows.iter().position(|m| {
-                        m.id == 0
-                            && (m.text == text || (m.uploading.is_some() && out))
-                    }) {
-                        let m = &mut rows[i];
-                        m.id = id;
-                        m.out = out;
-                        m.photo = photo.or(m.photo.take());
-                        m.doc = doc.or(m.doc.take());
-                        m.sticker = sticker.or(m.sticker.take());
-                        m.reply_to = reply_to;
-                        m.forwarded_from = forwarded_from;
-                        m.uploading = None;
-                    } else {
-                        rows.push(MsgRow {
-                            id,
-                            text,
-                            date,
-                            out,
-                            photo,
-                            photo_path: None,
-                            doc,
-                            doc_path: None,
-                            sticker,
-                            sticker_path: None,
-                            reply_to,
-                            forwarded_from,
-                            uploading: None,
-                            upload_token: None,
-                            read: false,
-                            sender_name,
-                            sender_id,
-                            pinned: false,
-                        });
+                    // Merge into the full history first; the topic-filtered
+                    // view then mirrors the stored row when it belongs to
+                    // the selected thread.
+                    let row = MsgRow {
+                        id,
+                        text,
+                        date,
+                        out,
+                        photo,
+                        doc,
+                        sticker,
+                        reply_to,
+                        forwarded_from,
+                        sender_name,
+                        sender_id,
+                        ..MsgRow::text(0, "", 0, false)
+                    };
+                    Self::merge_new_message(&mut self.topic_all_messages, row);
+                    let stored = self
+                        .topic_all_messages
+                        .iter()
+                        .find(|m| m.id == id)
+                        .cloned();
+                    let in_view = self.topic_selected.is_none_or(|root| {
+                        stored.as_ref().is_some_and(|m| Self::topic_in_thread(m, root))
+                    });
+                    if in_view {
+                        if let Some(m) = stored {
+                            Self::merge_new_message(&mut self.messages, m);
+                        }
                     }
                     // Stickers stream their image separately: ask for any
                     // sticker row still missing its file (new arrivals and
                     // just-merged optimistic sends alike).
-                    let missing = rows
+                    let missing = self
+                        .topic_all_messages
                         .iter()
                         .filter(|m| m.id > 0 && m.sticker.is_some() && m.sticker_path.is_none())
                         .map(|m| m.id)
@@ -954,6 +973,13 @@ impl State {
                 if self.open_chat == Some(chat_id) {
                     for m in &mut self.messages {
                         if m.id == id {
+                            m.text = text.clone();
+                            m.date = date;
+                            break;
+                        }
+                    }
+                    for m in &mut self.topic_all_messages {
+                        if m.id == id {
                             m.text = text;
                             m.date = date;
                             break;
@@ -967,6 +993,7 @@ impl State {
             }
             UiMessage::MessageDeleted { ids } => {
                 self.messages.retain(|m| !ids.contains(&m.id));
+                self.topic_all_messages.retain(|m| !ids.contains(&m.id));
                 if self.editing.is_some_and(|e| ids.contains(&e)) {
                     self.editing = None;
                 }
@@ -1172,6 +1199,25 @@ impl State {
                 }
             }
             UiMessage::MemberSelfId { id } => self.admin_self_id = Some(id),
+            UiMessage::Topics { id, is_forum, topics } => {
+                if self.open_chat == Some(id) {
+                    self.topic_is_forum = is_forum;
+                    self.topic_topics = topics;
+                }
+            }
+            UiMessage::TopicCreated { chat_id, topic } => {
+                if self.open_chat == Some(chat_id) {
+                    // `Topics` usually carried the refreshed list already;
+                    // append defensively (idempotent).
+                    if !self.topic_topics.iter().any(|t| t.id == topic.id) {
+                        self.topic_topics.push(topic.clone());
+                    }
+                    self.topic_creating = false;
+                    self.topic_title.clear();
+                    // Jump into the fresh thread so posting continues there.
+                    self.topic_select(Some(topic.root_msg_id));
+                }
+            }
             UiMessage::LoginCodeRequired => {
                 self.login_step = LoginStep::Code;
                 self.login_input.clear();
@@ -1436,6 +1482,12 @@ impl State {
         // back handler) close it before touching the message rows.
         if self.search_open() {
             self.close_search();
+            return;
+        }
+        // The inline create-topic field (forum chips bar) closes first:
+        // it is the innermost input of the conversation body.
+        if self.topic_creating {
+            self.topic_cancel_create();
             return;
         }
         // An armed destructive confirmation is cancelled first.
@@ -1894,6 +1946,120 @@ impl State {
         });
     }
 
+    // -----------------------------------------------------------------
+    // Forum topics (chips bar of forum supergroups; namespaced `topic_`)
+    // -----------------------------------------------------------------
+
+    /// Thread membership, slice-1 style: the root row itself, or any message
+    /// whose reply header anchors it to the topic root. Server-side, every
+    /// message of a thread carries `reply_to_msg_id == topic id` (in-thread
+    /// replies add `reply_to_top_id` on top), and `MsgRow.reply_to` mirrors
+    /// exactly that field.
+    fn topic_in_thread(m: &MsgRow, root: i32) -> bool {
+        m.id == root || m.reply_to == Some(root)
+    }
+
+    /// The visible subset of the history for a topic selection (`None` =
+    /// everything).
+    fn topic_view(all: &[MsgRow], selected: Option<i32>) -> Vec<MsgRow> {
+        match selected {
+            None => all.to_vec(),
+            Some(root) => all
+                .iter()
+                .filter(|m| Self::topic_in_thread(m, root))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    /// Merges an incoming message (as a fresh [`MsgRow`], paths unset) into
+    /// a row store: updates a known id, dedupes the optimistic `id == 0`
+    /// send, or appends.
+    fn merge_new_message(rows: &mut Vec<MsgRow>, row: MsgRow) {
+        if let Some(m) = rows.iter_mut().find(|m| m.id == row.id) {
+            m.text = row.text;
+            m.out = row.out;
+            m.photo = row.photo;
+            m.doc = row.doc;
+            m.sticker = row.sticker;
+            m.reply_to = row.reply_to;
+            m.forwarded_from = row.forwarded_from;
+            m.uploading = None;
+        } else if let Some(i) = rows.iter().position(|m| {
+            m.id == 0
+                && (m.text == row.text || (m.uploading.is_some() && row.out))
+        }) {
+            let m = &mut rows[i];
+            let optimistic = std::mem::replace(m, row);
+            m.photo = optimistic.photo.or(m.photo.take());
+            m.doc = optimistic.doc.or(m.doc.take());
+            m.sticker = optimistic.sticker.or(m.sticker.take());
+            m.photo_path = optimistic.photo_path;
+            m.doc_path = optimistic.doc_path;
+            m.sticker_path = optimistic.sticker_path;
+            m.uploading = None;
+        } else {
+            rows.push(row);
+        }
+    }
+
+    /// Chips-bar visibility: forum chats with a loaded topic list only
+    /// (non-forum chats never get a bar).
+    pub fn topic_bar_visible(&self) -> bool {
+        self.topic_is_forum && !self.topic_topics.is_empty()
+    }
+
+    /// Rebuilds `messages` from the full history for the current selection.
+    fn apply_topic_filter(&mut self) {
+        self.messages = Self::topic_view(&self.topic_all_messages, self.topic_selected);
+        self.invalidate_layout();
+    }
+
+    /// A chip was picked (`None` = the "All messages" chip).
+    pub fn topic_select(&mut self, root: Option<i32>) {
+        if self.topic_selected == root {
+            return;
+        }
+        self.topic_selected = root;
+        self.apply_topic_filter();
+        self.scroll_to_bottom = true;
+    }
+
+    /// Opens the inline create-topic field (the "+" chip).
+    pub fn topic_open_create(&mut self) {
+        self.topic_creating = true;
+        self.topic_title.clear();
+    }
+
+    /// Closes the inline create-topic field (Escape / ✕).
+    pub fn topic_cancel_create(&mut self) {
+        self.topic_creating = false;
+        self.topic_title.clear();
+    }
+
+    /// Submits the create-topic field: non-empty titles only (validation);
+    /// the field closes when the server echo arrives (`TopicCreated`).
+    pub fn topic_submit_create(&mut self) {
+        let title = self.topic_title.trim().to_string();
+        if title.is_empty() {
+            return;
+        }
+        if let Some(id) = self.open_chat {
+            let _ = self.req_tx.send(Request::CreateTopic { id, title });
+        }
+        self.topic_title.clear();
+    }
+
+    /// Drops every conversation-scoped topic bit (chat switch / logout).
+    fn topic_reset(&mut self) {
+        self.topic_topics.clear();
+        self.topic_is_forum = false;
+        self.topic_selected = None;
+        self.topic_creating = false;
+        self.topic_title.clear();
+        self.topic_all_messages.clear();
+    }
+
     /// The @username line was clicked: returns the text to copy.
     pub fn copy_username(&mut self) -> Option<String> {
         let username = self.chat_info.as_ref()?.username.as_ref()?;
@@ -2029,6 +2195,7 @@ impl State {
         self.admin_menu = None;
         self.admin_confirm = None;
         self.muted = false;
+        self.topic_reset();
         self.pinned_id = None;
         self.create_menu_open = false;
         self.create_dialog = None;
@@ -2145,12 +2312,27 @@ impl State {
         } else if let Some(id) = self.open_chat {
             let reply_to = self.reply_target.take().map(|r| r.msg_id);
             // Optimistic local send: the id and date are unknown (incoming
-            // updates will provide them).
-            self.messages.push(MsgRow {
+            // updates will provide them). Kept in the full history and in
+            // the topic-filtered view alike.
+            let row = MsgRow {
                 reply_to,
                 ..MsgRow::text(0, text.clone(), 0, true)
-            });
-            let _ = self.req_tx.send(Request::SendMessage { id, text, reply_to });
+            };
+            self.topic_all_messages.push(row.clone());
+            self.messages.push(row);
+            match self.topic_selected {
+                // Plain post into the selected topic thread. Replies to a
+                // specific message keep the plain path: the server lands a
+                // reply in the thread of its target.
+                Some(root) if reply_to.is_none() => {
+                    let _ = self
+                        .req_tx
+                        .send(Request::SendTopicMessage { id, text, topic_root: root });
+                }
+                _ => {
+                    let _ = self.req_tx.send(Request::SendMessage { id, text, reply_to });
+                }
+            }
             self.typing = false;
         }
         self.composer.clear();
@@ -2319,6 +2501,7 @@ impl State {
         self.admin_menu = None;
         self.admin_confirm = None;
         self.muted = false;
+        self.topic_reset();
         self.emoji_panel_open = false;
         self.sticker_picker_open = false;
         if self.persist_ui {
@@ -2326,6 +2509,9 @@ impl State {
         }
         let _ = self.req_tx.send(Request::OpenChat { id });
         let _ = self.req_tx.send(Request::MarkRead { id });
+        // Forum chats answer with their topic list; non-forum chats get an
+        // explicit empty answer so stale chips never linger.
+        let _ = self.req_tx.send(Request::GetTopics { id });
         self.invalidate_layout();
     }
 
@@ -2344,6 +2530,7 @@ impl State {
         self.admin_menu = None;
         self.admin_confirm = None;
         self.muted = false;
+        self.topic_reset();
         self.emoji_panel_open = false;
         self.sticker_picker_open = false;
         if self.persist_ui {
@@ -3214,9 +3401,14 @@ mod tests {
         assert!(state.messages.is_empty());
         assert!(state.loading, "opening a chat must set the loading flag");
         let reqs = drain(&mut req_rx);
-        assert_eq!(reqs.len(), 2, "open + mark-read are sent to the network");
+        assert_eq!(
+            reqs.len(),
+            3,
+            "open + mark-read + get-topics are sent to the network"
+        );
         assert!(matches!(reqs[0], Request::OpenChat { id: 7 }));
         assert!(matches!(reqs[1], Request::MarkRead { id: 7 }));
+        assert!(matches!(reqs[2], Request::GetTopics { id: 7 }));
     }
 
     #[test]
@@ -3356,6 +3548,7 @@ mod tests {
             bio: Some("Weekly reviews".into()),
             phone: None,
             members_count: Some(3),
+            is_forum: false,
         }
     }
 
@@ -3738,6 +3931,7 @@ mod tests {
             bio: None,
             phone: None,
             members_count: None,
+            is_forum: false,
         }));
         assert_eq!(state.copy_username().as_deref(), Some("@camille_dev"));
     }
@@ -4246,5 +4440,241 @@ mod tests {
         );
         state.escape();
         assert!(state.context_menu.is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // Forum topics (chips bar of forum supergroups)
+    // -----------------------------------------------------------------
+
+    /// A forum chat (the demo Rust Group, id 1002): topics loaded, mixed
+    /// history with a canned "Announcements" thread (root 20) and one
+    /// general row.
+    fn forum_state() -> (State, tokio::sync::mpsc::UnboundedReceiver<Request>) {
+        let (req_tx, req_rx) = tokio::sync::mpsc::unbounded_channel::<Request>();
+        let mut state = State::new(req_tx);
+        state.authenticated = true;
+        state.open_chat = Some(1002);
+        state.topic_is_forum = true;
+        state.topic_topics = vec![
+            crate::bridge::TopicRow {
+                id: 20,
+                root_msg_id: 20,
+                title: "Announcements".into(),
+                icon_color: 0,
+            },
+            crate::bridge::TopicRow {
+                id: 30,
+                root_msg_id: 30,
+                title: "PR review".into(),
+                icon_color: 1,
+            },
+        ];
+        state.topic_all_messages = vec![
+            MsgRow::text(20, "topic root", 100, false),
+            MsgRow {
+                reply_to: Some(20),
+                ..MsgRow::text(21, "in the thread", 110, false)
+            },
+            MsgRow::text(50, "general row", 120, false),
+        ];
+        state.messages =
+            State::topic_view(&state.topic_all_messages, state.topic_selected);
+        (state, req_rx)
+    }
+
+    #[test]
+    fn topic_chips_visible_only_for_loaded_forum_topics() {
+        let (mut state, _) = forum_state();
+        assert!(state.topic_bar_visible());
+
+        // A plain (non-forum) chat: no flag, no bar — even the topics
+        // payload alone would not turn it on.
+        state.topic_is_forum = false;
+        assert!(!state.topic_bar_visible());
+        state.topic_is_forum = true;
+
+        // Topics not loaded yet: no bar (no empty strip while loading).
+        state.topic_topics.clear();
+        assert!(!state.topic_bar_visible());
+    }
+
+    #[test]
+    fn topic_selection_filters_the_visible_list() {
+        let (mut state, _) = forum_state();
+        assert_eq!(state.messages.len(), 3, "All messages shows everything");
+
+        // Selecting a topic keeps only the thread (root + anchored rows).
+        state.topic_select(Some(20));
+        assert_eq!(
+            state.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![20, 21]
+        );
+        // The full history is untouched.
+        assert_eq!(state.topic_all_messages.len(), 3);
+
+        // Back to "All messages".
+        state.topic_select(None);
+        assert_eq!(state.messages.len(), 3);
+
+        // A topic without loaded rows renders an empty view (slice-1
+        // client-side filter; older messages may not be cached).
+        state.topic_select(Some(30));
+        assert!(state.messages.is_empty());
+    }
+
+    #[test]
+    fn topic_create_flow_validates_and_echoes() {
+        let (mut state, mut req_rx) = forum_state();
+        state.topic_open_create();
+        assert!(state.topic_creating);
+
+        // Empty title: rejected, no request, field stays open.
+        state.topic_submit_create();
+        assert!(drain(&mut req_rx).is_empty());
+        assert!(state.topic_creating, "invalid input keeps the field open");
+
+        // Whitespace is trimmed before the request goes out.
+        state.topic_title = "  Release  ".into();
+        state.topic_submit_create();
+        let reqs = drain(&mut req_rx);
+        assert!(
+            reqs.iter()
+                .any(|r| matches!(r, Request::CreateTopic { id: 1002, title }
+                    if title.as_str() == "Release")),
+            "expected CreateTopic, got {reqs:?}"
+        );
+
+        // Server echo: appended, selected, field closed.
+        state.on_message(UiMessage::TopicCreated {
+            chat_id: 1002,
+            topic: crate::bridge::TopicRow {
+                id: 60,
+                root_msg_id: 60,
+                title: "Release".into(),
+                icon_color: 3,
+            },
+        });
+        assert_eq!(state.topic_topics.len(), 3);
+        assert_eq!(state.topic_selected, Some(60));
+        assert!(!state.topic_creating);
+        assert!(state.topic_title.is_empty());
+    }
+
+    #[test]
+    fn topic_composer_routes_plain_posts_into_the_thread() {
+        let (mut state, mut req_rx) = forum_state();
+        state.topic_select(Some(20));
+        state.composer = "hello thread".into();
+        state.submit();
+        let reqs = drain(&mut req_rx);
+        assert!(
+            reqs.iter().any(|r| matches!(r,
+                Request::SendTopicMessage { id: 1002, topic_root: 20, .. })),
+            "expected SendTopicMessage, got {reqs:?}"
+        );
+        // The optimistic row landed in the view AND the full history.
+        assert!(state
+            .messages
+            .iter()
+            .any(|m| m.id == 0 && m.text == "hello thread"));
+        assert!(state.topic_all_messages.iter().any(|m| m.id == 0));
+
+        // The server echo merges the optimistic row in BOTH stores and
+        // anchors it to the thread (reply header = topic root).
+        state.on_message(UiMessage::NewMessage {
+            chat_id: 1002,
+            id: 70,
+            text: "hello thread".into(),
+            date: 130,
+            out: true,
+            photo: None,
+            doc: None,
+            sticker: None,
+            reply_to: Some(20),
+            forwarded_from: None,
+            sender_name: None,
+            sender_id: None,
+        });
+        assert!(state.messages.iter().all(|m| m.id != 0), "row deduped");
+        assert!(state.topic_all_messages.iter().all(|m| m.id != 0));
+        assert_eq!(
+            state.messages.iter().find(|m| m.id == 70).map(|m| m.reply_to),
+            Some(Some(20))
+        );
+
+        // No selection: the plain send path (no topic_root).
+        state.topic_select(None);
+        state.composer = "general".into();
+        state.submit();
+        let reqs = drain(&mut req_rx);
+        assert!(
+            reqs.iter()
+                .any(|r| matches!(r, Request::SendMessage { id: 1002, .. }))
+        );
+        assert!(
+            !reqs.iter()
+                .any(|r| matches!(r, Request::SendTopicMessage { .. }))
+        );
+    }
+
+    #[test]
+    fn topic_state_resets_on_chat_switch() {
+        let (mut state, mut req_rx) = forum_state();
+        state.topic_select(Some(20));
+        state.topic_open_create();
+        state.topic_title = "half typed".into();
+
+        state.open_chat(1004);
+        assert_eq!(state.topic_selected, None);
+        assert!(!state.topic_is_forum);
+        assert!(state.topic_topics.is_empty());
+        assert!(!state.topic_creating);
+        assert!(state.topic_title.is_empty());
+        assert!(state.topic_all_messages.is_empty());
+        let reqs = drain(&mut req_rx);
+        assert!(
+            reqs.iter()
+                .any(|r| matches!(r, Request::GetTopics { id: 1004 })),
+            "chat switch requests the new chat's topics, got {reqs:?}"
+        );
+    }
+
+    #[test]
+    fn topic_new_message_outside_the_selection_stays_out_of_the_view() {
+        let (mut state, _) = forum_state();
+        state.topic_select(Some(20));
+        state.on_message(UiMessage::NewMessage {
+            chat_id: 1002,
+            id: 80,
+            text: "general arrival".into(),
+            date: 140,
+            out: false,
+            photo: None,
+            doc: None,
+            sticker: None,
+            reply_to: None,
+            forwarded_from: None,
+            sender_name: None,
+            sender_id: None,
+        });
+        // Recorded in the full history, kept out of the filtered view.
+        assert!(state.topic_all_messages.iter().any(|m| m.id == 80));
+        assert!(state.messages.iter().all(|m| m.id != 80));
+
+        // Selecting its topic would surface it (thread rows only).
+        state.topic_select(None);
+        assert!(state.messages.iter().any(|m| m.id == 80));
+    }
+
+    #[test]
+    fn escape_closes_the_topic_create_field_before_other_overlays() {
+        let (mut state, _) = forum_state();
+        state.topic_open_create();
+        state.info_open = true; // another overlay is up too
+        state.escape();
+        assert!(!state.topic_creating, "the create field closes first");
+        assert!(state.info_open, "only the topic field closed");
+        state.escape();
+        assert!(!state.info_open);
     }
 }
