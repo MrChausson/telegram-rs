@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.10.2] - 2026-08-30
+
 ### Fixed
 - **Client crash on incoming notifications**: a new-message notification that
   arrived during a real session used to crash the whole client with
