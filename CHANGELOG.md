@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Renderer defaults to Vulkan on NVIDIA**: on hosts running the NVIDIA
+  proprietary driver the app now defaults to the Vulkan wgpu backend (it
+  previously forced GL everywhere). On NVIDIA/Wayland, requesting GL
+  routes through Mesa GL + libLLVM (llvmpipe), a pure-CPU rasterizer, so
+  dense chat panels (glyphs + rounded corners + images) crawled despite
+  the GPU being present. Elsewhere GL (EGL) remains the default for its
+  smaller resident set (~47 MB PSS vs ~115 MB Vulkan). `WGPU_BACKEND`
+  always overrides this choice.
+
 ## [v0.10.2] - 2026-08-30
 
 ### Fixed
