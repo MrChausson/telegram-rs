@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **Forum topics bar**: the chip bar is now readable — the horizontal scrollbar
+  that visually overlapped the topic chips is hidden (`Scrollbar::hidden`).
+  The bar still scrolls horizontally when the chips overflow (trackpad /
+  Shift+scroll).
+- **Reply/forward previews no longer overflow their bubble**: the quoted-snippet
+  text in `quote_block` (in-message reply previews) and in the composer's reply
+  bar was laid out single-line with `Wrapping::None`, so long snippets ran past
+  the bubble/bar edge. Both texts are now clipped to their container, keeping
+  the one-line height in lockstep with the virtualizer's row-height estimate.
+
+## [v0.10.2] - 2026-08-30
+
+### Fixed
 - **Client crash on incoming notifications**: a new-message notification that
   arrived during a real session used to crash the whole client with
   *"Cannot start a runtime from within a runtime"* (tokio multi-thread
