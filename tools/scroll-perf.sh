@@ -24,7 +24,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RUN=${RUN_S:-6}
-BIN=target/release/app-iced
+BIN=target/release/telegram-rs
 cargo build --release -p app-iced >/dev/null
 
 run_case() { # $1 label, then binary args
