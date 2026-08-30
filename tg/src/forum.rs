@@ -51,8 +51,11 @@ fn random_id() -> i64 {
 }
 
 impl Telegram {
-    /// True when `channel` is a supergroup/channel with forums (topics)
-    /// enabled (`channels.getChannels`, `Channel.forum` flag).
+    /// True when `channel` is a forum host: a supergroup/channel with forums
+    /// (topics) enabled (`channels.getChannels`, `Channel.forum` flag), or a
+    /// private bot peer flagged as a forum host (`bot_forum_view` /
+    /// `bot_forum_can_manage_topics` on the bot's `User` — such peers are not
+    /// `Channel`s, so `GetChannels` returns an empty list for them).
     pub async fn is_forum(&self, channel: &PeerRef) -> Result<bool> {
         let res = self
             .client()
@@ -61,10 +64,23 @@ impl Telegram {
             })
             .await
             .context("fetching channel")?;
-        Ok(res.chats().into_iter().any(|c| match c {
+        if res.chats().into_iter().any(|c| match c {
             tl::enums::Chat::Channel(ch) => ch.forum,
             _ => false,
-        }))
+        }) {
+            return Ok(true);
+        }
+        if let grammers_client::peer::Peer::User(u) = self
+            .client()
+            .resolve_peer(*channel)
+            .await
+            .context("resolving forum peer")?
+        {
+            if let tl::enums::User::User(raw) = u.raw {
+                return Ok(raw.bot_forum_view || raw.bot_forum_can_manage_topics);
+            }
+        }
+        Ok(false)
     }
 
     /// Lists the topics of a forum channel (`messages.getForumTopics`,
