@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **Forum topics in private bot chats**: the topic chips bar now also shows
+  for 1:1 chats with forum-enabled bots (e.g. a support/agent bot that
+  organizes itself into topics), not just for supergroup/channel forums.
+  `is_forum` now recognizes a `User` bot whose `bot_forum_view` or
+  `bot_forum_can_manage_topics` flag is set.
 - **i18n sweep**: the file-picker dialog title ("Send a file") and the demo
   data are fully English — the info panel now matches the sidebar
   ("Landscape Channel"/"Family Group" titles + bios, "Mom"/"Dad" members)
