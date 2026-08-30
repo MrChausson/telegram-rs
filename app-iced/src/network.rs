@@ -43,6 +43,13 @@ const DEFAULT_API_HASH: Option<&str> = option_env!("TG_API_HASH");
 
 /// QR sign-in: pause between `export`/`import` token polls.
 const QR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
+/// Upper bound for the backoff applied while a QR poll keeps failing (e.g. a
+/// transient `FLOOD_WAIT`), so we never hammer a restricted session but the
+/// last QR stays on screen for the scan.
+const QR_POLL_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+/// Consecutive poll failures before we drop the (possibly dead) token and
+/// re-export a fresh one, so the QR keeps regenerating instead of blanking.
+const QR_REFRESH_AFTER_ERRORS: u32 = 3;
 
 /// Receiver end of the UI feed, taken once by the Iced subscription.
 static UI_RX: std::sync::Mutex<Option<mpsc::UnboundedReceiver<UiMessage>>> =
@@ -1858,6 +1865,10 @@ fn start_qr_login(
     tokio::spawn(async move {
         use std::sync::atomic::Ordering;
         let mut current: Option<Vec<u8>> = None;
+        // Backoff grows while polls keep failing; the QR stays visible so a
+        // scan still works even if the server is momentarily rejecting polls.
+        let mut backoff = QR_POLL_INTERVAL;
+        let mut consecutive_errors: u32 = 0;
         // Previous QR PNG on disk; deleted once the replacement is on screen
         // so rotations don't accumulate files in the cache dir.
         let mut last_png: Option<std::path::PathBuf> = None;
@@ -1872,6 +1883,8 @@ fn start_qr_login(
             };
             match res {
                 Ok(tl::enums::auth::LoginToken::Token(tok)) => {
+                    consecutive_errors = 0;
+                    backoff = QR_POLL_INTERVAL;
                     if current.as_deref() != Some(&tok.token) {
                         current = Some(tok.token.clone());
                         let png = qr_png_bytes(&login_payload(&tok.token));
@@ -1917,6 +1930,8 @@ fn start_qr_login(
                     // polling for a scan without re-sending the image.
                 }
                 Ok(tl::enums::auth::LoginToken::MigrateTo(mig)) => {
+                    consecutive_errors = 0;
+                    backoff = QR_POLL_INTERVAL;
                     // `mig.dc_id` is intentionally ignored: the client's
                     // sender pool re-targets on the next invoke (grammers
                     // follows the migration error path), so we just keep
@@ -1932,10 +1947,20 @@ fn start_qr_login(
                     return;
                 }
                 Err(e) => {
-                    let _ = ui_tx.send(UiMessage::QrLoginFailed {
-                        error: format!("QR sign-in failed: {e}"),
-                    });
-                    return;
+                    // Do NOT blank the QR here: a transient failure (flood,
+                    // network blip) shouldn't kill a still-scanable code. Keep
+                    // the last QR on screen, back off, and keep polling.
+                    consecutive_errors += 1;
+                    // After several failures the token may be stale/expired
+                    // server-side: drop it so we re-export a fresh one.
+                    if consecutive_errors >= QR_REFRESH_AFTER_ERRORS {
+                        current = None;
+                        consecutive_errors = 0;
+                    }
+                    backoff = (backoff * 2).min(QR_POLL_MAX_BACKOFF);
+                    eprintln!("[telegram-rs] qr sign-in poll failed, backing off: {e}");
+                    tokio::time::sleep(backoff).await;
+                    continue;
                 }
             }
             tokio::time::sleep(QR_POLL_INTERVAL).await;
