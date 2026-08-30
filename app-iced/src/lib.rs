@@ -2906,10 +2906,15 @@ fn composer_bar(state: &State) -> Element<'_> {
                         text("Reply to")
                             .size(theme::font::TIMESTAMP)
                             .color(rgb(theme::ACCENT())),
-                        text(&reply.snippet)
-                            .size(theme::font::TIMESTAMP)
-                            .color(rgb(theme::TEXT_SECONDARY()))
-                            .wrapping(iced::widget::text::Wrapping::None),
+                        container(
+                            text(&reply.snippet)
+                                .size(theme::font::TIMESTAMP)
+                                .color(rgb(theme::TEXT_SECONDARY()))
+                                // single-line, clipped to the bar instead of overflowing
+                                .wrapping(iced::widget::text::Wrapping::None),
+                        )
+                        .width(Length::Fill)
+                        .clip(true),
                     ]
                     .spacing(1)
                     .width(Length::Fill),
@@ -3384,12 +3389,18 @@ fn quote_block(label: &str, content: String) -> Element<'static> {
             text(label.to_string())
                 .size(theme::font::TIMESTAMP)
                 .color(rgb(theme::ACCENT())),
-            text(content)
-                .size(theme::font::TIMESTAMP)
-                .color(rgb(theme::TEXT_SECONDARY()))
-                .wrapping(iced::widget::text::Wrapping::None),
+            container(
+                text(content)
+                    .size(theme::font::TIMESTAMP)
+                    .color(rgb(theme::TEXT_SECONDARY()))
+                    // single-line, clipped to the bubble instead of overflowing
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .width(Length::Fill)
+            .clip(true),
         ]
-        .spacing(1),
+        .spacing(1)
+        .width(Length::Fill),
     ]
     .spacing(8)
     .align_y(Alignment::Center)
@@ -3600,7 +3611,10 @@ fn topic_chips_bar(state: &State) -> Element<'_> {
     }
     container(
         scrollable(chips).direction(iced::widget::scrollable::Direction::Horizontal(
-            iced::widget::scrollable::Scrollbar::default(),
+            // Hidden: a visible scroller overlaps the chips in the 34px bar
+            // and makes the topic labels unreadable. The bar still scrolls
+            // when the chips overflow (trackpad / Shift+scroll).
+            iced::widget::scrollable::Scrollbar::hidden(),
         )),
     )
     .width(Length::Fill)
