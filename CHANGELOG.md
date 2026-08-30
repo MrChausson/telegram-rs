@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.10.3] - 2026-08-30
+
 ### Changed
 - **Renderer defaults to Vulkan on NVIDIA**: on hosts running the NVIDIA
   proprietary driver the app now defaults to the Vulkan wgpu backend (it
