@@ -3475,11 +3475,30 @@ pub fn notify_new_message(open_chat: Option<i64>, chat_id: i64, title: &str, pre
     if open_chat == Some(chat_id) {
         return;
     }
-    let _ = notify_rust::Notification::new()
-        .summary(title)
-        .body(preview)
-        .appname("tg")
-        .show();
+    // Run the (blocking, D-Bus-backed) notify-rust call on its own OS thread.
+    //
+    // The sync `show()` path goes through `zbus::block_on`, which lazily builds a
+    // fresh *multi-thread* tokio runtime and drives the future with it. If we call
+    // it directly here we are running on the network thread, which has already
+    // entered *its* current-thread runtime (`serve`/`spawn_network`). Tokio then
+    // panics with "Cannot start a runtime from within a runtime"
+    // (tokio multi_thread/mod.rs). That crash used to fire at random, whenever a
+    // new-message notification arrived while the client was running a real session
+    // (never in `--demo`, which has no notifications).
+    //
+    // Spawning a detached thread gives `zbus` its own clean thread to boot a
+    // runtime on, so the notification is display-only work that can never panic
+    // or block the network loop. Notifications are rare, so a throwaway thread
+    // per notification is acceptable.
+    let title = title.to_owned();
+    let preview = preview.to_owned();
+    std::thread::spawn(move || {
+        let _ = notify_rust::Notification::new()
+            .summary(&title)
+            .body(&preview)
+            .appname("tg")
+            .show();
+    });
 }
 
 /// Re-exported so `main.rs` can type the sender.
@@ -3531,6 +3550,48 @@ mod tests {
         let h = short_hash(&a);
         assert_eq!(h.len(), 16);
         assert!(h.bytes().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// Regression guard for the network-thread crash:
+    /// "Cannot start a runtime from within a runtime" (tokio multi_thread/mod.rs).
+    ///
+    /// The old bug: `notify_new_message` called `notify_rust::show()` (the blocking,
+    /// D-Bus-backed path) directly on the network thread. That thread has *already*
+    /// entered its own current-thread runtime (`serve`/`spawn_network`). notify-rust
+    /// fans out to `zbus::block_on`, which lazily boots a fresh *multi-thread* tokio
+    /// runtime and drives the future with it — building a runtime inside a runtime.
+    /// Tokio panics *atomically*, before any D-Bus I/O happens, so the crash fired at
+    /// random whenever a new-message notification arrived during a real session
+    /// (never in `--demo`, which emits no notifications).
+    ///
+    /// The fix moves the `show()` call onto a detached thread, so zbus builds its
+    /// runtime on a clean thread. This test reproduces the exact panic condition
+    /// (a current-thread runtime entered on the caller thread) and asserts we get
+    /// through it. It also passes without a D-Bus session (the spawned thread simply
+    /// fails fast), which is why it's deterministic in CI.
+    #[test]
+    fn notification_off_main_runtime_does_not_panic() {
+        // Drop any D-Bus session so the detached notify thread fails instantly and
+        // silently instead of trying to reach a daemon (we only test the no-panic
+        // property here; the only side effect is the best-effort error being ignored).
+        let saved = std::env::var_os("DBUS_SESSION_BUS_ADDRESS");
+        std::env::remove_var("DBUS_SESSION_BUS_ADDRESS");
+
+        // Same shape as the real network thread: a current-thread runtime entered via
+        // `block_on`. Before the fix this is where the nested-runtime panic fired.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            // A notification for a chat that is NOT the open one is the real trigger.
+            notify_new_message(Some(1), 2, "Sender", "New message");
+        });
+
+        // Still alive => we did not panic inside the runtime. Restore the env.
+        if let Some(v) = saved {
+            std::env::set_var("DBUS_SESSION_BUS_ADDRESS", v);
+        }
     }
 
     #[test]

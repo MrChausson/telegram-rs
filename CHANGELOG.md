@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Client crash on incoming notifications**: a new-message notification that
+  arrived during a real session used to crash the whole client with
+  *"Cannot start a runtime from within a runtime"* (tokio multi-thread
+  scheduler). The blocking D-Bus notification call (`notify-rust`) was issued
+  from the network thread, which already runs inside its own tokio
+  current-thread runtime; notify-rust's synchronous path boots a fresh
+  multi-thread runtime inside it, and tokio panics. The notification is now
+  dispatched on its own OS thread so it can never re-enter the network
+  runtime. A regression test reproduces the exact panic condition
+  deterministically.
+
 ## [v0.10.1] - 2026-08-30
 
 ### Fixed
