@@ -16,7 +16,11 @@ Dark, feather-light, GPU-rendered — the whole client fits in a single window.
 
 ![Main chat — dark theme, GPU-rendered, push-realtime](screenshots/demo-main-chat.png)
 
-![Media channel — photos render full-screen in-app](screenshots/demo-media-channel.png)
+![Group forum — conversations organized in topics](screenshots/demo-topics-forum.png)
+
+![Settings — profile, storage and sessions](screenshots/demo-settings.png)
+
+![Contact profile — opened from the conversation header](screenshots/demo-user-profile.png)
 
 *Screenshots from the built-in `--demo` offline mode.*
 
