@@ -50,6 +50,10 @@ const QR_POLL_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(
 /// Consecutive poll failures before we drop the (possibly dead) token and
 /// re-export a fresh one, so the QR keeps regenerating instead of blanking.
 const QR_REFRESH_AFTER_ERRORS: u32 = 3;
+/// Only every Nth unchanged-token poll is logged to stderr, so a stuck
+/// poller ("rid of the scan, still no Success") is audible without flooding
+/// a normal session where the QR just idles while waiting to be scanned.
+const QR_LOG_UNCHANGED_EVERY: u32 = 20;
 
 /// Receiver end of the UI feed, taken once by the Iced subscription.
 static UI_RX: std::sync::Mutex<Option<mpsc::UnboundedReceiver<UiMessage>>> =
@@ -1872,6 +1876,10 @@ fn start_qr_login(
         // Previous QR PNG on disk; deleted once the replacement is on screen
         // so rotations don't accumulate files in the cache dir.
         let mut last_png: Option<std::path::PathBuf> = None;
+        // Unchanged-token polls are logged only every N iterations (they
+        // recur every QR_POLL_INTERVAL while no scan/confirm happens), so a
+        // stuck poller is audible on stderr without flooding a normal session.
+        let mut unchanged = 0u32;
         let dir = cache_dir().join("media");
         loop {
             if cancel.load(Ordering::SeqCst) != gen {
@@ -1886,7 +1894,12 @@ fn start_qr_login(
                     consecutive_errors = 0;
                     backoff = QR_POLL_INTERVAL;
                     if current.as_deref() != Some(&tok.token) {
+                        unchanged = 0;
                         current = Some(tok.token.clone());
+                        eprintln!(
+                            "[telegram-rs] qr: new login token {}",
+                            short_hash(&tok.token)
+                        );
                         let png = qr_png_bytes(&login_payload(&tok.token));
                         match png {
                             Ok(bytes) => {
@@ -1925,9 +1938,14 @@ fn start_qr_login(
                                 return;
                             }
                         }
+                    } else {
+                        unchanged += 1;
+                        if unchanged % QR_LOG_UNCHANGED_EVERY == 0 {
+                            eprintln!(
+                                "[telegram-rs] qr: same token still pending (poll #{unchanged})"
+                            );
+                        }
                     }
-                    // Unchanged token: the code is already on screen; keep
-                    // polling for a scan without re-sending the image.
                 }
                 Ok(tl::enums::auth::LoginToken::MigrateTo(mig)) => {
                     consecutive_errors = 0;
@@ -1936,10 +1954,17 @@ fn start_qr_login(
                     // sender pool re-targets on the next invoke (grammers
                     // follows the migration error path), so we just keep
                     // polling with the migrated token.
-                    current = Some(mig.token);
+                    current = Some(mig.token.clone());
+                    eprintln!(
+                        "[telegram-rs] qr: server asked to migrate to DC {} (token {}), \
+                         re-polling migrated token",
+                        mig.dc_id,
+                        short_hash(&mig.token)
+                    );
                 }
                 Ok(tl::enums::auth::LoginToken::Success(success_res)) => {
                     let name = authorization_user_name(&success_res.authorization);
+                    eprintln!("[telegram-rs] qr: SUCCESS — finalizing login (self: {name})");
                     let _ = ui_tx.send(UiMessage::LoginOk { name });
                     // Tell serve_login to return: the caller then saves the
                     // session, refreshes dialogs and enters the main loop.
