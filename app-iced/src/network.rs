@@ -361,9 +361,9 @@ struct DemoChat {
     hue: f32,
 }
 
-/// Generated demo assets: one avatar and one landscape photo per chat.
+/// Generated demo assets: one landscape photo per chat.
 struct DemoAssets {
-    avatars: HashMap<i64, String>,
+    /// Landscape/photo demo images showcased in media messages and channels.
     photos: HashMap<i64, String>,
 }
 
@@ -452,30 +452,16 @@ fn gradient_fill(pm: &mut tiny_skia::Pixmap, h1: f32, s1: f32, l1: f32, h2: f32,
     }
 }
 
-/// Generates demo avatars/photos with tiny-skia, written under `demo/`.
+/// Generates demo photos with tiny-skia, written under `demo/`.
 fn ensure_demo_assets(chats: &[DemoChat]) -> DemoAssets {
     use tiny_skia::{Color, Paint, Transform};
 
     let base = cache_dir().join("demo");
     let mut assets = DemoAssets {
-        avatars: HashMap::new(),
         photos: HashMap::new(),
     };
 
     for chat in chats {
-        // Avatar: 160x160 two-tone gradient with a white "sun" circle.
-        let size = 160u32;
-        let mut p = tiny_skia::Pixmap::new(size, size).expect("avatar pixmap");
-        gradient_fill(&mut p, chat.hue, 0.6, 0.45, (chat.hue + 0.1) % 1.0, 0.6, 0.7);
-        let mut paint = Paint::default();
-        paint.set_color(Color::from_rgba8(255, 255, 255, 210));
-        let circle = tiny_skia::PathBuilder::from_circle(size as f32 / 2.0, size as f32 / 2.0 + 10.0, 34.0)
-            .expect("sun path");
-        p.fill_path(&circle, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
-        let path = base.join("avatars").join(format!("{}.png", chat.id));
-        save_png(&p, &path);
-        assets.avatars.insert(chat.id, path.to_string_lossy().into_owned());
-
         // Landscape photo: 640x480 sky gradient + sun + water band.
         let (w, h) = (640u32, 480u32);
         let mut pm = tiny_skia::Pixmap::new(w, h).expect("photo pixmap");
@@ -872,7 +858,7 @@ async fn serve_demo(
                 subtitle: c.subtitle.clone(),
                 date: now - c.last_ago,
                 unread: c.unread,
-                avatar_path: assets.avatars.get(&c.id).cloned(),
+                avatar_path: None,
             })
             .collect()
     };
