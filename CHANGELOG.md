@@ -16,8 +16,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   smaller resident set (~47 MB PSS vs ~115 MB Vulkan). `WGPU_BACKEND`
   always overrides this choice.
 
-## [v0.10.2] - 2026-08-30
-
 ### Fixed
 - **Forum topics bar**: the chip bar is now readable — the horizontal scrollbar
   that visually overlapped the topic chips is hidden (`Scrollbar::hidden`).
