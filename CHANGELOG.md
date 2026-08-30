@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.10.1] - 2026-08-30
+
 ### Fixed
 - **Forum topics in private bot chats**: the topic chips bar now also shows
   for 1:1 chats with forum-enabled bots (e.g. a support/agent bot that
