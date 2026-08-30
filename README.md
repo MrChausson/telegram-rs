@@ -10,6 +10,16 @@ automatic software fallback — a fraction of the RAM of mainstream clients.
 - 📦 **Tiny footprint** — ~8 MB binary, ~12 KB session file, no database
 - 🔒 **Sign in inside the app** — phone → code → 2FA, nothing else to install
 
+## Screenshots
+
+Dark, feather-light, GPU-rendered — the whole client fits in a single window.
+
+![Main chat — dark theme, GPU-rendered, push-realtime](screenshots/demo-main-chat.png)
+
+![Media channel — photos render full-screen in-app](screenshots/demo-media-channel.png)
+
+*Screenshots from the built-in `--demo` offline mode.*
+
 ## Measured performance
 
 Measured on a real session (HiDPI 1.6×, Arch Linux, NVIDIA/Wayland, `--release`):
@@ -38,14 +48,31 @@ Every [release](https://github.com/MrChausson/telegram-rs/releases) ships
 ready-to-run binaries built by CI for Linux, macOS **and** Windows.
 Download → run → sign in.
 
-### 1. Install
+### 💠 Install from the AUR (Arch Linux / Manjaro)
 
-**Linux** — pick one:
+The fastest path on Arch-based distros — one command, kept up to date on every
+[release](https://github.com/MrChausson/telegram-rs/releases):
 
 ```bash
-# Arch Linux / Manjaro (AUR, updated automatically on every release)
-paru -S telegram-rs-bin        # or: yay -S telegram-rs-bin
+# Any AUR helper works — paru or yay
+paru -S telegram-rs-bin
+```
 
+What you get:
+
+- **`telegram-rs-bin`** — a prebuilt binary package (no compilation): the release
+  binary is downloaded as-is, so installs are seconds, not minutes.
+- **Auto-updates** — the package tracks each new GitHub release, so a regular
+  `paru -Syu` keeps the client current with no extra step.
+- **Tray + desktop menu entry** installed system-wide.
+
+> Requires an AUR helper (`paru` / `yay`). AUR packages are community-maintained.
+
+### 1. Install (Linux / macOS / Windows)
+
+**Linux** — alternate methods (no AUR):
+
+```bash
 # AppImage (no install needed)
 chmod +x telegram-rs-x86_64.AppImage
 ./telegram-rs-x86_64.AppImage
