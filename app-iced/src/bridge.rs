@@ -332,6 +332,10 @@ pub enum Request {
 pub enum UiMessage {
     /// The chat list is ready.
     Dialogs(Vec<ChatRow>),
+    /// Login completed (or a valid session was loaded) and the client is now
+    /// fetching the dialog list: show a "Loading chats…" state instead of the
+    /// frozen QR page while `get_dialogs` paginates.
+    Connecting,
     /// A chat's history was loaded.
     Messages {
         id: i64,

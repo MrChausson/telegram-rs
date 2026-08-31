@@ -13,9 +13,10 @@ use grammers_client::client::{LoginToken, PasswordToken, SignInError, UpdatesCon
 use grammers_client::update::Update;
 use grammers_session::types::PeerRef;
 use grammers_session::updates::UpdatesLike;
+use grammers_session::Session;
 use tg::client::Telegram;
-use tg::session::load_or_new;
-use tg::auth::{export_login_token, import_login_token};
+use tg::session::{FileSession, load_or_new};
+use tg::auth::{export_login_token, import_login_token, import_login_token_in_dc};
 use grammers_client::tl;
 use tokio::sync::mpsc;
 
@@ -50,6 +51,10 @@ const QR_POLL_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(
 /// Consecutive poll failures before we drop the (possibly dead) token and
 /// re-export a fresh one, so the QR keeps regenerating instead of blanking.
 const QR_REFRESH_AFTER_ERRORS: u32 = 3;
+/// Only every Nth unchanged-token poll is logged to stderr, so a stuck
+/// poller ("rid of the scan, still no Success") is audible without flooding
+/// a normal session where the QR just idles while waiting to be scanned.
+const QR_LOG_UNCHANGED_EVERY: u32 = 20;
 
 /// Receiver end of the UI feed, taken once by the Iced subscription.
 static UI_RX: std::sync::Mutex<Option<mpsc::UnboundedReceiver<UiMessage>>> =
@@ -278,6 +283,7 @@ pub fn spawn_network(demo: bool, big: bool, notify: Arc<NotifyPref>) -> Unbounde
                         Arc::new(std::sync::atomic::AtomicU64::new(0));
                     serve_login(
                         &tg,
+                        session.clone(),
                         api_id,
                         api_hash.as_deref(),
                         &ui_tx,
@@ -288,6 +294,10 @@ pub fn spawn_network(demo: bool, big: bool, notify: Arc<NotifyPref>) -> Unbounde
                     let _ = tg::session::save(&session, &session_path);
                 }
 
+                // Login is done (or a valid session was loaded): flip the UI
+                // off the frozen QR page onto a "Loading chats…" state while
+                // get_me + get_dialogs run, so the post-scan wait is visible.
+                let _ = ui_tx.send(UiMessage::Connecting);
                 let _ = tg.client().get_me().await;
                 let updates_rx = tg.take_updates();
                 let tg = Arc::new(tg);
@@ -1704,6 +1714,7 @@ Request::DownloadDoc { chat_id, msg_id } => {
 #[allow(clippy::too_many_arguments)]
 async fn serve_login(
     tg: &Telegram,
+    session: Arc<FileSession>,
     api_id: i32,
     api_hash: Option<&str>,
     ui_tx: &mpsc::UnboundedSender<UiMessage>,
@@ -1815,6 +1826,7 @@ async fn serve_login(
                         + 1;
                     start_qr_login(
                         tg.client().clone(),
+                        session.clone(),
                         gen,
                         api_id,
                         hash.to_string(),
@@ -1841,6 +1853,7 @@ async fn serve_login(
 #[allow(clippy::too_many_arguments)]
 fn start_qr_login(
     client: grammers_client::Client,
+    session: Arc<FileSession>,
     gen: u64,
     api_id: i32,
     api_hash: String,
@@ -1851,6 +1864,11 @@ fn start_qr_login(
     tokio::spawn(async move {
         use std::sync::atomic::Ordering;
         let mut current: Option<Vec<u8>> = None;
+        // DC to import the login token on. `None` = home DC (default). Set once
+        // the server answers `LoginTokenMigrateTo` so subsequent imports are
+        // sent to the datacenter that actually owns the token (a token imported
+        // on the wrong DC never reaches `Success`).
+        let mut login_dc: Option<i32> = None;
         // Backoff grows while polls keep failing; the QR stays visible so a
         // scan still works even if the server is momentarily rejecting polls.
         let mut backoff = QR_POLL_INTERVAL;
@@ -1858,6 +1876,10 @@ fn start_qr_login(
         // Previous QR PNG on disk; deleted once the replacement is on screen
         // so rotations don't accumulate files in the cache dir.
         let mut last_png: Option<std::path::PathBuf> = None;
+        // Unchanged-token polls are logged only every N iterations (they
+        // recur every QR_POLL_INTERVAL while no scan/confirm happens), so a
+        // stuck poller is audible on stderr without flooding a normal session.
+        let mut unchanged = 0u32;
         let dir = cache_dir().join("media");
         loop {
             if cancel.load(Ordering::SeqCst) != gen {
@@ -1865,14 +1887,22 @@ fn start_qr_login(
             }
             let res = match current.as_ref() {
                 None => export_login_token(&client, api_id, &api_hash).await,
-                Some(bytes) => import_login_token(&client, bytes.clone()).await,
+                Some(bytes) => match login_dc {
+                    Some(dc) => import_login_token_in_dc(&client, dc, bytes.clone()).await,
+                    None => import_login_token(&client, bytes.clone()).await,
+                },
             };
             match res {
                 Ok(tl::enums::auth::LoginToken::Token(tok)) => {
                     consecutive_errors = 0;
                     backoff = QR_POLL_INTERVAL;
                     if current.as_deref() != Some(&tok.token) {
+                        unchanged = 0;
                         current = Some(tok.token.clone());
+                        eprintln!(
+                            "[telegram-rs] qr: new login token {}",
+                            short_hash(&tok.token)
+                        );
                         let png = qr_png_bytes(&login_payload(&tok.token));
                         match png {
                             Ok(bytes) => {
@@ -1911,21 +1941,41 @@ fn start_qr_login(
                                 return;
                             }
                         }
+                    } else {
+                        unchanged += 1;
+                        if unchanged.is_multiple_of(QR_LOG_UNCHANGED_EVERY) {
+                            eprintln!(
+                                "[telegram-rs] qr: same token still pending (poll #{unchanged})"
+                            );
+                        }
                     }
-                    // Unchanged token: the code is already on screen; keep
-                    // polling for a scan without re-sending the image.
                 }
                 Ok(tl::enums::auth::LoginToken::MigrateTo(mig)) => {
                     consecutive_errors = 0;
                     backoff = QR_POLL_INTERVAL;
-                    // `mig.dc_id` is intentionally ignored: the client's
-                    // sender pool re-targets on the next invoke (grammers
-                    // follows the migration error path), so we just keep
-                    // polling with the migrated token.
-                    current = Some(mig.token);
+                    // The token belongs to `mig.dc_id`, not the home DC. Import
+                    // it on that DC; importing it here would keep failing
+                    // forever ("importing login token") because the account was
+                    // migrated. `login_dc` sticks for the rest of the login so
+                    // every subsequent poll targets the right DC until Success.
+                    login_dc = Some(mig.dc_id);
+                    current = Some(mig.token.clone());
+                    // Repoint the session's home DC at the migrated DC so the
+                    // post-login fetches (get_me / get_dialogs) and the saved
+                    // session file all target the DC that owns the account —
+                    // otherwise the chat list comes back empty and a relaunch
+                    // shows the QR again.
+                    session.set_home_dc_id(mig.dc_id).await;
+                    eprintln!(
+                        "[telegram-rs] qr: server asked to migrate login to DC {} \
+                         (token {}), now importing there",
+                        mig.dc_id,
+                        short_hash(&mig.token)
+                    );
                 }
                 Ok(tl::enums::auth::LoginToken::Success(success_res)) => {
                     let name = authorization_user_name(&success_res.authorization);
+                    eprintln!("[telegram-rs] qr: SUCCESS — finalizing login (self: {name})");
                     let _ = ui_tx.send(UiMessage::LoginOk { name });
                     // Tell serve_login to return: the caller then saves the
                     // session, refreshes dialogs and enters the main loop.
@@ -1941,6 +1991,7 @@ fn start_qr_login(
                     // server-side: drop it so we re-export a fresh one.
                     if consecutive_errors >= QR_REFRESH_AFTER_ERRORS {
                         current = None;
+                        login_dc = None;
                         consecutive_errors = 0;
                     }
                     backoff = (backoff * 2).min(QR_POLL_MAX_BACKOFF);
