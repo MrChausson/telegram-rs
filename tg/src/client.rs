@@ -6,15 +6,15 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use grammers_client::media::{Downloadable, Media, Photo, PhotoSize};
-use grammers_client::Client;
 use grammers_client::tl;
+use grammers_client::Client;
 use grammers_mtsender::SenderPool;
 use grammers_session::updates::UpdatesLike;
 
 use crate::model::{
     uv16_span_to_bytes, AuthSession, ChatDetail, ChatInfo, ChatKind, CodeEntity, ForwardInfo,
-    GlobalHit, MediaKind, MessageInfo, ParticipantRow, ParticipantRole, SelfProfile, StickerDoc,
-    StickerSetInfo,
+    GlobalHit, MediaKind, MessageInfo, ParticipantRole, ParticipantRow, ReactionInfo, SelfProfile,
+    StickerDoc, StickerSetInfo,
 };
 use crate::session::FileSession;
 
@@ -65,17 +65,16 @@ impl Telegram {
         let mut out = Vec::new();
         while let Some(dialog) = dialogs.next().await? {
             let id = dialog.peer_id();
-            let title = dialog
-                .peer()
-                .name()
-                .unwrap_or("Unknown")
-                .to_string();
+            let title = dialog.peer().name().unwrap_or("Unknown").to_string();
             let unread_count = match &dialog.raw {
                 grammers_client::tl::enums::Dialog::Dialog(d) => d.unread_count,
                 grammers_client::tl::enums::Dialog::Folder(_) => 0,
             };
             let peer_ref = dialog.peer_ref();
-            let last_date = dialog.last_message.as_ref().map(|m| m.date().timestamp() as i32);
+            let last_date = dialog
+                .last_message
+                .as_ref()
+                .map(|m| m.date().timestamp() as i32);
             let last_message = dialog.last_message.map(|m| m.text().to_string());
             out.push(ChatInfo {
                 id,
@@ -122,11 +121,7 @@ impl Telegram {
 
     /// Searches all chats by text; each hit carries the originating chat's id
     /// (for the caller to resolve into a title via the dialog list).
-    pub async fn search_global(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<GlobalHit>> {
+    pub async fn search_global(&self, query: &str, limit: usize) -> Result<Vec<GlobalHit>> {
         let mut it = self.client.search_all_messages().query(query).limit(limit);
         let mut out = Vec::new();
         while let Some(msg) = it.next().await? {
@@ -227,10 +222,7 @@ impl Telegram {
     ///
     /// Channels use `channels.readHistory`; users and chats use
     /// `messages.readHistory` (handled internally by grammers).
-    pub async fn mark_read(
-        &self,
-        peer_ref: &grammers_session::types::PeerRef,
-    ) -> Result<()> {
+    pub async fn mark_read(&self, peer_ref: &grammers_session::types::PeerRef) -> Result<()> {
         self.client
             .mark_as_read(*peer_ref)
             .await
@@ -374,6 +366,24 @@ impl Telegram {
             .await
             .context("forwarding message")?;
         Ok(sent.into_iter().flatten().next().map(|m| m.id()))
+    }
+
+    /// Reacts to a message with a single emoji. The reaction is toggled
+    /// server-side: sending the same emoji twice removes it. `peer` may be any
+    /// chat and `msg_id` its message — in a forum topic the message id already
+    /// identifies the message within the peer, so reacting by id works there
+    /// too (the current grammers layer needs no explicit reply header).
+    pub async fn send_reaction(
+        &self,
+        peer: &grammers_session::types::PeerRef,
+        msg_id: i32,
+        emoji: &str,
+    ) -> Result<()> {
+        self.client
+            .send_reactions(*peer, msg_id, emoji)
+            .await
+            .context("sending reaction")?;
+        Ok(())
     }
 
     /// Downloads a message's document into `dir` (`{msg_id}_{name}`), returning
@@ -543,7 +553,11 @@ impl Telegram {
             if !Self::decodable_image(&bytes) {
                 continue;
             }
-            let ext = if bytes.starts_with(b"\xff\xd8") { "jpg" } else { "webp" };
+            let ext = if bytes.starts_with(b"\xff\xd8") {
+                "jpg"
+            } else {
+                "webp"
+            };
             let cached = dir.join(format!("{doc_id}.{ext}"));
             let tmp = dir.join(format!("{doc_id}.tmp"));
             std::fs::write(&tmp, &bytes)?;
@@ -638,8 +652,8 @@ impl Telegram {
     async fn upload_with_progress(
         &self,
         path: &std::path::Path,
-    on_progress: impl FnMut(u64, u64) + Send + 'static,
-) -> Result<grammers_client::media::Uploaded> {
+        on_progress: impl FnMut(u64, u64) + Send + 'static,
+    ) -> Result<grammers_client::media::Uploaded> {
         let size = tokio::fs::metadata(path).await?.len();
         let file = tokio::fs::File::open(path)
             .await
@@ -665,7 +679,11 @@ impl Telegram {
     ///
     /// Returns the bot-api id of the created chat (parsed from the updates
     /// the server answers with).
-    pub async fn create_group(&self, title: &str, users: &[grammers_session::types::PeerRef]) -> Result<i64> {
+    pub async fn create_group(
+        &self,
+        title: &str,
+        users: &[grammers_session::types::PeerRef],
+    ) -> Result<i64> {
         let input_users: Vec<tl::enums::InputUser> = users
             .iter()
             .map(|p| {
@@ -892,16 +910,22 @@ impl Telegram {
                             .clone()
                             .or_else(|| {
                                 u.usernames.as_ref().and_then(|v| {
-                                    v.iter().map(|x| match x {
-                                        tl::enums::Username::Username(un) => {
-                                            un.username.clone()
-                                        }
-                                    }).next()
+                                    v.iter()
+                                        .map(|x| match x {
+                                            tl::enums::Username::Username(un) => {
+                                                un.username.clone()
+                                            }
+                                        })
+                                        .next()
                                 })
                             })
                             .filter(|s| !s.is_empty());
                         (
-                            if name.is_empty() { "Unknown".to_string() } else { name },
+                            if name.is_empty() {
+                                "Unknown".to_string()
+                            } else {
+                                name
+                            },
                             username,
                             u.phone
                                 .clone()
@@ -1148,25 +1172,26 @@ impl Telegram {
             .context("fetching own profile")?;
         let (name, last_name, username, phone) = match users.pop() {
             Some(tl::enums::User::User(u)) => {
-                let name = [u.first_name.clone().unwrap_or_default(),
-                    u.last_name.clone().unwrap_or_default()]
+                let name = [
+                    u.first_name.clone().unwrap_or_default(),
+                    u.last_name.clone().unwrap_or_default(),
+                ]
                 .into_iter()
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
                 .join(" ");
-                let last_name = u
-                    .last_name
-                    .clone()
-                    .filter(|s| !s.trim().is_empty());
+                let last_name = u.last_name.clone().filter(|s| !s.trim().is_empty());
                 let username = u
                     .username
                     .clone()
                     .filter(|s| !s.is_empty())
                     .or_else(|| {
                         u.usernames.as_ref().and_then(|v| {
-                            v.iter().map(|x| match x {
-                                tl::enums::Username::Username(un) => un.username.clone(),
-                            }).next()
+                            v.iter()
+                                .map(|x| match x {
+                                    tl::enums::Username::Username(un) => un.username.clone(),
+                                })
+                                .next()
                         })
                     })
                     .filter(|s| !s.is_empty());
@@ -1278,21 +1303,18 @@ impl Telegram {
         let kind = peer_ref.id.kind();
 
         let res = match kind {
-            grammers_session::types::PeerKind::Chat => {
-                self.client
-                    .invoke(&tl::functions::messages::GetChats {
-                        id: vec![peer_ref.id.bare_id()],
-                    })
-                    .await
-                    .context("fetching chat")?
-            }
+            grammers_session::types::PeerKind::Chat => self
+                .client
+                .invoke(&tl::functions::messages::GetChats {
+                    id: vec![peer_ref.id.bare_id()],
+                })
+                .await
+                .context("fetching chat")?,
             grammers_session::types::PeerKind::Channel => {
-                let input_channel = tl::enums::InputChannel::Channel(
-                    tl::types::InputChannel {
-                        channel_id: peer_ref.id.bare_id(),
-                        access_hash: peer_ref.auth.hash(),
-                    },
-                );
+                let input_channel = tl::enums::InputChannel::Channel(tl::types::InputChannel {
+                    channel_id: peer_ref.id.bare_id(),
+                    access_hash: peer_ref.auth.hash(),
+                });
                 self.client
                     .invoke(&tl::functions::channels::GetChannels {
                         id: vec![input_channel],
@@ -1363,8 +1385,12 @@ fn created_chat_id(updates: tl::enums::Updates) -> Option<i64> {
         return None;
     };
     u.chats.into_iter().find_map(|chat| match chat {
-        tl::enums::Chat::Chat(c) => Some(grammers_session::types::PeerId::chat(c.id).bot_api_dialog_id()),
-        tl::enums::Chat::Channel(c) => Some(grammers_session::types::PeerId::channel(c.id).bot_api_dialog_id()),
+        tl::enums::Chat::Chat(c) => {
+            Some(grammers_session::types::PeerId::chat(c.id).bot_api_dialog_id())
+        }
+        tl::enums::Chat::Channel(c) => {
+            Some(grammers_session::types::PeerId::channel(c.id).bot_api_dialog_id())
+        }
         _ => None,
     })
 }
@@ -1378,13 +1404,53 @@ impl Downloadable for RawPhoto {
     }
 }
 
+/// The forum-topic / thread root a message belongs to: the `top_msg_id` of its
+/// reply header. Grammers only exposes the direct reply target
+/// (`reply_to_message_id`), which for an in-thread reply to *another* post
+/// differs from the thread root. Topic views must use this to keep everyone's
+/// messages in the thread.
+fn reply_top_msg_id(msg: &grammers_client::message::Message) -> Option<i32> {
+    match &msg.raw {
+        tl::enums::Message::Message(tl::types::Message {
+            reply_to: Some(tl::enums::MessageReplyHeader::Header(header)),
+            ..
+        }) => header.reply_to_top_id,
+        _ => None,
+    }
+}
+
+/// The reactions received on a message, flattened to *plain emoji* ones
+/// (custom-emoji, paid and other non-renderable reactions are skipped: they
+/// cannot be drawn as a single glyph). `chosen_order` marks a reaction the
+/// current account gave itself.
+fn reactions_of(msg: &grammers_client::message::Message) -> Vec<ReactionInfo> {
+    let tl::enums::Message::Message(tl::types::Message {
+        reactions: Some(tl::enums::MessageReactions::Reactions(reactions)),
+        ..
+    }) = &msg.raw
+    else {
+        return Vec::new();
+    };
+    reactions
+        .results
+        .iter()
+        .filter_map(|r| match r {
+            tl::enums::ReactionCount::Count(c) => match &c.reaction {
+                tl::enums::Reaction::Emoji(e) => Some(ReactionInfo {
+                    emoji: e.emoticon.clone(),
+                    count: c.count as u32,
+                    mine: c.chosen_order.is_some(),
+                }),
+                _ => None,
+            },
+        })
+        .collect()
+}
+
 /// Extracts `code` (inline) and `pre` (block) formatting entities from a
 /// message's format entities, as byte-offset spans usable to slice `text`.
 /// Emoji/link/strike/etc. are ignored — only code preview spans matter here.
-fn code_entities(
-    entities: Option<&Vec<tl::enums::MessageEntity>>,
-    text: &str,
-) -> Vec<CodeEntity> {
+fn code_entities(entities: Option<&Vec<tl::enums::MessageEntity>>, text: &str) -> Vec<CodeEntity> {
     let Some(entities) = entities else {
         return Vec::new();
     };
@@ -1443,11 +1509,10 @@ fn message_info(msg: &grammers_client::message::Message) -> MessageInfo {
         date: msg.date().timestamp() as i32,
         out: msg.outgoing(),
         media: media_kind(msg.media().as_ref()),
+        reactions: reactions_of(msg),
         reply_to: msg.reply_to_message_id(),
-        forwarded: msg
-            .forward_header()
-            .as_ref()
-            .and_then(forward_info),
+        reply_to_top: reply_top_msg_id(msg),
+        forwarded: msg.forward_header().as_ref().and_then(forward_info),
         sender_name: if is_private {
             None
         } else {
@@ -1553,7 +1618,9 @@ fn transcode_ogg_for_playback(cached: &std::path::Path) -> Option<std::path::Pat
             eprintln!(
                 "voice transcode failed for {}: {:?}",
                 cached.display(),
-                other.map(|o| o.stderr).map(|e| String::from_utf8_lossy(&e).into_owned())
+                other
+                    .map(|o| o.stderr)
+                    .map(|e| String::from_utf8_lossy(&e).into_owned())
             );
             Some(cached.to_path_buf())
         }
@@ -1580,12 +1647,17 @@ pub fn media_kind_of_path(path: &std::path::Path) -> Option<MediaKind> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let size = std::fs::metadata(path).ok().map(|m| m.len() as i64).unwrap_or(0);
+    let size = std::fs::metadata(path)
+        .ok()
+        .map(|m| m.len() as i64)
+        .unwrap_or(0);
     let kind = match ext.as_str() {
-        "jpg" | "jpeg" | "png" | "webp" | "bmp" => return Some(MediaKind::Photo {
-            width: 0,
-            height: 0,
-        }),
+        "jpg" | "jpeg" | "png" | "webp" | "bmp" => {
+            return Some(MediaKind::Photo {
+                width: 0,
+                height: 0,
+            })
+        }
         "gif" => MediaKind::Gif { name, size },
         "mp4" | "webm" | "mkv" | "mov" | "m4v" => MediaKind::Video {
             name,

@@ -56,7 +56,9 @@ pub enum DocKind {
     /// An animated GIF.
     Gif,
     /// An audio file or voice note.
-    Audio { voice: bool },
+    Audio {
+        voice: bool,
+    },
 }
 
 /// One `code`/`pre` formatting span carried by a message, precomputed to
@@ -95,6 +97,11 @@ pub struct MsgRow {
     pub sticker_path: Option<String>,
     /// Id of the message this one replies to, if any.
     pub reply_to: Option<i32>,
+    /// Id of the topic/thread root this message belongs to, when inside a
+    /// forum topic (`reply_to_top_id`). Topic filters must consult it, or
+    /// in-thread replies (whose `reply_to` points at the answered message)
+    /// get dropped from the topic view.
+    pub reply_to_top: Option<i32>,
     /// Display name of the forward origin, if the message was forwarded
     /// (resolved against the dialog list by the network layer).
     pub forwarded_from: Option<String>,
@@ -112,6 +119,8 @@ pub struct MsgRow {
     pub sender_id: Option<i64>,
     /// True when the message is currently pinned in its chat.
     pub pinned: bool,
+    /// Reactions received on this message, as emoji chips.
+    pub reactions: Vec<ReactionChip>,
 }
 
 impl MsgRow {
@@ -130,6 +139,7 @@ impl MsgRow {
             sticker: None,
             sticker_path: None,
             reply_to: None,
+            reply_to_top: None,
             forwarded_from: None,
             uploading: None,
             upload_token: None,
@@ -137,8 +147,18 @@ impl MsgRow {
             sender_name: None,
             sender_id: None,
             pinned: false,
+            reactions: vec![],
         }
     }
+}
+
+/// A single reaction on a message, enough to render and (later) toggle it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReactionChip {
+    pub emoji: String,
+    pub count: u32,
+    /// True when this reaction was given by the current account.
+    pub chosen: bool,
 }
 
 /// A single search result (in-chat or global).
@@ -244,7 +264,11 @@ pub enum Request {
     /// Notifies the server that the user is (or stopped) typing in a chat.
     Typing { id: i64, typing: bool },
     /// Sends a text message to a chat, optionally as a reply.
-    SendMessage { id: i64, text: String, reply_to: Option<i32> },
+    SendMessage {
+        id: i64,
+        text: String,
+        reply_to: Option<i32>,
+    },
     /// Uploads and sends a file to a chat (`is_photo` picks compressed-photo
     /// vs document), optionally with a caption and as a reply. `token` ties
     /// upload progress events back to the optimistic row.
@@ -257,13 +281,19 @@ pub enum Request {
         token: u64,
     },
     /// Forwards a message from one chat into another.
-    ForwardMessage { from_chat: i64, msg_id: i32, to_chat: i64 },
+    ForwardMessage {
+        from_chat: i64,
+        msg_id: i32,
+        to_chat: i64,
+    },
     /// Edits an outgoing message (text only).
     EditMessage { id: i64, msg_id: i32, text: String },
     /// Deletes one of the user's messages (from all devices).
     DeleteMessage { id: i64, msg_id: i32 },
     /// Pins (`pin: true`) or unpins a message in a chat.
     PinMessage { id: i64, msg_id: i32, pin: bool },
+    /// Reacts to a message with a single emoji (toggled server-side).
+    SendReaction { id: i64, msg_id: i32, emoji: String },
     /// Downloads a chat's profile photo thumbnail.
     DownloadAvatar { chat_id: i64 },
     /// Creates a group (`megagroup=true`) or channel. `members` carries the
@@ -294,7 +324,11 @@ pub enum Request {
     /// Downloads a message's sticker image into the cache.
     DownloadSticker { chat_id: i64, msg_id: i32 },
     /// Sends an existing sticker (by document reference) to a chat.
-    SendSticker { id: i64, doc_id: i64, access_hash: i64 },
+    SendSticker {
+        id: i64,
+        doc_id: i64,
+        access_hash: i64,
+    },
     /// Lists the installed sticker packs (picker panel).
     GetStickerSets,
     /// Searches messages (`id: None` = global, `Some` = that chat). The
@@ -332,13 +366,21 @@ pub enum Request {
     AdminDemote { id: i64, user_id: i64 },
     /// Bans a member forever (`kick_only=false`) or just removes them from
     /// the group, letting them rejoin (`kick_only=true`).
-    AdminBan { id: i64, user_id: i64, kick_only: bool },
+    AdminBan {
+        id: i64,
+        user_id: i64,
+        kick_only: bool,
+    },
     /// Loads the forum topics of a chat (empty list for non-forum chats).
     GetTopics { id: i64 },
     /// Creates a forum topic titled `title` in the chat.
     CreateTopic { id: i64, title: String },
     /// Sends a text message into the topic thread anchored by `topic_root`.
-    SendTopicMessage { id: i64, text: String, topic_root: i32 },
+    SendTopicMessage {
+        id: i64,
+        text: String,
+        topic_root: i32,
+    },
 }
 
 /// Message sent by the network to the UI.
@@ -371,9 +413,17 @@ pub enum UiMessage {
         /// `StickerPathReady`).
         sticker: Option<StickerMeta>,
         reply_to: Option<i32>,
+        reply_to_top: Option<i32>,
         forwarded_from: Option<String>,
         sender_name: Option<String>,
         sender_id: Option<i64>,
+        reactions: Vec<ReactionChip>,
+    },
+    /// A message's reactions changed (added/removed/toggled).
+    MessageReactions {
+        chat_id: i64,
+        msg_id: i32,
+        reactions: Vec<ReactionChip>,
     },
     /// An existing message was edited live.
     MessageEdited {
@@ -415,7 +465,11 @@ pub enum UiMessage {
     },
     /// Progress of an optimistic media upload (token = the request's token,
     /// progress = 0.0..=1.0).
-    UploadProgress { chat_id: i64, token: u64, progress: f32 },
+    UploadProgress {
+        chat_id: i64,
+        token: u64,
+        progress: f32,
+    },
     /// The media upload finished; the server echo will replace the row.
     UploadDone { chat_id: i64, token: u64 },
     /// A chat was marked read (server-side), so the local badge can clear.

@@ -10,14 +10,14 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
 
 use grammers_client::client::{LoginToken, PasswordToken, SignInError, UpdatesConfiguration};
+use grammers_client::tl;
 use grammers_client::update::Update;
 use grammers_session::types::PeerRef;
 use grammers_session::updates::UpdatesLike;
 use grammers_session::Session;
-use tg::client::{code_entities_of, Telegram};
-use tg::session::{FileSession, load_or_new};
 use tg::auth::{export_login_token, import_login_token, import_login_token_in_dc};
-use grammers_client::tl;
+use tg::client::{code_entities_of, Telegram};
+use tg::session::{load_or_new, FileSession};
 use tokio::sync::mpsc;
 
 use crate::bridge::{
@@ -192,7 +192,12 @@ fn avatar_files() -> Vec<(i64, String)> {
             if e.path().extension().and_then(|x| x.to_str()) != Some("jpg") {
                 return None;
             }
-            let id = e.file_name().to_string_lossy().trim_end_matches(".jpg").parse::<i64>().ok()?;
+            let id = e
+                .file_name()
+                .to_string_lossy()
+                .trim_end_matches(".jpg")
+                .parse::<i64>()
+                .ok()?;
             Some((id, e.path().to_string_lossy().into_owned()))
         })
         .collect()
@@ -279,8 +284,7 @@ pub fn spawn_network(demo: bool, big: bool, notify: Arc<NotifyPref>) -> Unbounde
                 if !tg.is_authorized().await.unwrap_or(false) {
                     // Generation counter: every Start/Cancel invalidates any
                     // still-running QR poller of a previous generation.
-                    let qr_cancel =
-                        Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let qr_cancel = Arc::new(std::sync::atomic::AtomicU64::new(0));
                     serve_login(
                         &tg,
                         session.clone(),
@@ -324,9 +328,7 @@ pub fn spawn_network(demo: bool, big: bool, notify: Arc<NotifyPref>) -> Unbounde
                         serve(tg, updates_rx, &ui_tx, &mut req_rx, &mut peers, &notify).await;
                     }
                     Err(e) => {
-                        let _ = ui_tx.send(UiMessage::Error(format!(
-                            "Could not load chats: {e}"
-                        )));
+                        let _ = ui_tx.send(UiMessage::Error(format!("Could not load chats: {e}")));
                     }
                 }
                 std::future::pending::<()>().await;
@@ -423,7 +425,7 @@ fn demo_voice_wav(path: &std::path::Path) -> String {
     bytes.extend_from_slice(&(rate * 2).to_le_bytes()); // byte rate
     bytes.extend_from_slice(&2u16.to_le_bytes()); // block align
     bytes.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-    // data chunk.
+                                                   // data chunk.
     bytes.extend_from_slice(b"data");
     bytes.extend_from_slice(&(data_len * 2).to_le_bytes());
     for i in 0..data_len {
@@ -475,20 +477,44 @@ fn ensure_demo_assets(chats: &[DemoChat]) -> DemoAssets {
         // Landscape photo: 640x480 sky gradient + sun + water band.
         let (w, h) = (640u32, 480u32);
         let mut pm = tiny_skia::Pixmap::new(w, h).expect("photo pixmap");
-        gradient_fill(&mut pm, (chat.hue + 0.5) % 1.0, 0.7, 0.6, (chat.hue + 0.85) % 1.0, 0.7, 0.15);
+        gradient_fill(
+            &mut pm,
+            (chat.hue + 0.5) % 1.0,
+            0.7,
+            0.6,
+            (chat.hue + 0.85) % 1.0,
+            0.7,
+            0.15,
+        );
         let mut paint = Paint::default();
         paint.set_color(Color::from_rgba8(255, 230, 160, 240));
-        let sun = tiny_skia::PathBuilder::from_circle(w as f32 * 0.75, h as f32 * 0.3, 60.0).expect("sun");
-        pm.fill_path(&sun, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
+        let sun = tiny_skia::PathBuilder::from_circle(w as f32 * 0.75, h as f32 * 0.3, 60.0)
+            .expect("sun");
+        pm.fill_path(
+            &sun,
+            &paint,
+            tiny_skia::FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
         // Dark water band (bottom).
         paint.set_color(Color::from_rgba8(20, 50, 100, 255));
         let band = tiny_skia::PathBuilder::from_rect(
-            tiny_skia::Rect::from_xywh(0.0, h as f32 * 0.72, w as f32, h as f32 * 0.28).expect("band rect"),
+            tiny_skia::Rect::from_xywh(0.0, h as f32 * 0.72, w as f32, h as f32 * 0.28)
+                .expect("band rect"),
         );
-        pm.fill_path(&band, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
+        pm.fill_path(
+            &band,
+            &paint,
+            tiny_skia::FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
         let path = base.join("media").join(format!("{}.png", chat.id));
         save_png(&pm, &path);
-        assets.photos.insert(chat.id, path.to_string_lossy().into_owned());
+        assets
+            .photos
+            .insert(chat.id, path.to_string_lossy().into_owned());
     }
 
     assets
@@ -516,9 +542,7 @@ struct DemoStickerSet {
 fn ensure_demo_stickers() -> Vec<DemoStickerSet> {
     use tiny_skia::{Color, Paint, Transform};
 
-    let alts = [
-        "😀", "🎉", "❤️", "⭐", "🌙", "🔥", "🍀", "💎", "🎵", "⚡",
-    ];
+    let alts = ["😀", "🎉", "❤️", "⭐", "🌙", "🔥", "🍀", "💎", "🎵", "⚡"];
     let palettes: [[u8; 3]; 10] = [
         [244, 67, 54],
         [233, 30, 99],
@@ -548,7 +572,13 @@ fn ensure_demo_stickers() -> Vec<DemoStickerSet> {
                 p
             };
             let fill = |pm: &mut tiny_skia::Pixmap, path: &tiny_skia::Path, a: u8| {
-                pm.fill_path(path, &paint(a), tiny_skia::FillRule::Winding, Transform::identity(), None);
+                pm.fill_path(
+                    path,
+                    &paint(a),
+                    tiny_skia::FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
             };
             let cx = size as f32 / 2.0;
             let cy = size as f32 / 2.0;
@@ -559,7 +589,9 @@ fn ensure_demo_stickers() -> Vec<DemoStickerSet> {
                     if let Some(p) = tiny_skia::PathBuilder::from_circle(cx, cy, r) {
                         fill(&mut pm, &p, 255);
                     }
-                    if let Some(p) = tiny_skia::PathBuilder::from_circle(cx - r * 0.3, cy - r * 0.35, r * 0.22) {
+                    if let Some(p) =
+                        tiny_skia::PathBuilder::from_circle(cx - r * 0.3, cy - r * 0.35, r * 0.22)
+                    {
                         fill(&mut pm, &p, 140);
                     }
                 }
@@ -567,7 +599,8 @@ fn ensure_demo_stickers() -> Vec<DemoStickerSet> {
                     // Five-point star.
                     let mut pb = tiny_skia::PathBuilder::new();
                     for k in 0..10 {
-                        let ang = -std::f32::consts::FRAC_PI_2 + k as f32 * std::f32::consts::PI / 5.0;
+                        let ang =
+                            -std::f32::consts::FRAC_PI_2 + k as f32 * std::f32::consts::PI / 5.0;
                         let rad = if k % 2 == 0 { r } else { r * 0.45 };
                         let (x, y) = (cx + rad * ang.cos(), cy + rad * ang.sin());
                         if k == 0 {
@@ -615,10 +648,9 @@ fn ensure_demo_stickers() -> Vec<DemoStickerSet> {
                 _ => {
                     // Donut: big disc minus an inner punch-out via even-odd.
                     let mut pb = tiny_skia::PathBuilder::new();
-                    let outer = tiny_skia::PathBuilder::from_circle(cx, cy, r)
-                        .expect("outer ring");
-                    let inner = tiny_skia::PathBuilder::from_circle(cx, cy, r * 0.45)
-                        .expect("inner ring");
+                    let outer = tiny_skia::PathBuilder::from_circle(cx, cy, r).expect("outer ring");
+                    let inner =
+                        tiny_skia::PathBuilder::from_circle(cx, cy, r * 0.45).expect("inner ring");
                     pb.push_path(&outer);
                     pb.push_path(&inner);
                     if let Some(p) = pb.finish() {
@@ -799,11 +831,46 @@ async fn serve_demo(
         .as_secs() as i32;
 
     let chats = vec![
-        DemoChat { id: 1001, title: "Camille".into(), subtitle: "Great! see you tomorrow 👋".into(), last_ago: 42, unread: 3, hue: 0.55 },
-        DemoChat { id: 1002, title: "Rust Group".into(), subtitle: "Thomas: novel review of the PR?".into(), last_ago: 7200, unread: 0, hue: 0.1 },
-        DemoChat { id: 1003, title: "Landscape Channel".into(), subtitle: "Sunset over the sea 🏖".into(), last_ago: 86400, unread: 0, hue: 0.95 },
-        DemoChat { id: 1004, title: "Family Group".into(), subtitle: "Mom: when are you coming over?".into(), last_ago: 172800, unread: 12, hue: 0.3 },
-        DemoChat { id: 1005, title: "Paris Bots".into(), subtitle: "New version 2.4.0 released".into(), last_ago: 604800, unread: 0, hue: 0.75 },
+        DemoChat {
+            id: 1001,
+            title: "Camille".into(),
+            subtitle: "Great! see you tomorrow 👋".into(),
+            last_ago: 42,
+            unread: 3,
+            hue: 0.55,
+        },
+        DemoChat {
+            id: 1002,
+            title: "Rust Group".into(),
+            subtitle: "Thomas: novel review of the PR?".into(),
+            last_ago: 7200,
+            unread: 0,
+            hue: 0.1,
+        },
+        DemoChat {
+            id: 1003,
+            title: "Landscape Channel".into(),
+            subtitle: "Sunset over the sea 🏖".into(),
+            last_ago: 86400,
+            unread: 0,
+            hue: 0.95,
+        },
+        DemoChat {
+            id: 1004,
+            title: "Family Group".into(),
+            subtitle: "Mom: when are you coming over?".into(),
+            last_ago: 172800,
+            unread: 12,
+            hue: 0.3,
+        },
+        DemoChat {
+            id: 1005,
+            title: "Paris Bots".into(),
+            subtitle: "New version 2.4.0 released".into(),
+            last_ago: 604800,
+            unread: 0,
+            hue: 0.75,
+        },
     ];
     // Shared with the request handlers below so create/leave/delete/rename
     // can mutate the list at runtime (the closures only borrow it).
@@ -819,9 +886,24 @@ async fn serve_demo(
     let demo_topics = std::rc::Rc::new(std::cell::RefCell::new(HashMap::from([(
         1002i64,
         vec![
-            TopicRow { id: 20, root_msg_id: 20, title: "Announcements".into(), icon_color: 0 },
-            TopicRow { id: 30, root_msg_id: 30, title: "PR review".into(), icon_color: 1 },
-            TopicRow { id: 40, root_msg_id: 40, title: "Random".into(), icon_color: 2 },
+            TopicRow {
+                id: 20,
+                root_msg_id: 20,
+                title: "Announcements".into(),
+                icon_color: 0,
+            },
+            TopicRow {
+                id: 30,
+                root_msg_id: 30,
+                title: "PR review".into(),
+                icon_color: 1,
+            },
+            TopicRow {
+                id: 40,
+                root_msg_id: 40,
+                title: "Random".into(),
+                icon_color: 2,
+            },
         ],
     )])));
 
@@ -884,7 +966,12 @@ async fn serve_demo(
         let chat = chats.iter().find(|c| c.id == id);
         let photo = chat.and_then(&photo_of);
         let doc_row = |id: i32, text: &str, date: i32, name: &str, size: i64| MsgRow {
-            doc: Some(DocMeta { name: name.into(), size, kind: DocKind::File, duration: None }),
+            doc: Some(DocMeta {
+                name: name.into(),
+                size,
+                kind: DocKind::File,
+                duration: None,
+            }),
             ..MsgRow::text(id, text, date, false)
         };
         match id {
@@ -941,6 +1028,23 @@ async fn serve_demo(
                     forwarded_from: Some("Landscape Channel".into()),
                     photo: Some((640, 480)),
                     photo_path: photo.clone(),
+                    reactions: vec![
+                        crate::bridge::ReactionChip {
+                            emoji: "🔥".into(),
+                            count: 4,
+                            chosen: false,
+                        },
+                        crate::bridge::ReactionChip {
+                            emoji: "😍".into(),
+                            count: 2,
+                            chosen: true,
+                        },
+                        crate::bridge::ReactionChip {
+                            emoji: "👍".into(),
+                            count: 1,
+                            chosen: false,
+                        },
+                    ],
                     ..MsgRow::text(5, "Look at this one 😍", now - 550, false)
                 },
                 MsgRow {
@@ -1014,6 +1118,7 @@ async fn serve_demo(
                 MsgRow {
                     sender_name: Some("Camille".into()),
                     sender_id: Some(2001),
+                    reactions: vec![],
                     pinned: true,
                     ..MsgRow::text(1, "Who wants to present their project on Friday?", now - 14400, false)
                 },
@@ -1021,6 +1126,7 @@ async fn serve_demo(
                     forwarded_from: Some("Landscape Channel".into()),
                     sender_name: Some("Léo".into()),
                     sender_id: Some(2002),
+                    reactions: vec![],
                     ..MsgRow::text(2, "[forwarded] Photo from last weekend 🌄", now - 10800, false)
                 },
                 MsgRow {
@@ -1034,11 +1140,13 @@ async fn serve_demo(
                         .map(|d| d.path.clone()),
                     sender_name: Some("Léo".into()),
                     sender_id: Some(2002),
+                    reactions: vec![],
                     ..MsgRow::text(3, "", now - 7500, false)
                 },
                 MsgRow {
                     sender_name: Some("Camille".into()),
                     sender_id: Some(2001),
+                    reactions: vec![],
                     ..MsgRow::text(4, "@Léo can you review it before Friday?", now - 7300, false)
                 },
                 MsgRow::text(5, "I can, the CI finally passes 🎉", now - 7200, true),
@@ -1108,8 +1216,7 @@ async fn serve_demo(
     let mut demo_qr_last: Option<std::path::PathBuf> = None;
 
     loop {
-        let mut pending: Vec<Request> =
-            std::iter::from_fn(|| req_rx.try_recv().ok()).collect();
+        let mut pending: Vec<Request> = std::iter::from_fn(|| req_rx.try_recv().ok()).collect();
         for req in pending.drain(..) {
             match req {
                 Request::OpenChat { id } => {
@@ -1152,12 +1259,21 @@ async fn serve_demo(
                         doc: None,
                         sticker: None,
                         reply_to,
+                        reply_to_top: reply_to,
                         forwarded_from: None,
                         sender_name: None,
                         sender_id: None,
+                        reactions: vec![],
                     });
                 }
-                Request::SendMedia { id, path, caption, is_photo, reply_to, token } => {
+                Request::SendMedia {
+                    id,
+                    path,
+                    caption,
+                    is_photo,
+                    reply_to,
+                    token,
+                } => {
                     let nid = next_id;
                     next_id += 1;
                     // Simulate an upload: progress ticks over ~1.5 s, then
@@ -1203,9 +1319,11 @@ async fn serve_demo(
                             }),
                             sticker: None,
                             reply_to,
+                            reply_to_top: reply_to,
                             forwarded_from: None,
                             sender_name: None,
                             sender_id: None,
+                            reactions: vec![],
                         });
                         if !is_photo {
                             // The document is already on disk (we just picked
@@ -1224,12 +1342,14 @@ async fn serve_demo(
                         }
                     });
                 }
-                Request::ForwardMessage { from_chat, msg_id, to_chat } => {
+                Request::ForwardMessage {
+                    from_chat,
+                    msg_id,
+                    to_chat,
+                } => {
                     // Find the original row and echo a forwarded copy into
                     // the destination chat.
-                    let origin = msgs_for(from_chat)
-                        .into_iter()
-                        .find(|m| m.id == msg_id);
+                    let origin = msgs_for(from_chat).into_iter().find(|m| m.id == msg_id);
                     let Some(origin) = origin else { continue };
                     let from_title = chats
                         .borrow()
@@ -1250,9 +1370,11 @@ async fn serve_demo(
                         doc: origin.doc,
                         sticker: None,
                         reply_to: None,
+                        reply_to_top: None,
                         forwarded_from: Some(from_title),
                         sender_name: None,
                         sender_id: None,
+                        reactions: vec![],
                     });
                     if let Some(p) = origin.photo_path {
                         let _ = ui_tx.send(UiMessage::PhotoReady {
@@ -1269,7 +1391,7 @@ async fn serve_demo(
                         });
                     }
                 }
-Request::DownloadDoc { chat_id, msg_id } => {
+                Request::DownloadDoc { chat_id, msg_id } => {
                     // Demo docs resolve to their canned stand-in file: a real
                     // generated WAV for voice notes (so playback can be exercised),
                     // a text file otherwise.
@@ -1307,7 +1429,11 @@ Request::DownloadDoc { chat_id, msg_id } => {
                         msgs_for(chat_id)
                             .into_iter()
                             .filter(|m| !q.is_empty() && m.text.to_lowercase().contains(&q))
-                            .map(|row| SearchHit { chat_id, chat_title: chat_title.clone(), row })
+                            .map(|row| SearchHit {
+                                chat_id,
+                                chat_title: chat_title.clone(),
+                                row,
+                            })
                             .take(SEARCH_LIMIT)
                             .collect()
                     } else {
@@ -1335,11 +1461,7 @@ Request::DownloadDoc { chat_id, msg_id } => {
                         hits.truncate(SEARCH_LIMIT);
                         hits
                     };
-                    let _ = ui_tx.send(UiMessage::SearchResults {
-                        id,
-                        query,
-                        hits,
-                    });
+                    let _ = ui_tx.send(UiMessage::SearchResults { id, query, hits });
                 }
                 Request::EditMessage { id, msg_id, text } => {
                     edits.insert(msg_id, text.clone());
@@ -1361,7 +1483,12 @@ Request::DownloadDoc { chat_id, msg_id } => {
                         msg_id: pin.then_some(msg_id),
                     });
                 }
-                Request::CreateChannel { title, about: _, megagroup: _, members: _ } => {
+                Request::CreateChannel {
+                    title,
+                    about: _,
+                    megagroup: _,
+                    members: _,
+                } => {
                     let id = next_chat_id;
                     next_chat_id += 1;
                     // Deterministic hue from the id so the letter-circle
@@ -1385,11 +1512,7 @@ Request::DownloadDoc { chat_id, msg_id } => {
                     let _ = ui_tx.send(UiMessage::ChatGone { id });
                 }
                 Request::EditChatTitle { id, title } => {
-                    if let Some(c) = chats
-                        .borrow_mut()
-                        .iter_mut()
-                        .find(|c| c.id == id)
-                    {
+                    if let Some(c) = chats.borrow_mut().iter_mut().find(|c| c.id == id) {
                         c.title = title.clone();
                     }
                     let _ = ui_tx.send(UiMessage::Dialogs(build_rows(&chats.borrow())));
@@ -1429,14 +1552,20 @@ Request::DownloadDoc { chat_id, msg_id } => {
                     // The server would answer through an update; pause briefly
                     // so the demo feels round-trippy, then echo.
                     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                    let _ = ui_tx.send(UiMessage::MemberUpdated { chat_id: id, user_id });
+                    let _ = ui_tx.send(UiMessage::MemberUpdated {
+                        chat_id: id,
+                        user_id,
+                    });
                 }
                 Request::AdminBan { id, user_id, .. } => {
                     if let Some(rows) = parts.borrow_mut().get_mut(&id) {
                         rows.retain(|p| p.id != user_id);
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                    let _ = ui_tx.send(UiMessage::MemberUpdated { chat_id: id, user_id });
+                    let _ = ui_tx.send(UiMessage::MemberUpdated {
+                        chat_id: id,
+                        user_id,
+                    });
                 }
                 Request::GetTopics { id } => {
                     let topics = demo_topics.borrow().get(&id).cloned().unwrap_or_default();
@@ -1473,9 +1602,11 @@ Request::DownloadDoc { chat_id, msg_id } => {
                         doc: None,
                         sticker: None,
                         reply_to: None,
+                        reply_to_top: None,
                         forwarded_from: None,
                         sender_name: None,
                         sender_id: None,
+                        reactions: vec![],
                     });
                     let _ = ui_tx.send(UiMessage::Topics {
                         id,
@@ -1484,7 +1615,11 @@ Request::DownloadDoc { chat_id, msg_id } => {
                     });
                     let _ = ui_tx.send(UiMessage::TopicCreated { chat_id: id, topic });
                 }
-                Request::SendTopicMessage { id, text, topic_root } => {
+                Request::SendTopicMessage {
+                    id,
+                    text,
+                    topic_root,
+                } => {
                     let nid = next_id;
                     next_id += 1;
                     // The server tags thread messages with a reply header
@@ -1501,12 +1636,28 @@ Request::DownloadDoc { chat_id, msg_id } => {
                         doc: None,
                         sticker: None,
                         reply_to: Some(topic_root),
+                        reply_to_top: Some(topic_root),
                         forwarded_from: None,
                         sender_name: None,
                         sender_id: None,
+                        reactions: vec![],
                     });
                 }
                 Request::SetMuted { .. } => {}
+                Request::SendReaction { id, msg_id, emoji } => {
+                    // Demo has no live back-end: echo the reaction
+                    // optimistically so the chip appears on the message, as the
+                    // real server would via an UpdateMessageReactions.
+                    let _ = ui_tx.send(UiMessage::MessageReactions {
+                        chat_id: id,
+                        msg_id,
+                        reactions: vec![crate::bridge::ReactionChip {
+                            emoji,
+                            count: 1,
+                            chosen: true,
+                        }],
+                    });
+                }
                 Request::KickParticipant { user_id, .. } => {
                     // The server would confirm through an update; echo it.
                     let _ = ui_tx.send(UiMessage::ParticipantKicked { user_id });
@@ -1537,7 +1688,11 @@ Request::DownloadDoc { chat_id, msg_id } => {
                         }
                     }
                 }
-                Request::SendSticker { id, doc_id, access_hash: _ } => {
+                Request::SendSticker {
+                    id,
+                    doc_id,
+                    access_hash: _,
+                } => {
                     let doc = demo_stickers
                         .iter()
                         .flat_map(|s| &s.docs)
@@ -1554,11 +1709,15 @@ Request::DownloadDoc { chat_id, msg_id } => {
                         out: true,
                         photo: None,
                         doc: None,
-                        sticker: Some(StickerMeta { alt: doc.alt.clone() }),
+                        sticker: Some(StickerMeta {
+                            alt: doc.alt.clone(),
+                        }),
                         reply_to: None,
+                        reply_to_top: None,
                         forwarded_from: None,
                         sender_name: None,
                         sender_id: None,
+                        reactions: vec![],
                     });
                     let _ = ui_tx.send(UiMessage::StickerPathReady {
                         chat_id: id,
@@ -1589,7 +1748,11 @@ Request::DownloadDoc { chat_id, msg_id } => {
                         bio: p.bio.clone(),
                     }));
                 }
-                Request::UpdateProfile { first_name, last_name, bio } => {
+                Request::UpdateProfile {
+                    first_name,
+                    last_name,
+                    bio,
+                } => {
                     {
                         let mut p = demo_profile.borrow_mut();
                         if first_name.is_some() {
@@ -1632,14 +1795,17 @@ Request::DownloadDoc { chat_id, msg_id } => {
                     // path-cached image re-decodes).
                     let seed = now as u64 ^ 0x5eed;
                     let token: Vec<u8> = (0..32u8)
-                        .map(|i| ((seed >> (i % 8)) as u8).wrapping_mul(31 + i).wrapping_add(i))
+                        .map(|i| {
+                            ((seed >> (i % 8)) as u8)
+                                .wrapping_mul(31 + i)
+                                .wrapping_add(i)
+                        })
                         .collect();
                     let png = qr_png_bytes(&login_payload(&token));
                     if let Ok(bytes) = png {
                         let dir = cache_dir().join("demo");
                         let _ = std::fs::create_dir_all(&dir);
-                        let path =
-                            dir.join(format!("login-qr-{}.png", short_hash(&token)));
+                        let path = dir.join(format!("login-qr-{}.png", short_hash(&token)));
                         let _ = std::fs::write(&path, bytes);
                         let _ = ui_tx.send(UiMessage::QrCodeReady {
                             path: path.to_string_lossy().into_owned(),
@@ -1656,8 +1822,7 @@ Request::DownloadDoc { chat_id, msg_id } => {
                     // real path re-fetches them via `serve_login` returning;
                     // the demo runtime has no such hand-off, so mirror it here
                     // or the sidebar stays empty post-QR-login.
-                    let gen =
-                        demo_qr_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    let gen = demo_qr_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                     let ui_tx2 = ui_tx.clone();
                     let running = demo_qr_gen.clone();
                     let rows = build_rows(&chats.borrow());
@@ -1673,7 +1838,9 @@ Request::DownloadDoc { chat_id, msg_id } => {
                             }
                         }
                         running.store(0, Ordering::SeqCst);
-                        let _ = ui_tx2.send(UiMessage::LoginOk { name: "QR Demo".to_string() });
+                        let _ = ui_tx2.send(UiMessage::LoginOk {
+                            name: "QR Demo".to_string(),
+                        });
                         let _ = ui_tx2.send(UiMessage::Dialogs(rows));
                     });
                 }
@@ -1718,9 +1885,11 @@ Request::DownloadDoc { chat_id, msg_id } => {
                     doc: None,
                     sticker: None,
                     reply_to: None,
+                    reply_to_top: None,
                     forwarded_from: None,
                     sender_name: None,
                     sender_id: None,
+                    reactions: vec![],
                 });
                 next_id += 1;
                 next_incoming = now_inst + std::time::Duration::from_secs(45);
@@ -1777,9 +1946,8 @@ async fn serve_login(
                             let _ = ui_tx.send(UiMessage::LoginCodeRequired);
                         }
                         Err(e) => {
-                            let _ = ui_tx.send(UiMessage::Error(format!(
-                                "Could not send the code: {e}"
-                            )));
+                            let _ = ui_tx
+                                .send(UiMessage::Error(format!("Could not send the code: {e}")));
                         }
                     }
                 }
@@ -1792,7 +1960,9 @@ async fn serve_login(
                     };
                     match tg.sign_in(t, &code).await {
                         Ok(Ok(())) => {
-                            let _ = ui_tx.send(UiMessage::LoginOk { name: String::new() });
+                            let _ = ui_tx.send(UiMessage::LoginOk {
+                                name: String::new(),
+                            });
                             return;
                         }
                         Ok(Err(SignInError::PasswordRequired(tok))) => {
@@ -1801,9 +1971,8 @@ async fn serve_login(
                             let _ = ui_tx.send(UiMessage::LoginPasswordRequired { hint });
                         }
                         Ok(Err(SignInError::InvalidCode)) => {
-                            let _ = ui_tx.send(UiMessage::Error(
-                                "Invalid code, try again".to_string(),
-                            ));
+                            let _ =
+                                ui_tx.send(UiMessage::Error("Invalid code, try again".to_string()));
                         }
                         Ok(Err(SignInError::SignUpRequired)) => {
                             let _ = ui_tx.send(UiMessage::Error(
@@ -1823,14 +1992,15 @@ async fn serve_login(
                     let Some(t) = password.take() else { continue };
                     match tg.check_password(t, &pwd).await {
                         Ok(Ok(())) => {
-                            let _ = ui_tx.send(UiMessage::LoginOk { name: String::new() });
+                            let _ = ui_tx.send(UiMessage::LoginOk {
+                                name: String::new(),
+                            });
                             return;
                         }
                         Ok(Err(new_token)) => {
                             password = Some(new_token);
-                            let _ = ui_tx.send(UiMessage::Error(
-                                "Wrong password, try again".to_string(),
-                            ));
+                            let _ = ui_tx
+                                .send(UiMessage::Error("Wrong password, try again".to_string()));
                         }
                         Err(e) => {
                             let _ = ui_tx.send(UiMessage::Error(format!("2FA failed: {e}")));
@@ -1840,15 +2010,14 @@ async fn serve_login(
                 Request::QrLoginStart => {
                     let Some(hash) = api_hash else {
                         let _ = ui_tx.send(UiMessage::QrLoginFailed {
-                            error: "API_HASH is missing — rebuild with TG_API_HASH or add it to .env"
-                                .to_string(),
+                            error:
+                                "API_HASH is missing — rebuild with TG_API_HASH or add it to .env"
+                                    .to_string(),
                         });
                         continue;
                     };
                     // A new generation invalidates any previous poll loop.
-                    let gen = qr_cancel
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                        + 1;
+                    let gen = qr_cancel.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                     start_qr_login(
                         tg.client().clone(),
                         session.clone(),
@@ -2045,14 +2214,14 @@ fn short_hash(bytes: &[u8]) -> String {
 fn authorization_user_name(authorization: &tl::enums::auth::Authorization) -> String {
     match authorization {
         tl::enums::auth::Authorization::Authorization(a) => match &a.user {
-            tl::enums::User::User(u) => {
-                [u.first_name.clone().unwrap_or_default(),
-                 u.last_name.clone().unwrap_or_default()]
-                .into_iter()
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ")
-            }
+            tl::enums::User::User(u) => [
+                u.first_name.clone().unwrap_or_default(),
+                u.last_name.clone().unwrap_or_default(),
+            ]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
             tl::enums::User::Empty(_) => String::new(),
         },
         tl::enums::auth::Authorization::SignUpRequired(_) => String::new(),
@@ -2134,11 +2303,7 @@ fn prioritize(pending: &mut [Request]) {
 /// triple.
 fn media_to_row(
     media: Option<tg::model::MediaKind>,
-) -> (
-    Option<(u32, u32)>,
-    Option<DocMeta>,
-    Option<StickerMeta>,
-) {
+) -> (Option<(u32, u32)>, Option<DocMeta>, Option<StickerMeta>) {
     use crate::bridge::DocKind;
     use tg::model::MediaKind as MK;
     match media {
@@ -2153,7 +2318,11 @@ fn media_to_row(
             }),
             None,
         ),
-        Some(MK::Video { name, size, duration }) => (
+        Some(MK::Video {
+            name,
+            size,
+            duration,
+        }) => (
             None,
             Some(DocMeta {
                 name,
@@ -2237,12 +2406,22 @@ fn msg_row_from_info(
         sticker,
         sticker_path,
         reply_to: m.reply_to,
+        reply_to_top: m.reply_to_top,
         forwarded_from,
         uploading: None,
         upload_token: None,
         read: false,
         sender_name: m.sender_name,
         sender_id: m.sender_id,
+        reactions: m
+            .reactions
+            .iter()
+            .map(|r| crate::bridge::ReactionChip {
+                emoji: r.emoji.clone(),
+                count: r.count,
+                chosen: r.mine,
+            })
+            .collect(),
         pinned: m.pinned,
     }
 }
@@ -2323,8 +2502,7 @@ async fn serve(
     let grace = std::time::Duration::from_secs(10);
 
     loop {
-        let pending_in: Vec<Request> =
-            std::iter::from_fn(|| req_rx.try_recv().ok()).collect();
+        let pending_in: Vec<Request> = std::iter::from_fn(|| req_rx.try_recv().ok()).collect();
 
         // Coalesce Search requests (the UI sends one per keystroke): keep the
         // latest query per mode, and split them from the interactive work.
@@ -2361,7 +2539,10 @@ async fn serve(
             handle_request(
                 &tg,
                 ui_tx,
-                Request::Search { id: *mode, query: query.clone() },
+                Request::Search {
+                    id: *mode,
+                    query: query.clone(),
+                },
                 peers,
                 &downloads,
                 &mut self_id,
@@ -2384,9 +2565,7 @@ async fn serve(
                             open_sig = Some(sig);
                             let rows: Vec<MsgRow> = msgs
                                 .iter()
-                                .map(|m| {
-                                    msg_row_from_info(m.clone(), open, &downloads, peers)
-                                })
+                                .map(|m| msg_row_from_info(m.clone(), open, &downloads, peers))
                                 .collect();
                             let _ = ui_tx.send(UiMessage::Messages {
                                 id: open,
@@ -2395,10 +2574,7 @@ async fn serve(
                             });
                             // Warm photo thumbnails for any new photo messages.
                             for m in &msgs {
-                                if matches!(
-                                    m.media,
-                                    Some(tg::model::MediaKind::Photo { .. })
-                                ) {
+                                if matches!(m.media, Some(tg::model::MediaKind::Photo { .. })) {
                                     spawn_photo(
                                         tg.clone(),
                                         ui_tx.clone(),
@@ -2408,10 +2584,7 @@ async fn serve(
                                         m.id,
                                     );
                                 }
-                                if matches!(
-                                    m.media,
-                                    Some(tg::model::MediaKind::Sticker { .. })
-                                ) {
+                                if matches!(m.media, Some(tg::model::MediaKind::Sticker { .. })) {
                                     spawn_sticker_download(
                                         tg.clone(),
                                         ui_tx.clone(),
@@ -2435,11 +2608,8 @@ async fn serve(
             }
         }
 
-        if let Ok(Ok(update)) = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            updates.next(),
-        )
-        .await
+        if let Ok(Ok(update)) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), updates.next()).await
         {
             if started.elapsed() >= grace {
                 // A message for a chat that is *not* open rings a desktop
@@ -2456,12 +2626,7 @@ async fn serve(
                                 open_id,
                                 cid,
                                 &title,
-                                &crate::state::preview_text(
-                                    msg.text(),
-                                    &None,
-                                    &None,
-                                    &None,
-                                ),
+                                &crate::state::preview_text(msg.text(), &None, &None, &None),
                             );
                         }
                     }
@@ -2492,7 +2657,8 @@ fn handle_update(
                 // the history mapper in `tg`).
                 let is_private = matches!(
                     msg.peer_id().kind(),
-                    grammers_session::types::PeerKind::User | grammers_session::types::PeerKind::UserSelf
+                    grammers_session::types::PeerKind::User
+                        | grammers_session::types::PeerKind::UserSelf
                 );
                 let sender_name = if is_private {
                     None
@@ -2522,9 +2688,25 @@ fn handle_update(
                     doc,
                     sticker,
                     reply_to: msg.reply_to_message_id(),
+                    // Thread root (`reply_to_top_id`): keeps in-thread replies to
+                    // other posts visible in the topic view (grammers exposes
+                    // only the direct reply target).
+                    reply_to_top: {
+                        let m: &grammers_client::message::Message = &msg;
+                        match &m.raw {
+                            tl::enums::Message::Message(tl::types::Message {
+                                reply_to: Some(tl::enums::MessageReplyHeader::Header(header)),
+                                ..
+                            }) => header.reply_to_top_id,
+                            _ => None,
+                        }
+                    },
                     forwarded_from,
                     sender_name,
                     sender_id,
+                    // Brand-new messages rarely carry reactions yet; they arrive
+                    // (and are rendered) as a later Update::MessageReactions.
+                    reactions: vec![],
                 });
             }
         }
@@ -2591,6 +2773,33 @@ fn handle_update(
                     chat_id: grammers_session::types::PeerId::channel(u.channel_id)
                         .bot_api_dialog_id(),
                     msg_id: u.messages.last().copied(),
+                });
+            }
+            grammers_client::tl::enums::Update::MessageReactions(u) => {
+                // Reactions changed on an existing message (added/removed):
+                // rebuild the chip list from the update's result set so the UI
+                // reflects it without a full reload.
+                let reactions = match &u.reactions {
+                    grammers_client::tl::enums::MessageReactions::Reactions(r) => {
+                        let mut chips = Vec::new();
+                        for c in &r.results {
+                            let grammers_client::tl::enums::ReactionCount::Count(c) = c;
+                            if let grammers_client::tl::enums::Reaction::Emoji(e) = &c.reaction {
+                                chips.push(crate::bridge::ReactionChip {
+                                    emoji: e.emoticon.clone(),
+                                    count: c.count as u32,
+                                    chosen: c.chosen_order.is_some(),
+                                });
+                            }
+                        }
+                        chips
+                    }
+                };
+                let _ = ui_tx.send(UiMessage::MessageReactions {
+                    chat_id: grammers_session::types::PeerId::from(u.peer.clone())
+                        .bot_api_dialog_id(),
+                    msg_id: u.msg_id,
+                    reactions,
                 });
             }
             _ => {}
@@ -2735,30 +2944,33 @@ async fn handle_request(
                             });
                         }
                         Ok(None) => {
-                            let _ = ui_tx.send(UiMessage::PinnedMessage { chat_id: id, msg_id: None });
+                            let _ = ui_tx.send(UiMessage::PinnedMessage {
+                                chat_id: id,
+                                msg_id: None,
+                            });
                         }
                         Err(_) => {}
                     }
                 }
                 Err(e) => {
-                    let _ = ui_tx.send(UiMessage::Error(format!(
-                        "Could not load messages: {e}"
-                    )));
+                    let _ = ui_tx.send(UiMessage::Error(format!("Could not load messages: {e}")));
                 }
             },
             None => {
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
             }
         },
-        Request::DownloadAvatar { chat_id } => if let Some((_, peer_ref)) = peers.get(&chat_id) {
-            spawn_avatar(
-                tg.clone(),
-                ui_tx.clone(),
-                downloads.clone(),
-                chat_id,
-                *peer_ref,
-            );
-        },
+        Request::DownloadAvatar { chat_id } => {
+            if let Some((_, peer_ref)) = peers.get(&chat_id) {
+                spawn_avatar(
+                    tg.clone(),
+                    ui_tx.clone(),
+                    downloads.clone(),
+                    chat_id,
+                    *peer_ref,
+                );
+            }
+        }
         Request::SendMessage { id, text, reply_to } => match peers.get(&id) {
             Some((_, peer_ref)) => {
                 if let Err(e) = tg.send_message(peer_ref, &text, reply_to).await {
@@ -2769,36 +2981,53 @@ async fn handle_request(
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
             }
         },
-        Request::SendMedia { id, path, caption, is_photo: _, reply_to, token } => {
-            match peers.get(&id) {
-                Some((_, peer_ref)) => spawn_upload(
-                    tg.clone(),
-                    ui_tx.clone(),
-                    downloads.clone(),
-                    id,
-                    *peer_ref,
-                    std::path::PathBuf::from(path),
-                    caption,
-                    reply_to,
-                    token,
-                ),
-                None => {
-                    let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+        Request::SendMedia {
+            id,
+            path,
+            caption,
+            is_photo: _,
+            reply_to,
+            token,
+        } => match peers.get(&id) {
+            Some((_, peer_ref)) => spawn_upload(
+                tg.clone(),
+                ui_tx.clone(),
+                downloads.clone(),
+                id,
+                *peer_ref,
+                std::path::PathBuf::from(path),
+                caption,
+                reply_to,
+                token,
+            ),
+            None => {
+                let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+            }
+        },
+        Request::ForwardMessage {
+            from_chat,
+            msg_id,
+            to_chat,
+        } => match (peers.get(&from_chat), peers.get(&to_chat)) {
+            (Some((_, from_peer)), Some((_, to_peer))) => {
+                if let Err(e) = tg.forward_message(from_peer, msg_id, to_peer).await {
+                    let _ = ui_tx.send(UiMessage::Error(format!("Forward failed: {e}")));
                 }
             }
-        }
-        Request::ForwardMessage { from_chat, msg_id, to_chat } => {
-            match (peers.get(&from_chat), peers.get(&to_chat)) {
-                (Some((_, from_peer)), Some((_, to_peer))) => {
-                    if let Err(e) = tg.forward_message(from_peer, msg_id, to_peer).await {
-                        let _ = ui_tx.send(UiMessage::Error(format!("Forward failed: {e}")));
-                    }
-                }
-                _ => {
-                    let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+            _ => {
+                let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+            }
+        },
+        Request::SendReaction { id, msg_id, emoji } => match peers.get(&id) {
+            Some((_, peer_ref)) => {
+                if let Err(e) = tg.send_reaction(peer_ref, msg_id, &emoji).await {
+                    let _ = ui_tx.send(UiMessage::Error(format!("Reaction failed: {e}")));
                 }
             }
-        }
+            None => {
+                let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+            }
+        },
         Request::DownloadDoc { chat_id, msg_id } => {
             if let Some((_, peer_ref)) = peers.get(&chat_id) {
                 spawn_doc_download(
@@ -2823,7 +3052,11 @@ async fn handle_request(
                 );
             }
         }
-        Request::SendSticker { id, doc_id, access_hash } => match peers.get(&id) {
+        Request::SendSticker {
+            id,
+            doc_id,
+            access_hash,
+        } => match peers.get(&id) {
             Some((_, peer_ref)) => {
                 let file_reference = downloads
                     .sticker_refs
@@ -2973,7 +3206,9 @@ async fn handle_request(
                 return;
             }
             let from = if let Some(chat_id) = id {
-                peers.get(&chat_id).map(|(title, peer_ref)| (chat_id, title.clone(), Some(*peer_ref)))
+                peers
+                    .get(&chat_id)
+                    .map(|(title, peer_ref)| (chat_id, title.clone(), Some(*peer_ref)))
             } else {
                 None
             };
@@ -2990,9 +3225,7 @@ async fn handle_request(
                             })
                             .collect(),
                         Err(e) => {
-                            let _ = ui_tx.send(UiMessage::Error(format!(
-                                "Search failed: {e}"
-                            )));
+                            let _ = ui_tx.send(UiMessage::Error(format!("Search failed: {e}")));
                             return;
                         }
                     }
@@ -3014,9 +3247,7 @@ async fn handle_request(
                         })
                         .collect(),
                     Err(e) => {
-                        let _ = ui_tx.send(UiMessage::Error(format!(
-                            "Search failed: {e}"
-                        )));
+                        let _ = ui_tx.send(UiMessage::Error(format!("Search failed: {e}")));
                         return;
                     }
                 },
@@ -3066,7 +3297,12 @@ async fn handle_request(
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
             }
         },
-        Request::CreateChannel { title, about, megagroup, members } => {
+        Request::CreateChannel {
+            title,
+            about,
+            megagroup,
+            members,
+        } => {
             // Groups with picked members go through messages.createChat
             // (initial invites); everything else — and any failed invite —
             // creates a channel/supergroup via channels.createChannel.
@@ -3117,9 +3353,7 @@ async fn handle_request(
                     let _ = ui_tx.send(UiMessage::ChatGone { id });
                 }
                 Err(e) => {
-                    let _ = ui_tx.send(UiMessage::Error(format!(
-                        "Could not remove the chat: {e}"
-                    )));
+                    let _ = ui_tx.send(UiMessage::Error(format!("Could not remove the chat: {e}")));
                 }
             }
         }
@@ -3153,8 +3387,7 @@ async fn handle_request(
         Request::SetMuted { id, muted } => {
             if let Some((_, peer_ref)) = peers.get(&id) {
                 if let Err(e) = tg.set_muted(peer_ref, muted).await {
-                    let _ = ui_tx
-                        .send(UiMessage::Error(format!("Could not update mute: {e}")));
+                    let _ = ui_tx.send(UiMessage::Error(format!("Could not update mute: {e}")));
                 }
             }
         }
@@ -3175,8 +3408,7 @@ async fn handle_request(
                     ));
                 }
                 Err(e) => {
-                    let _ = ui_tx
-                        .send(UiMessage::Error(format!("Could not load members: {e}")));
+                    let _ = ui_tx.send(UiMessage::Error(format!("Could not load members: {e}")));
                 }
             },
             None => {
@@ -3210,7 +3442,10 @@ async fn handle_request(
             };
             match result {
                 Ok(()) => {
-                    let _ = ui_tx.send(UiMessage::MemberUpdated { chat_id: id, user_id });
+                    let _ = ui_tx.send(UiMessage::MemberUpdated {
+                        chat_id: id,
+                        user_id,
+                    });
                 }
                 Err(e) => {
                     let _ = ui_tx.send(UiMessage::Error(if promote {
@@ -3221,10 +3456,17 @@ async fn handle_request(
                 }
             }
         }
-        Request::AdminBan { id, user_id, kick_only } => match peers.get(&id) {
+        Request::AdminBan {
+            id,
+            user_id,
+            kick_only,
+        } => match peers.get(&id) {
             Some((_, peer_ref)) => match tg.ban_member(peer_ref, user_id, kick_only).await {
                 Ok(()) => {
-                    let _ = ui_tx.send(UiMessage::MemberUpdated { chat_id: id, user_id });
+                    let _ = ui_tx.send(UiMessage::MemberUpdated {
+                        chat_id: id,
+                        user_id,
+                    });
                 }
                 Err(e) => {
                     let _ = ui_tx.send(UiMessage::Error(if kick_only {
@@ -3268,7 +3510,11 @@ async fn handle_request(
                         .into_iter()
                         .map(topic_to_bridge)
                         .collect();
-                    let _ = ui_tx.send(UiMessage::Topics { id, is_forum: true, topics });
+                    let _ = ui_tx.send(UiMessage::Topics {
+                        id,
+                        is_forum: true,
+                        topics,
+                    });
                     if let Some(t) = parsed {
                         let _ = ui_tx.send(UiMessage::TopicCreated {
                             chat_id: id,
@@ -3277,15 +3523,18 @@ async fn handle_request(
                     }
                 }
                 Err(e) => {
-                    let _ = ui_tx
-                        .send(UiMessage::Error(format!("Could not create topic: {e}")));
+                    let _ = ui_tx.send(UiMessage::Error(format!("Could not create topic: {e}")));
                 }
             },
             None => {
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
             }
         },
-        Request::SendTopicMessage { id, text, topic_root } => match peers.get(&id) {
+        Request::SendTopicMessage {
+            id,
+            text,
+            topic_root,
+        } => match peers.get(&id) {
             Some((_, peer_ref)) => {
                 if let Err(e) = tg.send_to_topic(peer_ref, &text, topic_root).await {
                     let _ = ui_tx.send(UiMessage::Error(format!("Send failed: {e}")));
@@ -3295,8 +3544,11 @@ async fn handle_request(
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
             }
         },
-        Request::LoginPhone { .. } | Request::LoginCode { .. } | Request::LoginPassword { .. }
-        | Request::QrLoginStart | Request::QrLoginCancel => {}
+        Request::LoginPhone { .. }
+        | Request::LoginCode { .. }
+        | Request::LoginPassword { .. }
+        | Request::QrLoginStart
+        | Request::QrLoginCancel => {}
     }
 }
 
@@ -3335,7 +3587,12 @@ fn spawn_photo(
     peer_ref: PeerRef,
     msg_id: i32,
 ) {
-    if downloads.photos.lock().unwrap().contains_key(&(chat_id, msg_id)) {
+    if downloads
+        .photos
+        .lock()
+        .unwrap()
+        .contains_key(&(chat_id, msg_id))
+    {
         return;
     }
     tokio::spawn(async move {
@@ -3402,7 +3659,11 @@ fn spawn_upload(
         let result = {
             let progress_tx = progress_tx.clone();
             tg.send_media(&peer_ref, &path, &caption, reply_to, move |sent, total| {
-                let p = if total > 0 { sent as f32 / total as f32 } else { 1.0 };
+                let p = if total > 0 {
+                    sent as f32 / total as f32
+                } else {
+                    1.0
+                };
                 let _ = progress_tx.send(p.clamp(0.0, 1.0));
             })
             .await
@@ -3430,7 +3691,12 @@ fn spawn_doc_download(
     peer_ref: PeerRef,
     msg_id: i32,
 ) {
-    if downloads.docs.lock().unwrap().contains_key(&(chat_id, msg_id)) {
+    if downloads
+        .docs
+        .lock()
+        .unwrap()
+        .contains_key(&(chat_id, msg_id))
+    {
         return;
     }
     // User-initiated (a click on the voice/file card): use the fast budget
@@ -3458,7 +3724,11 @@ fn spawn_doc_download(
                 None
             }
         };
-        let _ = ui_tx.send(UiMessage::DocReady { chat_id, msg_id, path });
+        let _ = ui_tx.send(UiMessage::DocReady {
+            chat_id,
+            msg_id,
+            path,
+        });
     });
 }
 
@@ -3496,7 +3766,11 @@ fn spawn_sticker_download(
             }
             _ => None,
         };
-        let _ = ui_tx.send(UiMessage::StickerPathReady { chat_id, msg_id, path });
+        let _ = ui_tx.send(UiMessage::StickerPathReady {
+            chat_id,
+            msg_id,
+            path,
+        });
     });
 }
 
