@@ -59,11 +59,24 @@ pub enum DocKind {
     Audio { voice: bool },
 }
 
+/// One `code`/`pre` formatting span carried by a message, precomputed to
+/// byte offsets so the UI can slice the UTF-8 `text` directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeSpan {
+    /// Byte range `[start, end)` into `MsgRow::text`.
+    pub start: usize,
+    pub end: usize,
+    /// `Some(language)` for a `pre` (block) entity, `None` for inline `code`.
+    pub block: Option<String>,
+}
+
 /// A displayed message.
 #[derive(Debug, Clone)]
 pub struct MsgRow {
     pub id: i32,
     pub text: String,
+    /// `code`/`pre` formatting spans (byte offsets into `text`), if any.
+    pub code: Vec<CodeSpan>,
     /// Unix timestamp of the message.
     pub date: i32,
     /// True if the message was sent by us.
@@ -107,6 +120,7 @@ impl MsgRow {
         Self {
             id,
             text: text.into(),
+            code: vec![],
             date,
             out,
             photo: None,
@@ -348,6 +362,7 @@ pub enum UiMessage {
         chat_id: i64,
         id: i32,
         text: String,
+        code: Vec<CodeSpan>,
         date: i32,
         out: bool,
         photo: Option<(u32, u32)>,
@@ -365,6 +380,7 @@ pub enum UiMessage {
         chat_id: i64,
         id: i32,
         text: String,
+        code: Vec<CodeSpan>,
         date: i32,
     },
     /// A photo thumbnail was downloaded (path = on-disk location).

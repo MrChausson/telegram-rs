@@ -14,14 +14,14 @@ use grammers_client::update::Update;
 use grammers_session::types::PeerRef;
 use grammers_session::updates::UpdatesLike;
 use grammers_session::Session;
-use tg::client::Telegram;
+use tg::client::{code_entities_of, Telegram};
 use tg::session::{FileSession, load_or_new};
 use tg::auth::{export_login_token, import_login_token, import_login_token_in_dc};
 use grammers_client::tl;
 use tokio::sync::mpsc;
 
 use crate::bridge::{
-    ChatDetail, ChatKind, ChatRow, DocKind, DocMeta, MsgRow, MyProfile, ParticipantRole,
+    ChatDetail, ChatKind, ChatRow, CodeSpan, DocKind, DocMeta, MsgRow, MyProfile, ParticipantRole,
     ParticipantRow, Request, SearchHit, SessionInfo, StickerMeta, StickerSetBridge, TopicRow,
     UiMessage,
 };
@@ -969,6 +969,13 @@ async fn serve_demo(
                     now - 100,
                     true,
                 ),
+                MsgRow {
+                    code: vec![
+                        CodeSpan { start: 31, end: 41, block: None },
+                        CodeSpan { start: 60, end: 107, block: Some("rust".into()) },
+                    ],
+                    ..MsgRow::text(12, "As promised, the snippet using f32::clamp - compiles clean:\nfn clamp(x: f32) -> f32 { x.clamp(0.0, 100.0) }\n\nShip it?", now - 60, true)
+                },
                 MsgRow::text(11, "Yes! see you tomorrow 👋", now - 42, true),
             ],
             1002 => vec![
@@ -988,6 +995,16 @@ async fn serve_demo(
                 MsgRow {
                     reply_to: Some(30),
                     ..MsgRow::text(32, "LGTM once CI passes", now - 18000, true)
+                },
+                MsgRow {
+                    reply_to: Some(30),
+                    sender_name: Some("Thomas".into()),
+                    sender_id: Some(2003),
+                    code: vec![
+                        CodeSpan { start: 37, end: 45, block: None },
+                        CodeSpan { start: 71, end: 101, block: Some("rust".into()) },
+                    ],
+                    ..MsgRow::text(33, "Proposing to pin the build with the \"--locked\" flag so CI can't drift:\ncargo build --release --locked\n\nSpeedy and deterministic - green to ship?", now - 17800, false)
                 },
                 MsgRow::text(40, "Topic \u{201c}Random\u{201d} created", now - 17500, false),
                 MsgRow {
@@ -1128,6 +1145,7 @@ async fn serve_demo(
                         chat_id: id,
                         id: nid,
                         text,
+                        code: vec![],
                         date: now,
                         out: true,
                         photo: None,
@@ -1173,6 +1191,7 @@ async fn serve_demo(
                             chat_id: id,
                             id: nid,
                             text: caption,
+                            code: vec![],
                             date: now,
                             out: true,
                             photo: is_photo.then_some((640, 480)),
@@ -1224,6 +1243,7 @@ async fn serve_demo(
                         chat_id: to_chat,
                         id: nid,
                         text: origin.text,
+                        code: vec![],
                         date: now,
                         out: true,
                         photo: origin.photo,
@@ -1327,6 +1347,7 @@ Request::DownloadDoc { chat_id, msg_id } => {
                         chat_id: id,
                         id: msg_id,
                         text,
+                        code: vec![],
                         date: now,
                     });
                 }
@@ -1445,6 +1466,7 @@ Request::DownloadDoc { chat_id, msg_id } => {
                         chat_id: id,
                         id: nid,
                         text: format!("Topic \u{201c}{title}\u{201d} created"),
+                        code: vec![],
                         date: now,
                         out: false,
                         photo: None,
@@ -1472,6 +1494,7 @@ Request::DownloadDoc { chat_id, msg_id } => {
                         chat_id: id,
                         id: nid,
                         text,
+                        code: vec![],
                         date: now,
                         out: true,
                         photo: None,
@@ -1526,6 +1549,7 @@ Request::DownloadDoc { chat_id, msg_id } => {
                         chat_id: id,
                         id: nid,
                         text: String::new(),
+                        code: vec![],
                         date: now,
                         out: true,
                         photo: None,
@@ -1687,6 +1711,7 @@ Request::DownloadDoc { chat_id, msg_id } => {
                     chat_id: 1001,
                     id: next_id,
                     text,
+                    code: vec![],
                     date,
                     out: false,
                     photo: None,
@@ -2194,6 +2219,15 @@ fn msg_row_from_info(
     MsgRow {
         id: m.id,
         text: m.text,
+        code: m
+            .code
+            .into_iter()
+            .map(|c| CodeSpan {
+                start: c.start,
+                end: c.end,
+                block: c.block,
+            })
+            .collect(),
         date: m.date,
         out: m.out,
         photo_path: photo.as_ref().and_then(|_| downloads.path(chat_id, m.id)),
@@ -2474,6 +2508,14 @@ fn handle_update(
                     chat_id,
                     id: msg.id(),
                     text: msg.text().to_string(),
+                    code: code_entities_of(&msg)
+                        .into_iter()
+                        .map(|c| CodeSpan {
+                            start: c.start,
+                            end: c.end,
+                            block: c.block,
+                        })
+                        .collect(),
                     date: msg.date().timestamp() as i32,
                     out: msg.outgoing(),
                     photo,
@@ -2492,6 +2534,7 @@ fn handle_update(
                     chat_id: peer.id().bot_api_dialog_id(),
                     id: msg.id(),
                     text: msg.text().to_string(),
+                    code: vec![],
                     date: msg.date().timestamp() as i32,
                 });
             }

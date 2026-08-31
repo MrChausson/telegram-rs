@@ -895,6 +895,7 @@ impl State {
                 chat_id,
                 id,
                 text,
+                code,
                 date,
                 out,
                 photo,
@@ -916,6 +917,7 @@ impl State {
                     let row = MsgRow {
                         id,
                         text,
+                        code,
                         date,
                         out,
                         photo,
@@ -974,11 +976,12 @@ impl State {
                     self.refresh_dialog_short(chat_id);
                 }
             }
-            UiMessage::MessageEdited { chat_id, id, text, date } => {
+            UiMessage::MessageEdited { chat_id, id, text, code, date } => {
                 if self.open_chat == Some(chat_id) {
                     for m in &mut self.messages {
                         if m.id == id {
                             m.text = text.clone();
+                            m.code = code.clone();
                             m.date = date;
                             break;
                         }
@@ -986,6 +989,7 @@ impl State {
                     for m in &mut self.topic_all_messages {
                         if m.id == id {
                             m.text = text;
+                            m.code = code;
                             m.date = date;
                             break;
                         }
@@ -2927,6 +2931,7 @@ mod tests {
             chat_id: 42,
             id: 3,
             text: "hey".into(),
+            code: vec![],
             date: 300,
             out: false,
             photo: None,
@@ -2957,6 +2962,7 @@ mod tests {
             chat_id: 7,
             id: 9,
             text: "ping".into(),
+            code: vec![],
             date: 400,
             out: false,
             photo: None,
@@ -2987,6 +2993,7 @@ mod tests {
             chat_id: 42,
             id: 777,
             text: "hello".into(),
+            code: vec![],
             date: 0,
             out: true,
             photo: None,
@@ -3085,6 +3092,7 @@ mod tests {
             chat_id: 7,
             id: 9,
             text: "ping".into(),
+            code: vec![],
             date: 400,
             out: false,
             photo: None,
@@ -3255,6 +3263,7 @@ mod tests {
             chat_id: 42,
             id: 777,
             text: String::new(),
+            code: vec![],
             date: 500,
             out: true,
             photo: Some((640, 480)),
@@ -4113,6 +4122,7 @@ mod tests {
             chat_id: 42,
             id: 777,
             text: String::new(),
+            code: vec![],
             date: 500,
             out: true,
             photo: None,
@@ -4156,6 +4166,7 @@ mod tests {
             chat_id: 42,
             id: 900,
             text: String::new(),
+            code: vec![],
             date: 600,
             out: false,
             photo: None,
@@ -4591,6 +4602,7 @@ mod tests {
             chat_id: 1002,
             id: 70,
             text: "hello thread".into(),
+            code: vec![],
             date: 130,
             out: true,
             photo: None,
@@ -4653,6 +4665,7 @@ mod tests {
             chat_id: 1002,
             id: 80,
             text: "general arrival".into(),
+            code: vec![],
             date: 140,
             out: false,
             photo: None,

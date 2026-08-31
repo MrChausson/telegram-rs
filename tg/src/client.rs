@@ -11,7 +11,11 @@ use grammers_client::tl;
 use grammers_mtsender::SenderPool;
 use grammers_session::updates::UpdatesLike;
 
-use crate::model::{AuthSession, ChatDetail, ChatInfo, ChatKind, ForwardInfo, GlobalHit, MediaKind, MessageInfo, ParticipantRow, ParticipantRole, SelfProfile, StickerDoc, StickerSetInfo};
+use crate::model::{
+    uv16_span_to_bytes, AuthSession, ChatDetail, ChatInfo, ChatKind, CodeEntity, ForwardInfo,
+    GlobalHit, MediaKind, MessageInfo, ParticipantRow, ParticipantRole, SelfProfile, StickerDoc,
+    StickerSetInfo,
+};
 use crate::session::FileSession;
 
 /// Wrapped Telegram client with the network runtime running in the background.
@@ -1374,6 +1378,54 @@ impl Downloadable for RawPhoto {
     }
 }
 
+/// Extracts `code` (inline) and `pre` (block) formatting entities from a
+/// message's format entities, as byte-offset spans usable to slice `text`.
+/// Emoji/link/strike/etc. are ignored — only code preview spans matter here.
+fn code_entities(
+    entities: Option<&Vec<tl::enums::MessageEntity>>,
+    text: &str,
+) -> Vec<CodeEntity> {
+    let Some(entities) = entities else {
+        return Vec::new();
+    };
+    entities
+        .iter()
+        .filter_map(|e| match e {
+            tl::enums::MessageEntity::Code(raw) => {
+                let (s, end) = uv16_span_to_bytes(
+                    text,
+                    raw.offset.max(0) as usize,
+                    raw.length.max(0) as usize,
+                )?;
+                Some(CodeEntity {
+                    start: s,
+                    end,
+                    block: None,
+                })
+            }
+            tl::enums::MessageEntity::Pre(raw) => {
+                let (s, end) = uv16_span_to_bytes(
+                    text,
+                    raw.offset.max(0) as usize,
+                    raw.length.max(0) as usize,
+                )?;
+                Some(CodeEntity {
+                    start: s,
+                    end,
+                    block: Some(raw.language.clone()),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Extract the `code`/`pre` formatting spans of a message as byte-offset
+/// spans (usable both by `message_info` and by live-update paths in the UI).
+pub fn code_entities_of(msg: &grammers_client::message::Message) -> Vec<CodeEntity> {
+    code_entities(msg.fmt_entities(), msg.text())
+}
+
 /// Maps a grammers `Message` to the display model shared by history and
 /// search results (reply/forward/media extracted the same way everywhere).
 fn message_info(msg: &grammers_client::message::Message) -> MessageInfo {
@@ -1387,6 +1439,7 @@ fn message_info(msg: &grammers_client::message::Message) -> MessageInfo {
     MessageInfo {
         id: msg.id(),
         text: msg.text().to_string(),
+        code: code_entities_of(msg),
         date: msg.date().timestamp() as i32,
         out: msg.outgoing(),
         media: media_kind(msg.media().as_ref()),
