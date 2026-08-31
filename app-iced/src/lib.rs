@@ -746,6 +746,9 @@ fn view(state: &State) -> Element<'_> {
     // surface presentation (last frame stays on screen). It renders as an
     // overlay layer inside `conversation_pane` instead.
     if !state.authenticated {
+        if state.connecting {
+            return connecting_view(state);
+        }
         return login_view(state);
     }
     if state.search_open() {
@@ -945,6 +948,40 @@ fn login_segment(label: &'static str, active: bool) -> iced::widget::Button<'sta
         }
         st
     })
+}
+
+/// Shown for the brief window between login completing (or a valid session
+/// loading) and the dialog list arriving. Replaces the frozen QR page with
+/// a branded "Loading chats…" card so the scanned login visibly reacts
+/// instead of sitting on an unchanging QR while `get_dialogs` paginates.
+fn connecting_view(_state: &State) -> Element<'_> {
+    let logo = container(
+        container(text("tg").size(20).color(Color::WHITE))
+            .width(76)
+            .height(76)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .style(accent_circle),
+    )
+    .width(76)
+    .height(76);
+
+    container(column![
+        logo,
+        text("Loading chats…")
+            .size(theme::font::TITLE)
+            .color(rgb(theme::TEXT_PRIMARY())),
+        text("Almost there—one moment…")
+            .size(theme::font::TIMESTAMP)
+            .color(rgb(theme::TEXT_SECONDARY())),
+    ]
+    .spacing(18)
+    .align_x(Alignment::Center))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 fn login_view(state: &State) -> Element<'_> {

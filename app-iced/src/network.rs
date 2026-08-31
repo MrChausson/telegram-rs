@@ -294,6 +294,10 @@ pub fn spawn_network(demo: bool, big: bool, notify: Arc<NotifyPref>) -> Unbounde
                     let _ = tg::session::save(&session, &session_path);
                 }
 
+                // Login is done (or a valid session was loaded): flip the UI
+                // off the frozen QR page onto a "Loading chats…" state while
+                // get_me + get_dialogs run, so the post-scan wait is visible.
+                let _ = ui_tx.send(UiMessage::Connecting);
                 let _ = tg.client().get_me().await;
                 let updates_rx = tg.take_updates();
                 let tg = Arc::new(tg);
