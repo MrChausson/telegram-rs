@@ -71,6 +71,10 @@ pub struct Palette {
     pub perf_badge_bg: (u8, u8, u8),
     pub menu_bg: (u8, u8, u8),
     pub menu_border: (u8, u8, u8),
+    /// Background of code blocks (`pre`): darker than the bubble, distinct.
+    pub code_bg: (u8, u8, u8),
+    /// Border of code blocks.
+    pub code_border: (u8, u8, u8),
 }
 
 /// Historical dark palette.
@@ -94,6 +98,8 @@ const DARK: Palette = Palette {
     perf_badge_bg: (18, 28, 38),
     menu_bg: (33, 47, 64),
     menu_border: (56, 73, 92),
+    code_bg: (9, 15, 22),
+    code_border: (45, 58, 72),
 };
 
 /// Light palette modeled after Telegram Desktop defaults: white list,
@@ -118,6 +124,8 @@ const LIGHT: Palette = Palette {
     perf_badge_bg: (18, 28, 38),   // stays dark so the FPS badge reads anywhere
     menu_bg: (255, 255, 255),      // #FFFFFF
     menu_border: (218, 220, 224),  // #DADCE0
+    code_bg: (240, 242, 245),      // light gray, readable on white bubble
+    code_border: (218, 220, 224),  // #DADCE0
 };
 
 /// Both palettes indexed by [`ThemeMode::idx`].
@@ -217,6 +225,14 @@ pub fn MENU_BG() -> (u8, u8, u8) {
 pub fn MENU_BORDER() -> (u8, u8, u8) {
     cur().menu_border
 }
+/// Background of code blocks (`pre`) — darker than the bubble on both themes.
+pub fn CODE_BG() -> (u8, u8, u8) {
+    cur().code_bg
+}
+/// Border of code blocks.
+pub fn CODE_BORDER() -> (u8, u8, u8) {
+    cur().code_border
+}
 /// Accent hover variant (buttons).
 pub fn ACCENT_HOVER() -> (u8, u8, u8) {
     cur().accent_hover
@@ -282,6 +298,8 @@ pub mod font {
     pub const TIMESTAMP: f32 = 13.0;
     pub const BADGE: f32 = 11.0;
     pub const PLACEHOLDER: f32 = 15.0;
+    pub const CODE: f32 = 13.0;
+    pub const CODE_TAG: f32 = 11.0;
 }
 
 /// Formats a Unix timestamp as local-time `HH:MM`.
