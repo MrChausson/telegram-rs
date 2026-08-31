@@ -310,6 +310,9 @@ pub struct State {
 
     /// True once the account is signed in (chat UI active).
     pub authenticated: bool,
+    /// True between login completing and the dialog list arriving; the view
+    /// shows a "Loading chats…" spinner instead of the frozen QR page.
+    pub connecting: bool,
     /// The peer of the open chat is typing.
     pub typing: bool,
 
@@ -577,6 +580,7 @@ impl State {
             login_error: false,
             loading: false,
             authenticated: false,
+            connecting: false,
             typing: false,
             context_menu: None,
             react_row: None,
@@ -876,6 +880,7 @@ impl State {
     /// Applies an incoming network message.
     pub fn on_message(&mut self, msg: UiMessage) {
         match msg {
+            UiMessage::Connecting => self.connecting = true,
             UiMessage::Dialogs(rows) => {
                 self.dialogs = rows;
                 // Pre-ellipsize every list label once (see `dialog_short`), so
@@ -921,6 +926,7 @@ impl State {
                 chat_id,
                 id,
                 text,
+                code,
                 date,
                 out,
                 photo,
@@ -944,6 +950,7 @@ impl State {
                     let row = MsgRow {
                         id,
                         text,
+                        code,
                         date,
                         out,
                         photo,
@@ -1006,12 +1013,14 @@ impl State {
                 chat_id,
                 id,
                 text,
+                code,
                 date,
             } => {
                 if self.open_chat == Some(chat_id) {
                     for m in &mut self.messages {
                         if m.id == id {
                             m.text = text.clone();
+                            m.code = code.clone();
                             m.date = date;
                             break;
                         }
@@ -1019,6 +1028,7 @@ impl State {
                     for m in &mut self.topic_all_messages {
                         if m.id == id {
                             m.text = text;
+                            m.code = code;
                             m.date = date;
                             break;
                         }
@@ -2303,6 +2313,7 @@ impl State {
     pub fn reset_to_login(&mut self) {
         // Sign-in flow.
         self.authenticated = false;
+        self.connecting = false;
         self.login_step = LoginStep::Phone;
         self.login_input.clear();
         self.login_error = false;
@@ -3132,6 +3143,7 @@ mod tests {
             chat_id: 42,
             id: 3,
             text: "hey".into(),
+            code: vec![],
             date: 300,
             out: false,
             photo: None,
@@ -3164,6 +3176,7 @@ mod tests {
             chat_id: 7,
             id: 9,
             text: "ping".into(),
+            code: vec![],
             date: 400,
             out: false,
             photo: None,
@@ -3199,6 +3212,7 @@ mod tests {
             chat_id: 42,
             id: 777,
             text: "hello".into(),
+            code: vec![],
             date: 0,
             out: true,
             photo: None,
@@ -3299,6 +3313,7 @@ mod tests {
             chat_id: 7,
             id: 9,
             text: "ping".into(),
+            code: vec![],
             date: 400,
             out: false,
             photo: None,
@@ -3496,6 +3511,7 @@ mod tests {
             chat_id: 42,
             id: 777,
             text: String::new(),
+            code: vec![],
             date: 500,
             out: true,
             photo: Some((640, 480)),
@@ -4456,6 +4472,7 @@ mod tests {
             chat_id: 42,
             id: 777,
             text: String::new(),
+            code: vec![],
             date: 500,
             out: true,
             photo: None,
@@ -4508,6 +4525,7 @@ mod tests {
             chat_id: 42,
             id: 900,
             text: String::new(),
+            code: vec![],
             date: 600,
             out: false,
             photo: None,
@@ -4954,6 +4972,7 @@ mod tests {
             chat_id: 1002,
             id: 70,
             text: "hello thread".into(),
+            code: vec![],
             date: 130,
             out: true,
             photo: None,
@@ -5020,6 +5039,7 @@ mod tests {
             chat_id: 1002,
             id: 80,
             text: "general arrival".into(),
+            code: vec![],
             date: 140,
             out: false,
             photo: None,

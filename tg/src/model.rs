@@ -92,12 +92,47 @@ pub struct ReactionInfo {
     /// can be offered later).
     pub mine: bool,
 }
+/// A `code` / `pre` formatting entity of a message, precomputed to byte
+/// offsets so the UI can slice the UTF-8 `text` directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeEntity {
+    /// Byte range `[start, end)` into the message text.
+    pub start: usize,
+    pub end: usize,
+    /// `Some(language)` for a `pre` (block) entity, `None` for inline `code`.
+    pub block: Option<String>,
+}
+
+/// Telegram entity offsets/lengths are expressed in UTF-16 code units, but
+/// the message text we render is a UTF-8 `&str`. Convert a code-unit span
+/// into a byte span. Returns `None` when the span is out of bounds.
+pub fn uv16_span_to_bytes(
+    text: &str,
+    uv16_offset: usize,
+    uv16_len: usize,
+) -> Option<(usize, usize)> {
+    fn uv16_to_byte(text: &str, target: usize) -> Option<usize> {
+        let mut units = 0usize;
+        for (bi, ch) in text.char_indices() {
+            if units == target {
+                return Some(bi);
+            }
+            units += ch.len_utf16();
+        }
+        (units == target).then_some(text.len())
+    }
+    let start = uv16_to_byte(text, uv16_offset)?;
+    let end = uv16_to_byte(text, uv16_offset + uv16_len)?;
+    (start <= end).then_some((start, end))
+}
 
 /// A message from a chat (history).
 #[derive(Debug, Clone)]
 pub struct MessageInfo {
     pub id: i32,
     pub text: String,
+    /// `code`/`pre` formatting spans (byte offsets into `text`), if any.
+    pub code: Vec<CodeEntity>,
     /// Unix timestamp of the message.
     pub date: i32,
     /// True if the message was sent by us.

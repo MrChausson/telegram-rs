@@ -24,7 +24,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Color, Length, Task};
 
-use bridge::{ChatKind, ChatRow, MsgRow, Request, UiMessage};
+use bridge::{ChatKind, ChatRow, CodeSpan, MsgRow, Request, UiMessage};
 use icons::{icon, Icon};
 use state::{LoginStep, QrStage, SearchMode, State};
 
@@ -151,40 +151,132 @@ fn line_spans(t: &str) -> Option<Vec<iced::widget::text::Span<'_, String>>> {
 /// emoji) so callers keep the cheap `text` widget (scroll-perf: most rows
 /// stay on the plain-text hot path).
 ///
-/// Link spans come from [`linkify`]; emoji runs get the color-emoji font —
-/// without it the text engine's fallback resolves emoji codepoints to the
-/// monochrome outlines of the default sans font (DejaVu), which looks bad.
-fn body_spans(t: &str) -> Option<Vec<iced::widget::text::Span<'_, String>>> {
+/// Carve `(s, e, kind)` styled sub-ranges out of a flat segment list. Each
+/// input segment is either kept whole, split on a `kind` boundary, or replaced
+/// (when already a non-default style wins over a later carve).
+fn carve_segments(segs: &mut Vec<(usize, usize, u8)>, s: usize, e: usize, kind: u8) {
+    if s >= e {
+        return;
+    }
+    let old = std::mem::take(segs);
+    let mut out: Vec<(usize, usize, u8)> = Vec::with_capacity(old.len() + 2);
+    for (a, b, k) in old {
+        if e <= a || s >= b {
+            out.push((a, b, k));
+            continue;
+        }
+        if a < s {
+            out.push((a, s, k));
+        }
+        let lo = a.max(s);
+        let hi = b.min(e);
+        if lo < hi {
+            out.push((lo, hi, if k != 0 { k } else { kind }));
+        }
+        if e < b {
+            out.push((e, b, k));
+        }
+    }
+    *segs = out;
+}
+
+/// Span builder for a slice of message text. Splits on `code` monospace
+/// ranges (byte offsets), color-emoji runs and links, and falls back to
+/// `None` (plain rendering) when nothing needs specialised styling.
+///
+/// `code` ranges are relative byte offsets into `t`; spans overlapping one
+/// are rendered in the monospace [`code_font`].
+fn body_spans<'a>(
+    t: &'a str,
+    code: &[(usize, usize)],
+) -> Option<Vec<iced::widget::text::Span<'a, String>>> {
     use iced::widget::text::Span;
 
     let runs = crate::emoji::emoji_ranges(t);
-    if runs.is_empty() {
+    if runs.is_empty() && code.is_empty() {
         return linkify(t);
     }
 
-    let mut spans: Vec<Span<'_, String>> = Vec::new();
-    let mut cursor = 0;
-    for run in runs {
-        let before = &t[cursor..run.start];
-        if !before.is_empty() {
-            spans.extend(linkify(before).unwrap_or_else(|| vec![Span::new(before)]));
-        }
-        spans.push(Span::new(&t[run.clone()]).font(emoji_font()));
-        cursor = run.end;
+    // 0 = default, 1 = monospace code, 2 = color-emoji font.
+    let mut segs: Vec<(usize, usize, u8)> = vec![(0, t.len(), 0)];
+    for &(s, e) in code {
+        carve_segments(&mut segs, s.min(t.len()), e.min(t.len()), 1);
     }
-    let rest = &t[cursor..];
-    if !rest.is_empty() {
-        spans.extend(linkify(rest).unwrap_or_else(|| vec![Span::new(rest)]));
+    for run in &runs {
+        carve_segments(&mut segs, run.start, run.end, 2);
+    }
+
+    let mut spans: Vec<Span<'_, String>> = Vec::new();
+    for (a, b, kind) in segs {
+        let slice = &t[a..b];
+        if slice.is_empty() {
+            continue;
+        }
+        match kind {
+            1 => spans.push(Span::new(slice).font(code_font())),
+            2 => spans.push(Span::new(slice).font(emoji_font())),
+            _ => spans.extend(linkify(slice).unwrap_or_else(|| vec![Span::new(slice)])),
+        }
     }
     Some(spans)
 }
 
+/// Monospace font for code spans and blocks (resolved by the text engine to a
+/// system monospace face on target desktops).
+fn code_font() -> iced::Font {
+    iced::Font::MONOSPACE
+}
+
 /// Message body / caption text: plain `text` when there is no URL and no
-/// emoji, clickable/color rich spans otherwise. `WordOrGlyph` wrapping: a
-/// word longer than the bubble (a long URL) breaks at glyph level instead
-/// of overflowing.
-fn message_body<'a>(t: &'a str) -> Element<'a> {
-    match body_spans(t) {
+/// emoji and no code, clickable/color rich spans otherwise. `pre` blocks are
+/// pulled out of the flow and rendered as self-contained monospace cards;
+/// inline `code` spans inside the surrounding text are styled monospaced.
+/// `WordOrGlyph` wrapping: a word longer than the bubble (a long URL) breaks
+/// at glyph level instead of overflowing.
+fn message_body<'a>(t: &'a str, code: &'a [CodeSpan]) -> Element<'a> {
+    // Split the text around `pre` (block) entities into alternating
+    // text / block parts (byte ranges relative to `t`).
+    let mut parts: Vec<(std::ops::Range<usize>, bool)> = Vec::new();
+    let mut cursor = 0usize;
+    for c in code {
+        if c.block.is_none() {
+            continue;
+        }
+        if c.start < cursor || c.end <= c.start || c.end > t.len() {
+            continue;
+        }
+        if c.start > cursor {
+            parts.push((cursor..c.start, false));
+        }
+        parts.push((c.start..c.end, true));
+        cursor = c.end;
+    }
+    if cursor < t.len() {
+        parts.push((cursor..t.len(), false));
+    }
+
+    match parts.as_slice() {
+        [] => inline_body(t, local_code(code, &(0..t.len()))),
+        [(r, true)] => code_block(lang_of(code, r), &t[r.clone()]),
+        [(r, false)] => inline_body(&t[r.clone()], local_code(code, r)),
+        _ => {
+            let mut col: iced::widget::Column<'a, Message> = column![].spacing(6);
+            for (r, is_block) in parts {
+                col = if is_block {
+                    col.push(code_block(lang_of(code, &r), &t[r.clone()]))
+                } else {
+                    col.push(inline_body(&t[r.clone()], local_code(code, &r)))
+                };
+            }
+            col.into()
+        }
+    }
+}
+
+/// A text-only message body (possibly with inline `code` spans styled
+/// monospace). Plain `text` when nothing needs styling.
+fn inline_body<'a>(t: &'a str, code: Vec<(usize, usize)>) -> Element<'a> {
+    match body_spans(t, &code) {
         Some(spans) => rich_text(spans)
             .on_link_click(Message::OpenUrl)
             .size(theme::font::MESSAGE)
@@ -197,6 +289,66 @@ fn message_body<'a>(t: &'a str) -> Element<'a> {
             .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
             .into(),
     }
+}
+
+/// A `pre` (block) code card: dark surface, monospace body and an optional
+/// language tag, matching the bubble's corner radius.
+fn code_block<'a>(lang: Option<&'a str>, body: &'a str) -> Element<'a> {
+    let mut col: iced::widget::Column<'a, Message> = column![].spacing(6);
+    if let Some(l) = lang {
+        col = col.push(
+            text(l)
+                .size(theme::font::CODE_TAG)
+                .font(code_font())
+                .color(rgb(theme::TEXT_SECONDARY())),
+        );
+    }
+    col = col.push(
+        text(body)
+            .size(theme::font::CODE)
+            .font(code_font())
+            .color(rgb(theme::TEXT_PRIMARY()))
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+    );
+    container(col)
+        .width(iced::Length::Fill)
+        .padding([8, 10])
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(rgb(theme::CODE_BG()))),
+            border: iced::Border::default()
+                .color(rgb(theme::CODE_BORDER()))
+                .width(1)
+                .rounded(8),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// The inline `code` spans (relative to a segment) whose byte range overlaps
+/// `range`.
+fn local_code(code: &[CodeSpan], range: &std::ops::Range<usize>) -> Vec<(usize, usize)> {
+    code.iter()
+        .filter(|c| c.block.is_none())
+        .filter_map(|c| {
+            let s = c.start.max(range.start);
+            let e = c.end.min(range.end);
+            if s < e {
+                Some((s - range.start, e - range.start))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// The `pre` language of the block starting at `range.start`, if any.
+fn lang_of<'a>(code: &'a [CodeSpan], range: &std::ops::Range<usize>) -> Option<&'a str> {
+    code.iter()
+        .find(|c| {
+            c.block.is_some() && c.start == range.start && c.start < range.end && range.end <= c.end
+        })
+        .and_then(|c| c.block.as_deref())
+        .filter(|l| !l.is_empty())
 }
 
 /// UI → application messages.
@@ -775,6 +927,9 @@ fn view(state: &State) -> Element<'_> {
     // surface presentation (last frame stays on screen). It renders as an
     // overlay layer inside `conversation_pane` instead.
     if !state.authenticated {
+        if state.connecting {
+            return connecting_view(state);
+        }
         return login_view(state);
     }
     if state.search_open() {
@@ -977,6 +1132,42 @@ fn login_segment(label: &'static str, active: bool) -> iced::widget::Button<'sta
         }
         st
     })
+}
+
+/// Shown for the brief window between login completing (or a valid session
+/// loading) and the dialog list arriving. Replaces the frozen QR page with
+/// a branded "Loading chats…" card so the scanned login visibly reacts
+/// instead of sitting on an unchanging QR while `get_dialogs` paginates.
+fn connecting_view(_state: &State) -> Element<'_> {
+    let logo = container(
+        container(text("tg").size(20).color(Color::WHITE))
+            .width(76)
+            .height(76)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .style(accent_circle),
+    )
+    .width(76)
+    .height(76);
+
+    container(
+        column![
+            logo,
+            text("Loading chats…")
+                .size(theme::font::TITLE)
+                .color(rgb(theme::TEXT_PRIMARY())),
+            text("Almost there—one moment…")
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(theme::TEXT_SECONDARY())),
+        ]
+        .spacing(18)
+        .align_x(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 fn login_view(state: &State) -> Element<'_> {
@@ -3339,7 +3530,7 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
                 if m.text.is_empty() {
                     horizontal_spacer()
                 } else {
-                    message_body(&m.text)
+                    message_body(&m.text, &m.code)
                 },
             ]
             .spacing(6)
@@ -3361,7 +3552,7 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
                 if m.text.is_empty() {
                     horizontal_spacer()
                 } else {
-                    message_body(&m.text)
+                    message_body(&m.text, &m.code)
                 },
             ]
             .spacing(6)
@@ -3370,7 +3561,7 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
             placeholder_strip("Loading image…")
         }
     } else {
-        message_body(&m.text)
+        message_body(&m.text, &m.code)
     };
 
     // Stack the sender name (group chats) and quote above the media/text body.
@@ -4918,8 +5109,8 @@ mod tests {
 
     #[test]
     fn body_spans_plain_text_stays_none() {
-        assert!(body_spans("just words").is_none());
-        assert!(body_spans("").is_none());
+        assert!(body_spans("just words", &[]).is_none());
+        assert!(body_spans("", &[]).is_none());
     }
 
     #[test]
@@ -4940,23 +5131,34 @@ mod tests {
 
     #[test]
     fn body_spans_link_only_uses_linkify() {
-        let spans = body_spans("see https://rust-lang.org").unwrap();
+        let spans = body_spans("see https://rust-lang.org", &[]).unwrap();
         assert!(spans.iter().any(|s| s.link.is_some()));
     }
 
     #[test]
     fn body_spans_emoji_get_emoji_font() {
         use iced::font::Font;
-        let spans = body_spans("Salut 👋 !").unwrap();
+        let spans = body_spans("Salut 👋 !", &[]).unwrap();
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[0].text, "Salut ");
         assert_eq!(spans[1].text, "👋");
         assert_eq!(spans[1].font, Some(Font::with_name("Noto Color Emoji")));
         assert_eq!(spans[2].text, " !");
         // Emoji + link in one message: both treatments compose.
-        let spans = body_spans("docs 👉 https://doc.rust-lang.org").unwrap();
+        let spans = body_spans("docs 👉 https://doc.rust-lang.org", &[]).unwrap();
         assert!(spans.iter().any(|s| s.link.is_some()));
         assert!(spans.iter().any(|s| s.font.is_some()));
+    }
+
+    #[test]
+    fn body_spans_inline_code_uses_monospace_font() {
+        use iced::font::Font;
+        // Byte range 0..4 covers "let ".
+        let spans = body_spans("let x = 1", &[(0, 3)]).unwrap();
+        assert!(spans
+            .iter()
+            .any(|s| s.text == "let" && s.font == Some(Font::MONOSPACE)));
+        assert!(spans.iter().any(|s| s.text == " x = 1" && s.font.is_none()));
     }
 
     #[test]
