@@ -317,6 +317,8 @@ pub struct State {
     pub context_menu: Option<ContextMenu>,
     /// Row (into `messages`) showing the floating reaction strip, if any.
     pub react_row: Option<usize>,
+    /// True when the reaction strip's "+" emoji picker grid is expanded.
+    pub react_picker: bool,
     /// Message id being edited; its old text lives in `composer`.
     pub editing: Option<i32>,
 
@@ -578,6 +580,7 @@ impl State {
             typing: false,
             context_menu: None,
             react_row: None,
+            react_picker: false,
             editing: None,
             create_menu_open: false,
             create_dialog: None,
@@ -1601,8 +1604,10 @@ impl State {
             return;
         }
         self.context_menu = None;
-        if self.react_row.take().is_some() {
-            return; // reaction strip closed itself
+        if self.react_row.take().is_some() || self.react_picker {
+            self.react_picker = false;
+            self.invalidate_layout();
+            return; // reaction strip (and expandable picker) closed itself
         }
         if self.editing.is_some() {
             self.editing = None;
@@ -1788,6 +1793,7 @@ impl State {
             return;
         };
         self.react_row = Some(menu.row);
+        self.react_picker = false;
         self.invalidate_layout();
     }
 
@@ -1797,6 +1803,7 @@ impl State {
         let Some(row) = self.react_row.take() else {
             return;
         };
+        self.react_picker = false;
         let Some(m) = self.messages.get(row) else {
             self.invalidate_layout();
             return;
@@ -1809,9 +1816,18 @@ impl State {
         self.invalidate_layout();
     }
 
-    /// Close the reaction strip without reacting.
+    /// Close the reaction strip (and any expanded picker) without reacting.
     pub fn close_react(&mut self) {
-        if self.react_row.take().is_some() {
+        if self.react_row.take().is_some() || self.react_picker {
+            self.react_picker = false;
+            self.invalidate_layout();
+        }
+    }
+
+    /// Toggle the strip's "+" expanded emoji picker grid.
+    pub fn toggle_react_picker(&mut self) {
+        if self.react_row.is_some() {
+            self.react_picker = !self.react_picker;
             self.invalidate_layout();
         }
     }
@@ -2626,6 +2642,7 @@ impl State {
         self.editing = None;
         self.context_menu = None;
         self.react_row = None;
+        self.react_picker = false;
         self.reply_target = None;
         self.forward_pick = None;
         self.pending_jump_id = None;

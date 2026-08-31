@@ -287,12 +287,16 @@ pub enum Message {
     CloseStickerPicker,
     /// The context menu was dismissed.
     DismissMenu,
+    /// Clicking elsewhere: dismiss any open overlay (menu and/or strip).
+    CloseOverlays,
     /// The context menu React item was pressed: open the reaction strip.
     ContextReact,
     /// An emoji was picked in the reaction strip: send the reaction.
     React(String),
     /// The reaction strip was dismissed without reacting.
     CloseReact,
+    /// The strip's "+" button: toggle the expanded emoji picker grid.
+    ToggleReactPicker,
     // -----------------------------------------------------------------
     // Settings panel
     // -----------------------------------------------------------------
@@ -532,9 +536,14 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::StickerPicked(set, doc) => state.send_sticker(set, doc),
         Message::CloseStickerPicker => state.close_sticker_picker(),
         Message::DismissMenu => state.dismiss_menu(),
+        Message::CloseOverlays => {
+            state.dismiss_menu();
+            state.close_react();
+        }
         Message::ContextReact => state.context_react(),
         Message::React(emoji) => state.react(&emoji),
         Message::CloseReact => state.close_react(),
+        Message::ToggleReactPicker => state.toggle_react_picker(),
         // -----------------------------------------------------------------
         // Settings panel
         // -----------------------------------------------------------------
@@ -2362,7 +2371,7 @@ fn member_row(state: &State, p: &bridge::ParticipantRow) -> Element<'static> {
     // An open admin menu makes the row left-click a click-outside dismissal;
     // right-click (re)opens the menu, mirroring the chat-list rows.
     let row_button = if state.admin_menu.is_some() {
-        row_button.on_press(Message::DismissMenu)
+        row_button.on_press(Message::CloseOverlays)
     } else {
         row_button
     };
@@ -3125,7 +3134,9 @@ fn reaction_chips<'a>(m: &'a MsgRow) -> Element<'a> {
         chips = chips.push(
             container(
                 row![
-                    text(&c.emoji).size(theme::font::TIMESTAMP),
+                    text(&c.emoji)
+                        .font(emoji_font())
+                        .size(theme::font::TIMESTAMP),
                     text(c.count.max(1).to_string())
                         .size(theme::font::TIMESTAMP)
                         .color(rgb(color)),
@@ -4011,19 +4022,30 @@ fn context_menu_bar(state: &State) -> Element<'static> {
 }
 
 /// Reactions offered by the quick-reaction pill (Telegram's usual favourites).
-const REACTIONS: [&str; 9] = ["👍", "❤️", "🔥", "👏", "😮", "😢", "🤔", "😂", "🎉"];
+const REACTIONS: [&str; 9] = ["👍", "💖", "🔥", "👏", "😮", "😢", "🤔", "😂", "🎉"];
+
+/// The wider set offered by the strip's "+" picker grid.
+const REACTION_PICKER_EMOJI: &[&str] = &[
+    "👍", "💖", "🔥", "🎉", "👏", "😮", "😢", "🤔", "😂", "😍", "🥳", "😎", "🤩", "😇", "🙏", "💪",
+    "👀", "🚀", "🥰", "😅", "😭", "😱", "🙈", "💯", "✨", "⚡", "🌟", "🍀", "🌹", "☕", "🎁", "🏆",
+    "🎈", "😡", "💔", "😤", "🎶", "🧠", "🫶", "🥇", "🍕", "🐶", "🐱", "💜", "💛", "🤝",
+];
 const REACT_STRIP_H: f32 = 44.0;
+/// Height budget when the "+" picker grid is expanded under the quick pill.
+const REACT_PICKER_H: f32 = 210.0;
 const REACT_STRIP_EMOJI: f32 = 22.0;
 
 /// The horizontal quick-reaction pill shown after picking React from a
-/// message's context menu: one emoji per common reaction, each toggling the
-/// reaction server-side. Clicking an emoji sends it and closes the strip.
-fn reaction_strip<'a>() -> Element<'a> {
-    let mut row = row![].spacing(2);
+/// message's context menu: one emoji per common reaction, plus a "+" button
+/// that expands a grid to pick from a wider set. Clicking an emoji sends the
+/// reaction and closes the strip.
+fn reaction_strip<'a>(picker: bool) -> Element<'a> {
+    let mut quick = iced::widget::Row::new().spacing(2);
     for emoji in REACTIONS {
-        row = row.push(
+        quick = quick.push(
             button(
                 text(emoji)
+                    .font(emoji_font())
                     .size(REACT_STRIP_EMOJI)
                     .align_y(Alignment::Center),
             )
@@ -4032,9 +4054,51 @@ fn reaction_strip<'a>() -> Element<'a> {
             .on_press(Message::React(emoji.to_string())),
         );
     }
-    container(row.padding(CONTEXT_MENU_PAD))
-        .style(menu_bg)
-        .into()
+    quick = quick.push(
+        button(
+            text(if picker { "−" } else { "+" })
+                .size(REACT_STRIP_EMOJI)
+                .align_y(Alignment::Center),
+        )
+        .padding([6, 10])
+        .style(|t, s| menu_item_style(t, s, false))
+        .on_press(Message::ToggleReactPicker),
+    );
+    let quick = container(quick.padding(CONTEXT_MENU_PAD)).style(menu_bg);
+
+    if !picker {
+        return quick.into();
+    }
+
+    // Iced 0.14 has no flow/wrap layout: chunk the set into fixed-width rows
+    // and stack them (each row is 8 emojis, keeping the grid compact).
+    const ROW_LEN: usize = 8;
+    let mut grid = iced::widget::Column::new().spacing(2);
+    for chunk in REACTION_PICKER_EMOJI.chunks(ROW_LEN) {
+        let mut row = iced::widget::Row::new().spacing(2);
+        for emoji in chunk {
+            row = row.push(
+                button(
+                    text(*emoji)
+                        .font(emoji_font())
+                        .size(REACT_STRIP_EMOJI)
+                        .align_y(Alignment::Center),
+                )
+                .padding([4, 6])
+                .style(|t, s| menu_item_style(t, s, false))
+                .on_press(Message::React((*emoji).to_string())),
+            );
+        }
+        grid = grid.push(row);
+    }
+    container(
+        column![
+            quick,
+            container(grid.padding(CONTEXT_MENU_PAD)).style(menu_bg),
+        ]
+        .spacing(2),
+    )
+    .into()
 }
 
 // ---------------------------------------------------------------------------
@@ -4183,7 +4247,12 @@ pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
     // `stack` layer anchored under the target row, like the context menu.
     let content = if let Some(react_row) = state.react_row {
         let row = react_row.min(n.saturating_sub(1));
-        let strip_h = REACT_STRIP_H;
+        // The expanded "+" picker grid is much taller than the quick pill.
+        let strip_h = if state.react_picker {
+            REACT_PICKER_H
+        } else {
+            REACT_STRIP_H
+        };
         let row_top_vp = tops[row] - state.scroll_offset;
         let row_bot_vp = row_top_vp + heights[row];
         let desired_vp = if row_bot_vp + strip_h + 3.0 > view_h
@@ -4198,14 +4267,19 @@ pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
         let desired_vp = desired_vp.min((view_h - strip_h - 8.0).max(2.0));
         let y = (desired_vp + state.scroll_offset - top_pad).max(0.0);
         let x = 8.0; // left-anchored to the bubble edge, Telegram-style
-        let layer = container(reaction_strip())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(iced::Padding {
-                top: y,
-                left: x,
-                ..Default::default()
-            });
+        let layer = mouse_area(
+            container(reaction_strip(state.react_picker))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(iced::Padding {
+                    top: y,
+                    left: x,
+                    ..Default::default()
+                }),
+        )
+        // Any click outside the strip dismisses it (and its picker). Emoji
+        // buttons are nested deeper, so they still win the click.
+        .on_press(Message::CloseReact);
         Element::from(iced::widget::stack![cols, layer])
     // Context menu as a floating overlay: a `stack` layer anchored under (or,
     // near the bottom, above) the target row, right-aligned. It no longer
@@ -4232,16 +4306,22 @@ pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
         let desired_vp = desired_vp.min((view_h - menu_h - 8.0).max(2.0));
         // The layer's padding is relative to the slice start (`top_pad`).
         let y = (desired_vp + state.scroll_offset - top_pad).max(0.0);
-        let layer = container(
-            row![horizontal_spacer(), context_menu_bar(state)]
-                .padding([0.0, theme::layout::MSG_PAD_X]),
+        let layer = mouse_area(
+            container(
+                row![horizontal_spacer(), context_menu_bar(state)]
+                    .padding([0.0, theme::layout::MSG_PAD_X]),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(iced::Padding {
+                top: y,
+                ..Default::default()
+            }),
         )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(iced::Padding {
-            top: y,
-            ..Default::default()
-        });
+        // Clicking anywhere outside the menu dismisses it (Telegram closes the
+        // menu on the first click elsewhere); the menu items are nested deeper
+        // and so still receive their own clicks.
+        .on_press(Message::CloseOverlays);
         Element::from(iced::widget::stack![cols, layer])
     } else {
         cols.into()
