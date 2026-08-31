@@ -13,8 +13,9 @@ use grammers_client::client::{LoginToken, PasswordToken, SignInError, UpdatesCon
 use grammers_client::update::Update;
 use grammers_session::types::PeerRef;
 use grammers_session::updates::UpdatesLike;
+use grammers_session::Session;
 use tg::client::Telegram;
-use tg::session::load_or_new;
+use tg::session::{FileSession, load_or_new};
 use tg::auth::{export_login_token, import_login_token, import_login_token_in_dc};
 use grammers_client::tl;
 use tokio::sync::mpsc;
@@ -282,6 +283,7 @@ pub fn spawn_network(demo: bool, big: bool, notify: Arc<NotifyPref>) -> Unbounde
                         Arc::new(std::sync::atomic::AtomicU64::new(0));
                     serve_login(
                         &tg,
+                        session.clone(),
                         api_id,
                         api_hash.as_deref(),
                         &ui_tx,
@@ -1722,6 +1724,7 @@ Request::DownloadDoc { chat_id, msg_id } => {
 #[allow(clippy::too_many_arguments)]
 async fn serve_login(
     tg: &Telegram,
+    session: Arc<FileSession>,
     api_id: i32,
     api_hash: Option<&str>,
     ui_tx: &mpsc::UnboundedSender<UiMessage>,
@@ -1833,6 +1836,7 @@ async fn serve_login(
                         + 1;
                     start_qr_login(
                         tg.client().clone(),
+                        session.clone(),
                         gen,
                         api_id,
                         hash.to_string(),
@@ -1859,6 +1863,7 @@ async fn serve_login(
 #[allow(clippy::too_many_arguments)]
 fn start_qr_login(
     client: grammers_client::Client,
+    session: Arc<FileSession>,
     gen: u64,
     api_id: i32,
     api_hash: String,
@@ -1965,6 +1970,12 @@ fn start_qr_login(
                     // every subsequent poll targets the right DC until Success.
                     login_dc = Some(mig.dc_id);
                     current = Some(mig.token.clone());
+                    // Repoint the session's home DC at the migrated DC so the
+                    // post-login fetches (get_me / get_dialogs) and the saved
+                    // session file all target the DC that owns the account —
+                    // otherwise the chat list comes back empty and a relaunch
+                    // shows the QR again.
+                    session.set_home_dc_id(mig.dc_id).await;
                     eprintln!(
                         "[telegram-rs] qr: server asked to migrate login to DC {} \
                          (token {}), now importing there",
