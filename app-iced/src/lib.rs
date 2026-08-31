@@ -10,12 +10,12 @@
 pub mod audio;
 pub mod bridge;
 pub mod emoji;
-pub mod tray;
 pub mod icons;
 pub mod network;
 pub mod qr_png;
 pub mod state;
 pub mod theme;
+pub mod tray;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
@@ -54,7 +54,10 @@ pub fn looks_like_image(path: &str) -> bool {
 /// the match instead.
 fn is_url_end(c: char) -> bool {
     c.is_whitespace()
-        || matches!(c, ',' | ';' | ')' | ']' | '}' | '>' | '<' | '"' | '\'' | '(')
+        || matches!(
+            c,
+            ',' | ';' | ')' | ']' | '}' | '>' | '<' | '"' | '\'' | '('
+        )
 }
 
 /// Byte offset of the first inline URL in `s`, if any.
@@ -182,14 +185,12 @@ fn body_spans(t: &str) -> Option<Vec<iced::widget::text::Span<'_, String>>> {
 /// of overflowing.
 fn message_body<'a>(t: &'a str) -> Element<'a> {
     match body_spans(t) {
-        Some(spans) => {
-            rich_text(spans)
-                .on_link_click(Message::OpenUrl)
-                .size(theme::font::MESSAGE)
-                .color(rgb(theme::TEXT_PRIMARY()))
-                .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
-                .into()
-        }
+        Some(spans) => rich_text(spans)
+            .on_link_click(Message::OpenUrl)
+            .size(theme::font::MESSAGE)
+            .color(rgb(theme::TEXT_PRIMARY()))
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+            .into(),
         None => text(t)
             .size(theme::font::MESSAGE)
             .color(rgb(theme::TEXT_PRIMARY()))
@@ -286,6 +287,12 @@ pub enum Message {
     CloseStickerPicker,
     /// The context menu was dismissed.
     DismissMenu,
+    /// The context menu React item was pressed: open the reaction strip.
+    ContextReact,
+    /// An emoji was picked in the reaction strip: send the reaction.
+    React(String),
+    /// The reaction strip was dismissed without reacting.
+    CloseReact,
     // -----------------------------------------------------------------
     // Settings panel
     // -----------------------------------------------------------------
@@ -335,7 +342,11 @@ pub enum Message {
     /// A search result row was clicked.
     SearchHitClicked(usize),
     /// A voice note was clicked: play / pause / stop it.
-    VoiceClicked { chat_id: i64, msg_id: i32, path: String },
+    VoiceClicked {
+        chat_id: i64,
+        msg_id: i32,
+        path: String,
+    },
     /// Periodic tick while a voice note is playing (progress + completion).
     VoiceTick,
     /// The voice progress slider was moved: seek to `f32` seconds.
@@ -391,12 +402,16 @@ pub enum Message {
 }
 
 fn boot() -> (State, Task<Message>) {
-    let demo = std::env::args().any(|a| a == "--demo");    let open_first = std::env::args().any(|a| a == "--open-first");
+    let demo = std::env::args().any(|a| a == "--demo");
+    let open_first = std::env::args().any(|a| a == "--open-first");
     let big = std::env::args().any(|a| a == "--demo-big");
     let perf = std::env::args().any(|a| a == "--perf");
     let continuous = std::env::args().any(|a| a == "--continuous");
     let scroll_perf = std::env::args()
-        .find_map(|a| a.strip_prefix("--scroll-perf=").and_then(|v| v.parse::<f32>().ok()))
+        .find_map(|a| {
+            a.strip_prefix("--scroll-perf=")
+                .and_then(|v| v.parse::<f32>().ok())
+        })
         .unwrap_or(0.0);
     // Shared notifications preference: the panel flips it, the network
     // runtime consults it (same wiring pattern as the tray flags).
@@ -517,6 +532,9 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::StickerPicked(set, doc) => state.send_sticker(set, doc),
         Message::CloseStickerPicker => state.close_sticker_picker(),
         Message::DismissMenu => state.dismiss_menu(),
+        Message::ContextReact => state.context_react(),
+        Message::React(emoji) => state.react(&emoji),
+        Message::CloseReact => state.close_react(),
         // -----------------------------------------------------------------
         // Settings panel
         // -----------------------------------------------------------------
@@ -550,7 +568,11 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::CloseSearch => state.close_search(),
         Message::SearchChanged(text) => state.search_changed(text),
         Message::SearchHitClicked(idx) => state.click_search_hit(idx),
-        Message::VoiceClicked { chat_id, msg_id, path } => {
+        Message::VoiceClicked {
+            chat_id,
+            msg_id,
+            path,
+        } => {
             let cached = state
                 .messages
                 .iter()
@@ -560,10 +582,7 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
                 state.voice_click(chat_id, msg_id, &path);
             } else {
                 // Not downloaded yet: fetch it, then DocReady auto-plays.
-                let _ = state.req_tx.send(Request::DownloadDoc {
-                    chat_id,
-                    msg_id,
-                });
+                let _ = state.req_tx.send(Request::DownloadDoc { chat_id, msg_id });
             }
         }
         Message::VoiceTick => state.on_voice_tick(),
@@ -641,9 +660,7 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
     }
     // A downloaded document was clicked: hand it to the system opener.
     if let Some(path) = state.open_file.take() {
-        let _ = std::process::Command::new("xdg-open")
-            .arg(path)
-            .spawn();
+        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
     }
     // A search jump was armed: scroll the message list to the target.
     {
@@ -727,7 +744,10 @@ pub fn rendered_per_second() -> f32 {
     let now = Instant::now();
     if let Ok(mut t) = times.lock() {
         t.push_back(now);
-        while t.front().is_some_and(|x| now.duration_since(*x).as_secs_f32() > 1.0) {
+        while t
+            .front()
+            .is_some_and(|x| now.duration_since(*x).as_secs_f32() > 1.0)
+        {
             t.pop_front();
         }
         t.len() as f32
@@ -821,8 +841,13 @@ fn search_view(state: &State) -> Element<'_> {
 }
 
 /// A tappable search-result line: avatar, chat title + snippet, timestamp.
-fn search_hit_row( hit: &bridge::SearchHit, _query: &str, idx: usize) -> Element<'static> {
-    let snippet = state::preview_text(&hit.row.text, &hit.row.photo, &hit.row.doc, &hit.row.sticker);
+fn search_hit_row(hit: &bridge::SearchHit, _query: &str, idx: usize) -> Element<'static> {
+    let snippet = state::preview_text(
+        &hit.row.text,
+        &hit.row.photo,
+        &hit.row.doc,
+        &hit.row.sticker,
+    );
     let title = hit.chat_title.clone();
     let ts = if hit.row.date > 0 {
         theme::cached_time(hit.row.date)
@@ -881,7 +906,9 @@ fn search_hint(label: &str) -> Element<'static> {
 // ---------------------------------------------------------------------------
 
 fn viewer_view(state: &State) -> Element<'_> {
-    let Some(path) = &state.viewer else { return container("").into() };
+    let Some(path) = &state.viewer else {
+        return container("").into();
+    };
     let close = button(icon(Icon::Back, theme::ICON(), 16.0))
         .on_press(Message::CloseViewer)
         .padding(8)
@@ -889,9 +916,7 @@ fn viewer_view(state: &State) -> Element<'_> {
     // Opaque layer: covers the conversation pane (sidebar stays visible).
     container(
         column![
-            row![close]
-                .padding(8)
-                .width(Length::Fill),
+            row![close].padding(8).width(Length::Fill),
             container(
                 mouse_area(
                     image(image::Handle::from_path(path))
@@ -922,13 +947,11 @@ fn viewer_view(state: &State) -> Element<'_> {
 
 /// One pill of the [Phone | QR] sign-in switcher; `active` uses the accent.
 fn login_segment(label: &'static str, active: bool) -> iced::widget::Button<'static, Message> {
-    button(
-        text(label).size(13).color(if active {
-            Color::WHITE
-        } else {
-            rgb(theme::TEXT_SECONDARY())
-        }),
-    )
+    button(text(label).size(13).color(if active {
+        Color::WHITE
+    } else {
+        rgb(theme::TEXT_SECONDARY())
+    }))
     .padding([6, 18])
     .on_press(Message::ToggleLoginScreen)
     .style(move |t, s| {
@@ -982,9 +1005,17 @@ fn login_view(state: &State) -> Element<'_> {
     let status = if state.status.is_empty() {
         None
     } else if state.login_error {
-        Some(text(&state.status).size(theme::font::TIMESTAMP).color(rgb(theme::ERROR())))
+        Some(
+            text(&state.status)
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(theme::ERROR())),
+        )
     } else {
-        Some(text(&state.status).size(theme::font::TIMESTAMP).color(rgb(theme::TEXT_SECONDARY())))
+        Some(
+            text(&state.status)
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(theme::TEXT_SECONDARY())),
+        )
     };
 
     let logo = container(
@@ -1009,10 +1040,7 @@ fn login_view(state: &State) -> Element<'_> {
                 .into()
         } else {
             // Placeholder keeps the card size stable while rendering/scanning.
-            container(horizontal_spacer())
-                .width(260)
-                .height(260)
-                .into()
+            container(horizontal_spacer()).width(260).height(260).into()
         };
         let card = container(card_inner)
             .width(276)
@@ -1031,24 +1059,18 @@ fn login_view(state: &State) -> Element<'_> {
             text(err).size(13).color(rgb(theme::ERROR())).into()
         } else {
             match state.qr_stage {
-                QrStage::ScanConfirmed => {
-                    text("Device confirmed — finishing sign-in…")
-                        .size(13)
-                        .color(rgb(theme::TEXT_SECONDARY()))
-                        .into()
-                }
-                _ if state.qr_png_path.is_some() => {
-                    text("Point your phone camera at the code")
-                        .size(13)
-                        .color(rgb(theme::TEXT_SECONDARY()))
-                        .into()
-                }
-                _ => {
-                    text("Generating QR code…")
-                        .size(13)
-                        .color(rgb(theme::TEXT_SECONDARY()))
-                        .into()
-                }
+                QrStage::ScanConfirmed => text("Device confirmed — finishing sign-in…")
+                    .size(13)
+                    .color(rgb(theme::TEXT_SECONDARY()))
+                    .into(),
+                _ if state.qr_png_path.is_some() => text("Point your phone camera at the code")
+                    .size(13)
+                    .color(rgb(theme::TEXT_SECONDARY()))
+                    .into(),
+                _ => text("Generating QR code…")
+                    .size(13)
+                    .color(rgb(theme::TEXT_SECONDARY()))
+                    .into(),
             }
         };
         column![
@@ -1058,10 +1080,14 @@ fn login_view(state: &State) -> Element<'_> {
                 .color(rgb(theme::TEXT_SECONDARY()))
                 .align_x(Alignment::Center),
             qr_status,
-            button(text("Use phone number instead").size(13).color(rgb(theme::ICON())))
-                .on_press(Message::QrCancel)
-                .padding(8)
-                .style(flat_button),
+            button(
+                text("Use phone number instead")
+                    .size(13)
+                    .color(rgb(theme::ICON()))
+            )
+            .on_press(Message::QrCancel)
+            .padding(8)
+            .style(flat_button),
         ]
         .align_x(Alignment::Center)
         .spacing(12)
@@ -1086,16 +1112,14 @@ fn login_view(state: &State) -> Element<'_> {
             text(title).size(20),
             text(subtitle).size(13).color(rgb(theme::TEXT_SECONDARY())),
             input,
-        button(
-            text(button_label).size(15).color(Color::WHITE)
-        )
-        .on_press(Message::LoginSubmit)
-        .width(400)
-        .padding(14)
-        .style(accent_button),
-    ]
-    .align_x(Alignment::Center)
-    .spacing(12);
+            button(text(button_label).size(15).color(Color::WHITE))
+                .on_press(Message::LoginSubmit)
+                .width(400)
+                .padding(14)
+                .style(accent_button),
+        ]
+        .align_x(Alignment::Center)
+        .spacing(12);
 
         if let Some(st) = status {
             card = card.push(st);
@@ -1122,13 +1146,17 @@ fn login_view(state: &State) -> Element<'_> {
         col.align_x(Alignment::Center).spacing(8).into()
     };
 
-    container(column![switcher, body].align_x(Alignment::Center).spacing(16))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .padding(48)
-        .into()
+    container(
+        column![switcher, body]
+            .align_x(Alignment::Center)
+            .spacing(16),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    .padding(48)
+    .into()
 }
 
 // ---------------------------------------------------------------------------
@@ -1196,16 +1224,12 @@ fn settings_layer<'a>(state: &'a State) -> Element<'a> {
 }
 
 /// One tab header of the settings panel (selected one highlighted).
-fn settings_tab_header<'a>(
-    label: &'a str,
-    tab: state::SettingsTab,
-    active: bool,
-) -> Element<'a> {
-    button(
-        text(label)
-            .size(theme::font::TIMESTAMP)
-            .color(if active { Color::WHITE } else { rgb(theme::TEXT_SECONDARY()) }),
-    )
+fn settings_tab_header<'a>(label: &'a str, tab: state::SettingsTab, active: bool) -> Element<'a> {
+    button(text(label).size(theme::font::TIMESTAMP).color(if active {
+        Color::WHITE
+    } else {
+        rgb(theme::TEXT_SECONDARY())
+    }))
     .on_press(Message::SettingsTab(tab))
     .padding([6, 12])
     .style(flat_button)
@@ -1248,9 +1272,21 @@ fn settings_panel(state: &State) -> Element<'_> {
         .style(flat_button);
 
     let tabs = row![
-        settings_tab_header("Profile", state::SettingsTab::Profile, state.settings_tab == state::SettingsTab::Profile),
-        settings_tab_header("Storage", state::SettingsTab::Storage, state.settings_tab == state::SettingsTab::Storage),
-        settings_tab_header("Sessions", state::SettingsTab::Sessions, state.settings_tab == state::SettingsTab::Sessions),
+        settings_tab_header(
+            "Profile",
+            state::SettingsTab::Profile,
+            state.settings_tab == state::SettingsTab::Profile
+        ),
+        settings_tab_header(
+            "Storage",
+            state::SettingsTab::Storage,
+            state.settings_tab == state::SettingsTab::Storage
+        ),
+        settings_tab_header(
+            "Sessions",
+            state::SettingsTab::Sessions,
+            state.settings_tab == state::SettingsTab::Sessions
+        ),
         horizontal_spacer(),
     ]
     .spacing(6)
@@ -1261,7 +1297,10 @@ fn settings_panel(state: &State) -> Element<'_> {
             text("Settings")
                 .size(theme::font::NAME)
                 .color(Color::WHITE)
-                .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+                .font(iced::Font {
+                    weight: iced::font::Weight::Bold,
+                    ..iced::Font::DEFAULT
+                }),
             horizontal_spacer(),
             close,
         ]
@@ -1294,7 +1333,10 @@ fn settings_profile_tab(state: &State) -> Element<'_> {
                 text(p.name.clone())
                     .size(theme::font::NAME)
                     .color(Color::WHITE)
-                    .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Bold,
+                        ..iced::Font::DEFAULT
+                    }),
             )
             .center_x(Length::Fill),
         );
@@ -1343,7 +1385,10 @@ fn settings_profile_tab(state: &State) -> Element<'_> {
         text("Edit profile")
             .size(theme::font::TIMESTAMP)
             .color(rgb(theme::ICON()))
-            .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+            .font(iced::Font {
+                weight: iced::font::Weight::Bold,
+                ..iced::Font::DEFAULT
+            }),
     );
     col = col.push(
         text_input("First name", &state.edit_name)
@@ -1367,10 +1412,14 @@ fn settings_profile_tab(state: &State) -> Element<'_> {
             .style(text_input_style),
     );
     col = col.push(
-        button(text("Save").size(theme::font::TIMESTAMP).color(Color::WHITE))
-            .on_press(Message::SaveProfile)
-            .padding([6, 16])
-            .style(accent_button),
+        button(
+            text("Save")
+                .size(theme::font::TIMESTAMP)
+                .color(Color::WHITE),
+        )
+        .on_press(Message::SaveProfile)
+        .padding([6, 16])
+        .style(accent_button),
     );
 
     col = col.push(settings_divider());
@@ -1407,14 +1456,22 @@ fn settings_profile_tab(state: &State) -> Element<'_> {
     // Account: log out (inline Yes/No confirmation, Clear-cache pattern).
     let logout_control: Element<'_> = if state.confirm_logout {
         row![
-            button(text("Yes").size(theme::font::BADGE).color(rgb(theme::ERROR())))
-                .on_press(Message::DoLogout)
-                .padding([3, 10])
-                .style(flat_button),
-            button(text("No").size(theme::font::BADGE).color(rgb(theme::ICON())))
-                .on_press(Message::CancelLogout)
-                .padding([3, 10])
-                .style(flat_button),
+            button(
+                text("Yes")
+                    .size(theme::font::BADGE)
+                    .color(rgb(theme::ERROR()))
+            )
+            .on_press(Message::DoLogout)
+            .padding([3, 10])
+            .style(flat_button),
+            button(
+                text("No")
+                    .size(theme::font::BADGE)
+                    .color(rgb(theme::ICON()))
+            )
+            .on_press(Message::CancelLogout)
+            .padding([3, 10])
+            .style(flat_button),
         ]
         .spacing(6)
         .align_y(Alignment::Center)
@@ -1445,16 +1502,22 @@ fn settings_storage_tab(state: &State) -> Element<'_> {
         text("Storage")
             .size(theme::font::TIMESTAMP)
             .color(rgb(theme::ICON()))
-            .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+            .font(iced::Font {
+                weight: iced::font::Weight::Bold,
+                ..iced::Font::DEFAULT
+            }),
     );
 
     let size_label = match state.cache_bytes {
         Some(bytes) => fmt_size(bytes as i64),
         None => "…".to_string(),
     };
-    col = col.push(settings_row("Cache used", text(size_label)
-        .size(theme::font::TIMESTAMP)
-        .color(rgb(theme::TEXT_SECONDARY()))));
+    col = col.push(settings_row(
+        "Cache used",
+        text(size_label)
+            .size(theme::font::TIMESTAMP)
+            .color(rgb(theme::TEXT_SECONDARY())),
+    ));
 
     if state.confirm_clear_cache {
         col = col.push(
@@ -1463,14 +1526,22 @@ fn settings_storage_tab(state: &State) -> Element<'_> {
                     .size(theme::font::TIMESTAMP)
                     .color(rgb(theme::ERROR()))
                     .width(Length::Fill),
-                button(text("Yes").size(theme::font::BADGE).color(rgb(theme::ERROR())))
-                    .on_press(Message::ConfirmClearCache)
-                    .padding([3, 10])
-                    .style(flat_button),
-                button(text("No").size(theme::font::BADGE).color(rgb(theme::ICON())))
-                    .on_press(Message::CancelClearCache)
-                    .padding([3, 10])
-                    .style(flat_button),
+                button(
+                    text("Yes")
+                        .size(theme::font::BADGE)
+                        .color(rgb(theme::ERROR()))
+                )
+                .on_press(Message::ConfirmClearCache)
+                .padding([3, 10])
+                .style(flat_button),
+                button(
+                    text("No")
+                        .size(theme::font::BADGE)
+                        .color(rgb(theme::ICON()))
+                )
+                .on_press(Message::CancelClearCache)
+                .padding([3, 10])
+                .style(flat_button),
             ]
             .spacing(6)
             .align_y(Alignment::Center),
@@ -1511,7 +1582,10 @@ fn settings_sessions_tab(state: &State) -> Element<'_> {
         text("Active sessions")
             .size(theme::font::TIMESTAMP)
             .color(rgb(theme::ICON()))
-            .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+            .font(iced::Font {
+                weight: iced::font::Weight::Bold,
+                ..iced::Font::DEFAULT
+            }),
     );
 
     if state.sessions.is_empty() {
@@ -1528,7 +1602,8 @@ fn settings_sessions_tab(state: &State) -> Element<'_> {
     }
 
     for s in &state.sessions {
-        let trailing: Element<'static> = if s.current {            container(
+        let trailing: Element<'static> = if s.current {
+            container(
                 text("This device")
                     .size(theme::font::BADGE)
                     .color(rgb(theme::ACCENT())),
@@ -1536,7 +1611,10 @@ fn settings_sessions_tab(state: &State) -> Element<'_> {
             .padding([2, 6])
             .style(|_| container::Style {
                 background: Some(iced::Background::Color(rgb(theme::PERF_BADGE_BG()))),
-                border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
                 ..container::Style::default()
             })
             .into()
@@ -1620,7 +1698,9 @@ fn list_pane(state: &State) -> Element<'_> {
     let header = container(
         row![
             icon(Icon::Logo, theme::ACCENT(), 26.0),
-            text("Chats").size(theme::font::TITLE).color(rgb(theme::TEXT_PRIMARY())),
+            text("Chats")
+                .size(theme::font::TITLE)
+                .color(rgb(theme::TEXT_PRIMARY())),
             horizontal_spacer(),
             button(icon(Icon::Plus, theme::ICON(), 18.0))
                 .on_press(Message::OpenCreateMenu)
@@ -1672,12 +1752,7 @@ fn create_menu_layer() -> Element<'static> {
     let menu = container(
         column![
             menu_item(Message::CreateGroup, Icon::Compose, "New Group", false),
-            menu_item(
-                Message::CreateChannel,
-                Icon::Forward,
-                "New Channel",
-                false
-            ),
+            menu_item(Message::CreateChannel, Icon::Forward, "New Channel", false),
         ]
         .spacing(2),
     )
@@ -1763,7 +1838,13 @@ pub fn dialog_list(state: &State, view_h: f32) -> Element<'_> {
     let bottom_pad = DIALOG_ROW_H * (n.saturating_sub(end)) as f32;
 
     let mut rows = column![];
-    for (i, row) in state.dialogs.iter().enumerate().skip(start).take(end - start) {
+    for (i, row) in state
+        .dialogs
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(end - start)
+    {
         // `state.dialog_short` holds the already-ellipsized labels (kept
         // aligned with `dialogs`), so the rows borrow those strings instead of
         // allocating new ones per frame. The mismatch fallback (freshly-built
@@ -1773,7 +1854,12 @@ pub fn dialog_list(state: &State, view_h: f32) -> Element<'_> {
             .get(i)
             .map(|(t, s)| (t.as_str(), s.as_str()))
             .unwrap_or((&row.title, &row.subtitle));
-        rows = rows.push(chat_row_button(row, state.open_chat == Some(row.id), title, sub));
+        rows = rows.push(chat_row_button(
+            row,
+            state.open_chat == Some(row.id),
+            title,
+            sub,
+        ));
     }
 
     scrollable(column![
@@ -1790,8 +1876,17 @@ pub fn dialog_list(state: &State, view_h: f32) -> Element<'_> {
     .into()
 }
 
-fn chat_row_button<'a>(row: &'a ChatRow, selected: bool, title: &'a str, sub: &'a str) -> Element<'a> {
-    let avatar = avatar_circle(row.avatar_path.as_deref(), &row.title, theme::layout::AVATAR_LIST);
+fn chat_row_button<'a>(
+    row: &'a ChatRow,
+    selected: bool,
+    title: &'a str,
+    sub: &'a str,
+) -> Element<'a> {
+    let avatar = avatar_circle(
+        row.avatar_path.as_deref(),
+        &row.title,
+        theme::layout::AVATAR_LIST,
+    );
 
     let unread = row.unread > 0;
     // Matching the winit client: names and previews stay on one line (miss of
@@ -1935,11 +2030,9 @@ fn conversation_pane(state: &State) -> Element<'_> {
         .into()
     } else {
         container(
-            iced::widget::responsive(move |size| {
-                messages_list(state, size.width, size.height)
-            })
-            .width(Length::Fill)
-            .height(Length::Fill),
+            iced::widget::responsive(move |size| messages_list(state, size.width, size.height))
+                .width(Length::Fill)
+                .height(Length::Fill),
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -2004,7 +2097,11 @@ fn conversation_pane(state: &State) -> Element<'_> {
         top = top.push(topic_chips_bar(state));
     }
 
-    let pane = pane.push(top).push(body).push(composer).height(Length::Fill);
+    let pane = pane
+        .push(top)
+        .push(body)
+        .push(composer)
+        .height(Length::Fill);
 
     pane.into()
 }
@@ -2024,7 +2121,10 @@ fn info_panel(state: &State) -> Element<'_> {
         text("Chat info")
             .size(theme::font::NAME)
             .color(rgb(theme::TEXT_PRIMARY()))
-            .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+            .font(iced::Font {
+                weight: iced::font::Weight::Bold,
+                ..iced::Font::DEFAULT
+            }),
         horizontal_spacer(),
         close,
     ]
@@ -2048,7 +2148,10 @@ fn info_panel(state: &State) -> Element<'_> {
                 text(title)
                     .size(theme::font::NAME)
                     .color(rgb(theme::TEXT_PRIMARY()))
-                    .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT })
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Bold,
+                        ..iced::Font::DEFAULT
+                    })
                     .wrapping(iced::widget::text::Wrapping::None),
             )
             .center_x(Length::Fill),
@@ -2136,7 +2239,10 @@ fn info_panel(state: &State) -> Element<'_> {
             text(format!("Members ({})", state.participants.len()))
                 .size(theme::font::TIMESTAMP)
                 .color(rgb(theme::ICON()))
-                .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+                .font(iced::Font {
+                    weight: iced::font::Weight::Bold,
+                    ..iced::Font::DEFAULT
+                }),
         );
         for p in &state.participants {
             col = col.push(member_row(state, p));
@@ -2181,34 +2287,48 @@ fn member_row(state: &State, p: &bridge::ParticipantRow) -> Element<'static> {
     let is_self = state.admin_self_id == Some(p.id);
     let untouchable = is_self || p.role == bridge::ParticipantRole::Creator;
     let kick_confirming = state.kick_confirm == Some(p.id);
-    let admin_confirm = state
-        .admin_confirm
-        .is_some_and(|(_, u)| u == p.id);
+    let admin_confirm = state.admin_confirm.is_some_and(|(_, u)| u == p.id);
     let menu_open = state.admin_menu == Some(p.id);
 
     let trailing: Element<'static> = if kick_confirming {
         row![
-            button(text("Remove").size(theme::font::BADGE).color(rgb(theme::ERROR())))
-                .on_press(Message::ConfirmKick)
-                .padding([3, 8])
-                .style(flat_button),
-            button(text("Cancel").size(theme::font::BADGE).color(rgb(theme::ICON())))
-                .on_press(Message::Escape)
-                .padding([3, 8])
-                .style(flat_button),
+            button(
+                text("Remove")
+                    .size(theme::font::BADGE)
+                    .color(rgb(theme::ERROR()))
+            )
+            .on_press(Message::ConfirmKick)
+            .padding([3, 8])
+            .style(flat_button),
+            button(
+                text("Cancel")
+                    .size(theme::font::BADGE)
+                    .color(rgb(theme::ICON()))
+            )
+            .on_press(Message::Escape)
+            .padding([3, 8])
+            .style(flat_button),
         ]
         .spacing(4)
         .into()
     } else if admin_confirm {
         row![
-            button(text("Yes").size(theme::font::BADGE).color(rgb(theme::ERROR())))
-                .on_press(Message::AdminConfirmYes)
-                .padding([3, 8])
-                .style(flat_button),
-            button(text("No").size(theme::font::BADGE).color(rgb(theme::ICON())))
-                .on_press(Message::Escape)
-                .padding([3, 8])
-                .style(flat_button),
+            button(
+                text("Yes")
+                    .size(theme::font::BADGE)
+                    .color(rgb(theme::ERROR()))
+            )
+            .on_press(Message::AdminConfirmYes)
+            .padding([3, 8])
+            .style(flat_button),
+            button(
+                text("No")
+                    .size(theme::font::BADGE)
+                    .color(rgb(theme::ICON()))
+            )
+            .on_press(Message::Escape)
+            .padding([3, 8])
+            .style(flat_button),
         ]
         .spacing(4)
         .into()
@@ -2225,12 +2345,10 @@ fn member_row(state: &State, p: &bridge::ParticipantRow) -> Element<'static> {
     let row_button = button(
         row![
             avatar_circle(None, &name, 34.0),
-            column![
-                text(name)
-                    .size(theme::font::MESSAGE)
-                    .color(rgb(theme::TEXT_PRIMARY()))
-                    .wrapping(iced::widget::text::Wrapping::None),
-            ]
+            column![text(name)
+                .size(theme::font::MESSAGE)
+                .color(rgb(theme::TEXT_PRIMARY()))
+                .wrapping(iced::widget::text::Wrapping::None),]
             .width(Length::Fill),
             role_badge(p.role),
             trailing,
@@ -2276,13 +2394,9 @@ fn member_row(state: &State, p: &bridge::ParticipantRow) -> Element<'static> {
         horizontal_spacer()
     };
 
-    mouse_area(
-        column![row_button, menu]
-            .width(Length::Fill)
-            .spacing(2),
-    )
-    .on_right_press(Message::MemberMenu(p.id))
-    .into()
+    mouse_area(column![row_button, menu].width(Length::Fill).spacing(2))
+        .on_right_press(Message::MemberMenu(p.id))
+        .into()
 }
 
 /// Rendering metadata of one admin menu action (icon + English label +
@@ -2351,7 +2465,10 @@ fn sticker_picker_card<'a>(state: &'a State) -> Element<'a> {
             text(format!("{} ({})", set.title, set.docs.len()))
                 .size(theme::font::TIMESTAMP)
                 .color(rgb(theme::ICON()))
-                .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+                .font(iced::Font {
+                    weight: iced::font::Weight::Bold,
+                    ..iced::Font::DEFAULT
+                }),
         );
         for (row_i, chunk) in set.docs.chunks(4).enumerate() {
             let mut cells: iced::widget::Row<'a, Message> = row![].spacing(6);
@@ -2369,7 +2486,10 @@ fn sticker_picker_card<'a>(state: &'a State) -> Element<'a> {
                         .height(STICKER_THUMB)
                         .style(|_| container::Style {
                             background: Some(iced::Background::Color(rgb(theme::INPUT_FILL()))),
-                            border: iced::Border { radius: 12.0.into(), ..Default::default() },
+                            border: iced::Border {
+                                radius: 12.0.into(),
+                                ..Default::default()
+                            },
                             ..container::Style::default()
                         }),
                     )
@@ -2377,19 +2497,20 @@ fn sticker_picker_card<'a>(state: &'a State) -> Element<'a> {
                     .padding(2)
                     .style(flat_button)
                     .into(),
-                    None => container(
-                        icon(Icon::Sticker, theme::DIVIDER(), 22.0),
-                    )
-                    .width(STICKER_THUMB)
-                    .height(STICKER_THUMB)
-                    .align_x(iced::alignment::Horizontal::Center)
-                    .align_y(iced::alignment::Vertical::Center)
-                    .style(|_| container::Style {
-                        background: Some(iced::Background::Color(rgb(theme::INPUT_FILL()))),
-                        border: iced::Border { radius: 12.0.into(), ..Default::default() },
-                        ..container::Style::default()
-                    })
-                    .into(),
+                    None => container(icon(Icon::Sticker, theme::DIVIDER(), 22.0))
+                        .width(STICKER_THUMB)
+                        .height(STICKER_THUMB)
+                        .align_x(iced::alignment::Horizontal::Center)
+                        .align_y(iced::alignment::Vertical::Center)
+                        .style(|_| container::Style {
+                            background: Some(iced::Background::Color(rgb(theme::INPUT_FILL()))),
+                            border: iced::Border {
+                                radius: 12.0.into(),
+                                ..Default::default()
+                            },
+                            ..container::Style::default()
+                        })
+                        .into(),
                 };
                 cells = cells.push(cell);
             }
@@ -2403,7 +2524,10 @@ fn sticker_picker_card<'a>(state: &'a State) -> Element<'a> {
                 text("Stickers")
                     .size(theme::font::NAME)
                     .color(rgb(theme::TEXT_PRIMARY()))
-                    .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT }),
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Bold,
+                        ..iced::Font::DEFAULT
+                    }),
                 horizontal_spacer(),
                 close,
             ]
@@ -2436,7 +2560,11 @@ fn forward_layer<'a>(state: &'a State) -> Element<'a> {
         rows = rows.push(
             button(
                 row![
-                    avatar_circle(d.avatar_path.as_deref(), &d.title, theme::layout::AVATAR_LIST - 12.0),
+                    avatar_circle(
+                        d.avatar_path.as_deref(),
+                        &d.title,
+                        theme::layout::AVATAR_LIST - 12.0
+                    ),
                     text(&d.title)
                         .size(theme::font::MESSAGE)
                         .color(rgb(theme::TEXT_PRIMARY()))
@@ -2457,7 +2585,9 @@ fn forward_layer<'a>(state: &'a State) -> Element<'a> {
         column![
             row![
                 icon(Icon::Forward, theme::ACCENT(), 16.0),
-                text("Forward to…").size(theme::font::NAME).color(rgb(theme::TEXT_PRIMARY())),
+                text("Forward to…")
+                    .size(theme::font::NAME)
+                    .color(rgb(theme::TEXT_PRIMARY())),
                 horizontal_spacer(),
                 button(icon(Icon::Close, theme::ICON(), 14.0))
                     .on_press(Message::Escape)
@@ -2503,7 +2633,9 @@ fn create_layer<'a>(state: &'a State) -> Element<'a> {
 
     let mut card = column![
         row![
-            text(title).size(theme::font::NAME).color(rgb(theme::TEXT_PRIMARY())),
+            text(title)
+                .size(theme::font::NAME)
+                .color(rgb(theme::TEXT_PRIMARY())),
             horizontal_spacer(),
             button(icon(Icon::Close, theme::ICON(), 14.0))
                 .on_press(Message::CancelCreate)
@@ -2533,11 +2665,9 @@ fn create_layer<'a>(state: &'a State) -> Element<'a> {
         );
     } else {
         // Groups: pick the initial members from the known contacts.
-        let mut members = column![
-            text("Members")
-                .size(theme::font::TIMESTAMP)
-                .color(rgb(theme::TEXT_SECONDARY()))
-        ]
+        let mut members = column![text("Members")
+            .size(theme::font::TIMESTAMP)
+            .color(rgb(theme::TEXT_SECONDARY()))]
         .spacing(2);
         for (i, (_, name, on)) in state.member_pick.iter().enumerate() {
             let check: Element<'_> = if *on {
@@ -2574,10 +2704,14 @@ fn create_layer<'a>(state: &'a State) -> Element<'a> {
 
     card = card.push(
         row![
-            button(text("Cancel").size(theme::font::MESSAGE).color(rgb(theme::ICON())))
-                .on_press(Message::CancelCreate)
-                .padding([10, 18])
-                .style(flat_button),
+            button(
+                text("Cancel")
+                    .size(theme::font::MESSAGE)
+                    .color(rgb(theme::ICON()))
+            )
+            .on_press(Message::CancelCreate)
+            .padding([10, 18])
+            .style(flat_button),
             button(
                 text("Create")
                     .size(theme::font::MESSAGE)
@@ -2604,7 +2738,9 @@ fn confirm_layer<'a>(state: &'a State) -> Element<'a> {
         state::ConfirmKind::Delete => ("Delete chat?", "Delete"),
     };
     let card = column![
-        text(question).size(theme::font::NAME).color(rgb(theme::TEXT_PRIMARY())),
+        text(question)
+            .size(theme::font::NAME)
+            .color(rgb(theme::TEXT_PRIMARY())),
         row![
             button(
                 text("Cancel")
@@ -2651,7 +2787,10 @@ fn chat_header(
     let name = text(ellipsize(title, 40))
         .size(theme::font::NAME)
         .color(rgb(theme::TEXT_PRIMARY()))
-        .font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT })
+        .font(iced::Font {
+            weight: iced::font::Weight::Bold,
+            ..iced::Font::DEFAULT
+        })
         .wrapping(iced::widget::text::Wrapping::None)
         .width(Length::Fill);
     let status: Element<'static> = if title.is_empty() {
@@ -2671,9 +2810,7 @@ fn chat_header(
             .into()
     };
 
-    let mut actions = row![]
-        .spacing(6)
-        .align_y(Alignment::Center);
+    let mut actions = row![].spacing(6).align_y(Alignment::Center);
     actions = actions.push(
         button(icon(Icon::Search, theme::ICON(), 20.0))
             .on_press(Message::OpenInChatSearch)
@@ -2790,16 +2927,12 @@ fn emoji_panel(state: &State) -> Element<'_> {
         content = content.push(emoji_grid(set));
     }
 
-    container(
-        scrollable(content)
-            .width(Length::Fill)
-            .height(Length::Fill),
-    )
-    .width(EMOJI_PANEL_W)
-    .height(EMOJI_PANEL_H)
-    .padding(10)
-    .style(menu_bg)
-    .into()
+    container(scrollable(content).width(Length::Fill).height(Length::Fill))
+        .width(EMOJI_PANEL_W)
+        .height(EMOJI_PANEL_H)
+        .padding(10)
+        .style(menu_bg)
+        .into()
 }
 
 fn emoji_section_label(title: &str) -> Element<'_> {
@@ -2835,19 +2968,19 @@ fn emoji_font() -> iced::Font {
 /// in text fonts like DejaVu before reaching Noto Color Emoji.
 fn emoji_grid(emojis: &str) -> Element<'static> {
     let mut grid = column![].spacing(2);
-    for line in emojis.split_whitespace().collect::<Vec<_>>().chunks(EMOJI_COLS) {
+    for line in emojis
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .chunks(EMOJI_COLS)
+    {
         let mut r = row![].spacing(2);
         for e in line {
             r = r.push(
-                button(
-                    text(e.to_string())
-                        .size(EMOJI_FONT_SIZE)
-                        .font(emoji_font()),
-                )
-                .on_press(Message::EmojiPicked((*e).to_string()))
-                .width(Length::Fixed(38.0))
-                .height(Length::Fixed(32.0))
-                .style(|t, s| menu_item_style(t, s, false)),
+                button(text(e.to_string()).size(EMOJI_FONT_SIZE).font(emoji_font()))
+                    .on_press(Message::EmojiPicked((*e).to_string()))
+                    .width(Length::Fixed(38.0))
+                    .height(Length::Fixed(32.0))
+                    .style(|t, s| menu_item_style(t, s, false)),
             );
         }
         grid = grid.push(r);
@@ -2979,7 +3112,42 @@ fn composer_bar(state: &State) -> Element<'_> {
 // Message rows
 // ---------------------------------------------------------------------------
 
-/// A message row: bubble (sent at right, received at left) + timestamp.
+/// A row of reaction chips (emoji + count) shown under a message bubble.
+/// A chip given by the current account is highlighted with the accent colour.
+fn reaction_chips<'a>(m: &'a MsgRow) -> Element<'a> {
+    let mut chips = iced::widget::Row::new().spacing(3);
+    for c in &m.reactions {
+        let color = if c.chosen {
+            theme::ACCENT()
+        } else {
+            theme::TEXT_SECONDARY()
+        };
+        chips = chips.push(
+            container(
+                row![
+                    text(&c.emoji).size(theme::font::TIMESTAMP),
+                    text(c.count.max(1).to_string())
+                        .size(theme::font::TIMESTAMP)
+                        .color(rgb(color)),
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center),
+            )
+            .padding([2.0, 8.0])
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(rgb(theme::INPUT_FILL()))),
+                border: iced::Border {
+                    radius: 10.0.into(),
+                    ..iced::Border::default()
+                },
+                ..container::Style::default()
+            }),
+        );
+    }
+    chips.into()
+}
+
+/// A message row: bubble (sent at right, received at left).
 /// `pane_w` is the conversation pane width used to size the bubble (received:
 /// 70% of the pane, sent: 60%, matching the winit client).
 fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> Element<'a> {
@@ -3055,11 +3223,7 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
         // by the audio engine's `state` (no click routing through `click`).
         let media_card: Element<'a> = match doc.kind {
             bridge::DocKind::Audio { voice: true } => {
-                let is_this = state
-                    .playing_voice
-                    .as_ref()
-                    .map(|(_, mid, _)| *mid)
-                    == Some(m.id);
+                let is_this = state.playing_voice.as_ref().map(|(_, mid, _)| *mid) == Some(m.id);
                 let pct = if is_this {
                     let total = doc.duration.unwrap_or(0.0).max(0.1);
                     (state.voice_elapsed / total as f32).clamp(0.0, 1.0)
@@ -3200,13 +3364,19 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
 
     // Stack the sender name (group chats) and quote above the media/text body.
     let sender_line: Option<Element<'a>> = if !m.out {
-        m.sender_name.as_ref().filter(|_| !m.text.is_empty() || m.photo.is_some() || m.doc.is_some()).map(|name| {
-            text(name.clone())
-                .size(theme::font::TIMESTAMP)
-                .color(rgb(sender_color(m.sender_id)))
-                .font(iced::Font { weight: iced::font::Weight::Semibold, ..iced::Font::DEFAULT })
-                .into()
-        })
+        m.sender_name
+            .as_ref()
+            .filter(|_| !m.text.is_empty() || m.photo.is_some() || m.doc.is_some())
+            .map(|name| {
+                text(name.clone())
+                    .size(theme::font::TIMESTAMP)
+                    .color(rgb(sender_color(m.sender_id)))
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Semibold,
+                        ..iced::Font::DEFAULT
+                    })
+                    .into()
+            })
     } else {
         None
     };
@@ -3232,10 +3402,7 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
         .bottom_right(radius);
 
     let bubble = container(body_full)
-        .padding([
-            theme::layout::BUBBLE_PAD_Y,
-            theme::layout::BUBBLE_PAD_X,
-        ])
+        .padding([theme::layout::BUBBLE_PAD_Y, theme::layout::BUBBLE_PAD_X])
         .width(bubble_w)
         .style(move |_| container::Style {
             background: Some(iced::Background::Color(rgb(if m.out {
@@ -3278,6 +3445,25 @@ fn message_row<'a>(idx: usize, m: &'a MsgRow, pane_w: f32, state: &'a State) -> 
 
     // Left/right click handling via mouse_area. WinIt put the timestamp on
     // the OUTER side of each bubble (left of outgoing, right of incoming).
+    // Reaction chips dock under the bubble (right for sent, left for received),
+    // pinned to the bubble's own width so they never bleed into the margin.
+    let bubble = if m.reactions.is_empty() {
+        bubble
+    } else {
+        container(
+            column![bubble, reaction_chips(m)]
+                .spacing(3)
+                .align_x(if m.out {
+                    iced::alignment::Horizontal::Right
+                } else {
+                    iced::alignment::Horizontal::Left
+                }),
+        )
+        .width(Length::Fixed(bubble_w.max(60.0)))
+        .clip(true)
+        .into()
+    };
+
     let wrapped = mouse_area(if m.out {
         row![meta, bubble].spacing(8).align_y(Alignment::Center)
     } else {
@@ -3306,7 +3492,10 @@ fn sticker_message_row<'a>(idx: usize, m: &'a MsgRow) -> Element<'a> {
             text(name.clone())
                 .size(theme::font::TIMESTAMP)
                 .color(rgb(sender_color(m.sender_id)))
-                .font(iced::Font { weight: iced::font::Weight::Semibold, ..iced::Font::DEFAULT })
+                .font(iced::Font {
+                    weight: iced::font::Weight::Semibold,
+                    ..iced::Font::DEFAULT
+                })
                 .into()
         })
     } else {
@@ -3342,9 +3531,14 @@ fn sticker_message_row<'a>(idx: usize, m: &'a MsgRow) -> Element<'a> {
         } else {
             icon(Icon::Tick { read: false }, theme::TEXT_SECONDARY(), 15.0)
         };
-        row![tick, text(ts).size(theme::font::TIMESTAMP).color(rgb(theme::TEXT_SECONDARY()))]
-            .spacing(6)
-            .into()
+        row![
+            tick,
+            text(ts)
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(theme::TEXT_SECONDARY()))
+        ]
+        .spacing(6)
+        .into()
     } else {
         text(ts)
             .size(theme::font::TIMESTAMP)
@@ -3354,10 +3548,18 @@ fn sticker_message_row<'a>(idx: usize, m: &'a MsgRow) -> Element<'a> {
 
     let mut stack: iced::widget::Column<'a, Message> = column![];
     if let Some(s) = sender_line {
-        stack = stack.push(container(s).width(Length::Fill).align_x(iced::alignment::Horizontal::Center));
+        stack = stack.push(
+            container(s)
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center),
+        );
     }
     stack = stack.push(img);
-    stack = stack.push(container(meta).width(Length::Fill).align_x(iced::alignment::Horizontal::Center));
+    stack = stack.push(
+        container(meta)
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center),
+    );
     stack = stack.spacing(4);
 
     let wrapped = mouse_area(stack)
@@ -3501,7 +3703,10 @@ const PINNED_BANNER_H: f32 = 34.0;
 /// Thin banner showing the pinned message: pin icon + label + snippet.
 /// Clicking jumps to the message in the list.
 fn pinned_banner(m: &MsgRow) -> Element<'static> {
-    let snippet = crate::ellipsize(&state::preview_text(&m.text, &m.photo, &m.doc, &m.sticker), 48);
+    let snippet = crate::ellipsize(
+        &state::preview_text(&m.text, &m.photo, &m.doc, &m.sticker),
+        48,
+    );
     button(
         row![
             icon(Icon::Pin, theme::ACCENT(), 14.0),
@@ -3550,7 +3755,9 @@ const TOPIC_BAR_H: f32 = 34.0;
 /// (`State::topic_bar_visible`), between the pinned-banner zone and the
 /// message list.
 fn topic_chips_bar(state: &State) -> Element<'_> {
-    let mut chips = iced::widget::Row::new().spacing(6).align_y(Alignment::Center);
+    let mut chips = iced::widget::Row::new()
+        .spacing(6)
+        .align_y(Alignment::Center);
     // The create field leads the row while open: appended at the end it can
     // land past the horizontal-scroll viewport once the chips fill the bar,
     // which reads as "the + chip does nothing".
@@ -3652,8 +3859,9 @@ fn topic_chip<'a>(label: &'a str, active: bool, msg: Message) -> Element<'a> {
             (theme::ACCENT(), theme::ACCENT())
         } else {
             let bg = match status {
-                iced::widget::button::Status::Hovered
-                | iced::widget::button::Status::Pressed => theme::ROW_HOVER(),
+                iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
+                    theme::ROW_HOVER()
+                }
                 _ => theme::LIST_BG(),
             };
             (bg, theme::MENU_BORDER())
@@ -3704,12 +3912,7 @@ const CONTEXT_MENU_PAD: f32 = 6.0;
 
 /// One context-menu row: icon in a fixed-width column + label, hover state,
 /// 8 px item radius (M3: item < container corner).
-fn menu_item<'a>(
-    msg: Message,
-    ic: Icon,
-    label: &'a str,
-    destructive: bool,
-) -> Element<'a> {
+fn menu_item<'a>(msg: Message, ic: Icon, label: &'a str, destructive: bool) -> Element<'a> {
     let label_color = if destructive {
         rgb(theme::ERROR())
     } else {
@@ -3752,7 +3955,18 @@ fn context_menu_bar(state: &State) -> Element<'static> {
         .is_some_and(|m| !m.text.is_empty());
 
     let mut items = column![].spacing(2);
-    items = items.push(menu_item(Message::ContextReply, Icon::Reply, "Reply", false));
+    items = items.push(menu_item(
+        Message::ContextReply,
+        Icon::Reply,
+        "Reply",
+        false,
+    ));
+    items = items.push(menu_item(
+        Message::ContextReact,
+        Icon::Smile,
+        "React",
+        false,
+    ));
     items = items.push(menu_item(
         Message::ContextForward,
         Icon::Forward,
@@ -3764,7 +3978,12 @@ fn context_menu_bar(state: &State) -> Element<'static> {
     } else {
         "Pin"
     };
-    items = items.push(menu_item(Message::ContextPin, Icon::Pin, pinned_label, false));
+    items = items.push(menu_item(
+        Message::ContextPin,
+        Icon::Pin,
+        pinned_label,
+        false,
+    ));
     if can_edit {
         items = items.push(menu_item(Message::ContextEdit, Icon::Edit, "Edit", false));
     }
@@ -3772,7 +3991,12 @@ fn context_menu_bar(state: &State) -> Element<'static> {
         items = items.push(menu_item(Message::ContextCopy, Icon::Copy, "Copy", false));
     }
     if can_edit {
-        items = items.push(menu_item(Message::ContextDelete, Icon::Trash, "Delete", true));
+        items = items.push(menu_item(
+            Message::ContextDelete,
+            Icon::Trash,
+            "Delete",
+            true,
+        ));
     }
 
     let menu_el = container(items)
@@ -3783,6 +4007,33 @@ fn context_menu_bar(state: &State) -> Element<'static> {
     // Right-aligned under the message (editable messages are ours → right).
     row![horizontal_spacer(), menu_el]
         .padding([0.0, theme::layout::MSG_PAD_X])
+        .into()
+}
+
+/// Reactions offered by the quick-reaction pill (Telegram's usual favourites).
+const REACTIONS: [&str; 9] = ["👍", "❤️", "🔥", "👏", "😮", "😢", "🤔", "😂", "🎉"];
+const REACT_STRIP_H: f32 = 44.0;
+const REACT_STRIP_EMOJI: f32 = 22.0;
+
+/// The horizontal quick-reaction pill shown after picking React from a
+/// message's context menu: one emoji per common reaction, each toggling the
+/// reaction server-side. Clicking an emoji sends it and closes the strip.
+fn reaction_strip<'a>() -> Element<'a> {
+    let mut row = row![].spacing(2);
+    for emoji in REACTIONS {
+        row = row.push(
+            button(
+                text(emoji)
+                    .size(REACT_STRIP_EMOJI)
+                    .align_y(Alignment::Center),
+            )
+            .padding([6, 10])
+            .style(|t, s| menu_item_style(t, s, false))
+            .on_press(Message::React(emoji.to_string())),
+        );
+    }
+    container(row.padding(CONTEXT_MENU_PAD))
+        .style(menu_bg)
         .into()
 }
 
@@ -3806,7 +4057,7 @@ fn context_menu_items(state: &State) -> usize {
         .context_menu
         .and_then(|c| state.messages.get(c.row))
         .is_some_and(|m| !m.text.is_empty());
-    3 + usize::from(can_edit) + usize::from(has_text) + usize::from(can_edit)
+    4 + usize::from(can_edit) + usize::from(has_text) + usize::from(can_edit)
 }
 
 /// Rendered height of the open context menu (items + spacing + padding) —
@@ -3859,9 +4110,9 @@ pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let hit = !no_virt
-        && cache_guard
-            .as_ref()
-            .is_some_and(|c| c.pane_w == pane_w && c.view_h == view_h && c.epoch == state.layout_epoch);
+        && cache_guard.as_ref().is_some_and(|c| {
+            c.pane_w == pane_w && c.view_h == view_h && c.epoch == state.layout_epoch
+        });
     if !hit {
         *cache_guard = Some(build_layout(state, pane_w, view_h));
     }
@@ -3919,19 +4170,49 @@ pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
     for i in start..end {
         let m = &state.messages[i];
         if i > 0 {
-            cols =
-                cols.push(iced::widget::Space::new().height(gap_between(prev_out.unwrap_or(m.out), m.out)));
+            cols = cols.push(
+                iced::widget::Space::new().height(gap_between(prev_out.unwrap_or(m.out), m.out)),
+            );
         }
         cols = cols.push(message_row(i, m, pane_w, state));
         prev_out = Some(m.out);
     }
 
+    // Reaction strip as a floating overlay first (it replaces the context
+    // menu when opened from it, so at most one overlay is ever shown): a
+    // `stack` layer anchored under the target row, like the context menu.
+    let content = if let Some(react_row) = state.react_row {
+        let row = react_row.min(n.saturating_sub(1));
+        let strip_h = REACT_STRIP_H;
+        let row_top_vp = tops[row] - state.scroll_offset;
+        let row_bot_vp = row_top_vp + heights[row];
+        let desired_vp = if row_bot_vp + strip_h + 3.0 > view_h
+            && tops[row] > state.scroll_offset + view_h - strip_h
+        {
+            // Not enough room below: float above the row, clamped to the
+            // viewport top when the row itself hugs it.
+            (row_top_vp - strip_h - 3.0).max(2.0)
+        } else {
+            row_bot_vp + 3.0
+        };
+        let desired_vp = desired_vp.min((view_h - strip_h - 8.0).max(2.0));
+        let y = (desired_vp + state.scroll_offset - top_pad).max(0.0);
+        let x = 8.0; // left-anchored to the bubble edge, Telegram-style
+        let layer = container(reaction_strip())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(iced::Padding {
+                top: y,
+                left: x,
+                ..Default::default()
+            });
+        Element::from(iced::widget::stack![cols, layer])
     // Context menu as a floating overlay: a `stack` layer anchored under (or,
     // near the bottom, above) the target row, right-aligned. It no longer
     // participates in the column layout — opening it must not push the
     // messages down. It floats even if its row is currently virtualized out
     // (`tops` covers every row).
-    let content = if let Some(menu) = state.context_menu {
+    } else if let Some(menu) = state.context_menu {
         let row = menu.row.min(n.saturating_sub(1));
         // Position in VIEWPORT space: the menu must stay on screen, so the
         // flip compares against the visible height (not the content tail —
@@ -4119,7 +4400,12 @@ fn avatar_circle(photo: Option<&str>, title: &str, size: f32) -> Element<'static
             .into();
         }
     }
-    let ch = title.chars().next().unwrap_or('?').to_string().to_uppercase();
+    let ch = title
+        .chars()
+        .next()
+        .unwrap_or('?')
+        .to_string()
+        .to_uppercase();
     let c = theme::avatar_color(title);
     container(
         container(text(ch).size(theme::font::NAME).color(Color::WHITE))
@@ -4248,7 +4534,10 @@ fn row_style(
     }
 }
 
-fn flat_button(theme: &iced::Theme, status: iced::widget::button::Status) -> iced::widget::button::Style {
+fn flat_button(
+    theme: &iced::Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
     icon_button_style(theme, status)
 }
 
@@ -4284,9 +4573,7 @@ fn accent_circle_button(
     status: iced::widget::button::Status,
 ) -> iced::widget::button::Style {
     let bg = match status {
-        iced::widget::button::Status::Hovered => {
-            theme::ACCENT_HOVER()
-        }
+        iced::widget::button::Status::Hovered => theme::ACCENT_HOVER(),
         iced::widget::button::Status::Pressed => theme::ACCENT_PRESSED(),
         _ => theme::ACCENT(),
     };
@@ -4305,9 +4592,7 @@ fn accent_button(
     status: iced::widget::button::Status,
 ) -> iced::widget::button::Style {
     let bg = match status {
-        iced::widget::button::Status::Hovered => {
-            theme::ACCENT_HOVER()
-        }
+        iced::widget::button::Status::Hovered => theme::ACCENT_HOVER(),
         iced::widget::button::Status::Pressed => theme::ACCENT_PRESSED(),
         _ => theme::ACCENT(),
     };
@@ -4420,9 +4705,7 @@ fn voice_slider_style(
     status: iced::widget::slider::Status,
 ) -> iced::widget::slider::Style {
     let (rail_width, handle_r) = match status {
-        iced::widget::slider::Status::Dragged | iced::widget::slider::Status::Hovered => {
-            (5.0, 9.0)
-        }
+        iced::widget::slider::Status::Dragged | iced::widget::slider::Status::Hovered => (5.0, 9.0),
         _ => (4.0, 7.0),
     };
     iced::widget::slider::Style {
@@ -4604,16 +4887,14 @@ mod tests {
         state.open_chat = Some(42);
         state.chat_title = "Test".into();
         state.messages = (0..300)
-            .map(|i| {
-                MsgRow {
-                    read: true,
-                    ..MsgRow::text(
-                        i,
-                        format!("message {i} with some text that wraps a bit"),
-                        1_700_000_000 - i,
-                        i % 2 == 0,
-                    )
-                }
+            .map(|i| MsgRow {
+                read: true,
+                ..MsgRow::text(
+                    i,
+                    format!("message {i} with some text that wraps a bit"),
+                    1_700_000_000 - i,
+                    i % 2 == 0,
+                )
             })
             .collect();
 
@@ -4656,7 +4937,10 @@ mod tests {
         let h_narrow = est_row_height(&state.messages[0], 400.0);
         let h_wide = est_row_height(&state.messages[0], 1200.0);
         assert_eq!(h_narrow, h_wide, "sticker rows have a fixed height");
-        assert!(h_wide > 180.0 && h_wide < 320.0, "sane magnitude, got {h_wide}");
+        assert!(
+            h_wide > 180.0 && h_wide < 320.0,
+            "sane magnitude, got {h_wide}"
+        );
         // Sender name adds a line for incoming group stickers only.
         let out_h = est_row_height(&state.messages[1], 800.0);
         assert!(out_h < h_wide, "no sender line on outgoing stickers");
@@ -4677,9 +4961,13 @@ mod tests {
         state.sticker_sets = vec![StickerSetBridge {
             title: "Happy Blocks".into(),
             short_name: "happy_blocks".into(),
-            docs: (0..8).map(|i| (900_000_000 + i, 10 * i, format!("{i}"))).collect(),
+            docs: (0..8)
+                .map(|i| (900_000_000 + i, 10 * i, format!("{i}")))
+                .collect(),
         }];
-        state.sticker_thumbs.insert(900_000_000, "/nonexistent/thumb.webp".into());
+        state
+            .sticker_thumbs
+            .insert(900_000_000, "/nonexistent/thumb.webp".into());
         let _ = std::hint::black_box(chat_view(&state));
     }
 
@@ -4804,20 +5092,14 @@ mod tests {
     fn linkify_handles_www_and_strips_trailing_punctuation() {
         let spans = linkify("va sur www.rust-lang.org, c'est top.").unwrap();
         let texts: Vec<&str> = spans.iter().map(|s| s.text.as_ref()).collect();
-        assert_eq!(
-            texts,
-            ["va sur ", "www.rust-lang.org", ", c'est top."]
-        );
+        assert_eq!(texts, ["va sur ", "www.rust-lang.org", ", c'est top."]);
         assert_eq!(spans[1].link.as_deref(), Some("www.rust-lang.org"));
     }
 
     #[test]
     fn linkify_finds_multiple_urls() {
         let spans = linkify("http://a.io et www.b.io").unwrap();
-        let links: Vec<&str> = spans
-            .iter()
-            .filter_map(|s| s.link.as_deref())
-            .collect();
+        let links: Vec<&str> = spans.iter().filter_map(|s| s.link.as_deref()).collect();
         assert_eq!(links, ["http://a.io", "www.b.io"]);
     }
 }

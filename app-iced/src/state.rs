@@ -54,7 +54,11 @@ pub fn preview_text(
         return format!("{alt} Sticker");
     }
     if let Some(doc) = doc {
-        let name = if doc.name.is_empty() { "File" } else { &doc.name };
+        let name = if doc.name.is_empty() {
+            "File"
+        } else {
+            &doc.name
+        };
         return format!("📄 {name}");
     }
     if photo.is_some() {
@@ -74,6 +78,22 @@ use std::sync::{Arc, Mutex};
 /// Reads the persisted last-open chat id from `path` (a single i64 line).
 fn read_last_chat_at(path: &std::path::Path) -> Option<i64> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Merges a reaction update into a message's existing chip list: known emojis
+/// refresh their count/highlight, brand-new ones are appended.
+fn merge_reactions(
+    existing: &mut Vec<crate::bridge::ReactionChip>,
+    updates: &[crate::bridge::ReactionChip],
+) {
+    for u in updates {
+        if let Some(e) = existing.iter_mut().find(|e| e.emoji == u.emoji) {
+            e.chosen = u.chosen;
+            e.count = u.count;
+        } else {
+            existing.push(u.clone());
+        }
+    }
 }
 
 /// Persists (`Some`) or clears (`None`) the last-open chat id at `path`.
@@ -295,6 +315,8 @@ pub struct State {
 
     /// Open context menu, if any.
     pub context_menu: Option<ContextMenu>,
+    /// Row (into `messages`) showing the floating reaction strip, if any.
+    pub react_row: Option<usize>,
     /// Message id being edited; its old text lives in `composer`.
     pub editing: Option<i32>,
 
@@ -555,6 +577,7 @@ impl State {
             authenticated: false,
             typing: false,
             context_menu: None,
+            react_row: None,
             editing: None,
             create_menu_open: false,
             create_dialog: None,
@@ -707,7 +730,7 @@ impl State {
         self
     }
 
-/// Marks the message-list layout cache as stale. Called on any mutation
+    /// Marks the message-list layout cache as stale. Called on any mutation
     /// that changes row heights/offsets (`messages` content or the context
     /// menu); the view rebuilds the metrics lazily on the next frame.
     pub fn invalidate_layout(&mut self) {
@@ -720,10 +743,16 @@ impl State {
     fn refresh_dialog_short(&mut self, chat_id: i64) {
         let pos = self.dialogs.iter().position(|d| d.id == chat_id);
         let Some(pos) = pos else { return };
-        let Some(d) = self.dialogs.get(pos) else { return };
-        let short = (crate::ellipsize(&d.title, 15), crate::ellipsize(&d.subtitle, 20));
+        let Some(d) = self.dialogs.get(pos) else {
+            return;
+        };
+        let short = (
+            crate::ellipsize(&d.title, 15),
+            crate::ellipsize(&d.subtitle, 20),
+        );
         if self.dialog_short.len() <= pos {
-            self.dialog_short.resize(pos + 1, (String::new(), String::new()));
+            self.dialog_short
+                .resize(pos + 1, (String::new(), String::new()));
         }
         self.dialog_short[pos] = short;
     }
@@ -872,8 +901,7 @@ impl State {
                     self.pinned_id = rows.iter().rev().find(|m| m.pinned).map(|m| m.id);
                     // `messages` is the topic-filtered view of the history.
                     self.topic_all_messages = rows;
-                    self.messages =
-                        Self::topic_view(&self.topic_all_messages, self.topic_selected);
+                    self.messages = Self::topic_view(&self.topic_all_messages, self.topic_selected);
                     self.loading = false;
                     self.editing = None;
                     self.context_menu = None;
@@ -896,9 +924,11 @@ impl State {
                 doc,
                 sticker,
                 reply_to,
+                reply_to_top,
                 forwarded_from,
                 sender_name,
                 sender_id,
+                reactions,
             } => {
                 // Open chat? Merge the message (dedupe the optimistic local
                 // send, which is tagged id=0) into the full history, then
@@ -917,19 +947,19 @@ impl State {
                         doc,
                         sticker,
                         reply_to,
+                        reply_to_top,
                         forwarded_from,
                         sender_name,
                         sender_id,
+                        reactions,
                         ..MsgRow::text(0, "", 0, false)
                     };
                     Self::merge_new_message(&mut self.topic_all_messages, row);
-                    let stored = self
-                        .topic_all_messages
-                        .iter()
-                        .find(|m| m.id == id)
-                        .cloned();
+                    let stored = self.topic_all_messages.iter().find(|m| m.id == id).cloned();
                     let in_view = self.topic_selected.is_none_or(|root| {
-                        stored.as_ref().is_some_and(|m| Self::topic_in_thread(m, root))
+                        stored
+                            .as_ref()
+                            .is_some_and(|m| Self::topic_in_thread(m, root))
                     });
                     if in_view {
                         if let Some(m) = stored {
@@ -969,7 +999,12 @@ impl State {
                     self.refresh_dialog_short(chat_id);
                 }
             }
-            UiMessage::MessageEdited { chat_id, id, text, date } => {
+            UiMessage::MessageEdited {
+                chat_id,
+                id,
+                text,
+                date,
+            } => {
                 if self.open_chat == Some(chat_id) {
                     for m in &mut self.messages {
                         if m.id == id {
@@ -1033,7 +1068,27 @@ impl State {
                     self.confirm_leave = None;
                 }
             }
-            UiMessage::PhotoReady { chat_id, msg_id, path } => {
+            UiMessage::MessageReactions {
+                chat_id,
+                msg_id,
+                reactions,
+            } => {
+                if self.open_chat == Some(chat_id) {
+                    for m in &mut self.topic_all_messages {
+                        if m.id == msg_id {
+                            merge_reactions(&mut m.reactions, &reactions);
+                        }
+                    }
+                    if let Some(m) = self.messages.iter_mut().find(|m| m.id == msg_id) {
+                        merge_reactions(&mut m.reactions, &reactions);
+                    }
+                }
+            }
+            UiMessage::PhotoReady {
+                chat_id,
+                msg_id,
+                path,
+            } => {
                 if self.open_chat == Some(chat_id) {
                     for m in &mut self.messages {
                         if m.id == msg_id {
@@ -1044,7 +1099,11 @@ impl State {
                     self.invalidate_layout();
                 }
             }
-            UiMessage::DocReady { chat_id, msg_id, path } => {
+            UiMessage::DocReady {
+                chat_id,
+                msg_id,
+                path,
+            } => {
                 if self.open_chat == Some(chat_id) {
                     let downloaded = path.clone();
                     for m in &mut self.messages {
@@ -1059,7 +1118,11 @@ impl State {
                     self.invalidate_layout();
                 }
             }
-            UiMessage::StickerPathReady { chat_id, msg_id, path } => {
+            UiMessage::StickerPathReady {
+                chat_id,
+                msg_id,
+                path,
+            } => {
                 if self.open_chat == Some(chat_id) {
                     for m in &mut self.messages {
                         if m.id == msg_id {
@@ -1082,7 +1145,12 @@ impl State {
                     self.sticker_sets = sets;
                 }
             }
-            UiMessage::UploadProgress { chat_id, token, progress } => {                if self.open_chat != Some(chat_id) {
+            UiMessage::UploadProgress {
+                chat_id,
+                token,
+                progress,
+            } => {
+                if self.open_chat != Some(chat_id) {
                     return;
                 }
                 for m in &mut self.messages {
@@ -1199,7 +1267,11 @@ impl State {
                 }
             }
             UiMessage::MemberSelfId { id } => self.admin_self_id = Some(id),
-            UiMessage::Topics { id, is_forum, topics } => {
+            UiMessage::Topics {
+                id,
+                is_forum,
+                topics,
+            } => {
                 if self.open_chat == Some(id) {
                     self.topic_is_forum = is_forum;
                     self.topic_topics = topics;
@@ -1306,11 +1378,8 @@ impl State {
         let Some(m) = self.messages.get(row) else {
             return;
         };
-        let msg: Option<(i32, Option<crate::bridge::DocKind>, Option<String>)> = Some((
-            m.id,
-            m.doc.as_ref().map(|d| d.kind),
-            m.doc_path.clone(),
-        ));
+        let msg: Option<(i32, Option<crate::bridge::DocKind>, Option<String>)> =
+            Some((m.id, m.doc.as_ref().map(|d| d.kind), m.doc_path.clone()));
         let photo_viewer = m.photo_path.clone();
         // Voice note: toggling playback needs the path; the doc is downloaded
         // on first click (see the doc branch below).
@@ -1339,11 +1408,7 @@ impl State {
         }
         // Photo attached, and the row isn't a doc.
         if let Some(path) = photo_viewer {
-            if self
-                .messages
-                .get(row)
-                .is_some_and(|m| m.doc.is_none())
-            {
+            if self.messages.get(row).is_some_and(|m| m.doc.is_none()) {
                 self.viewer = Some(path);
             }
         }
@@ -1431,9 +1496,9 @@ impl State {
             .iter()
             .find(|m| m.id == msg_id)
             .is_some_and(|m| {
-                m.doc
-                    .as_ref()
-                    .is_some_and(|d| matches!(d.kind, crate::bridge::DocKind::Audio { voice: true }))
+                m.doc.as_ref().is_some_and(|d| {
+                    matches!(d.kind, crate::bridge::DocKind::Audio { voice: true })
+                })
             });
         if !is_voice {
             return;
@@ -1536,6 +1601,9 @@ impl State {
             return;
         }
         self.context_menu = None;
+        if self.react_row.take().is_some() {
+            return; // reaction strip closed itself
+        }
         if self.editing.is_some() {
             self.editing = None;
             self.composer.clear();
@@ -1713,6 +1781,41 @@ impl State {
             .is_some_and(|m| m.pinned)
     }
 
+    /// Click on the context menu React item: swap the menu for the floating
+    /// reaction strip anchored under the chosen message.
+    pub fn context_react(&mut self) {
+        let Some(menu) = self.context_menu.take() else {
+            return;
+        };
+        self.react_row = Some(menu.row);
+        self.invalidate_layout();
+    }
+
+    /// A reaction emoji was picked from the strip: send a toggle request for
+    /// the message under the strip, then close it.
+    pub fn react(&mut self, emoji: &str) {
+        let Some(row) = self.react_row.take() else {
+            return;
+        };
+        let Some(m) = self.messages.get(row) else {
+            self.invalidate_layout();
+            return;
+        };
+        let _ = self.req_tx.send(Request::SendReaction {
+            id: self.open_chat.unwrap_or(0),
+            msg_id: m.id,
+            emoji: emoji.to_string(),
+        });
+        self.invalidate_layout();
+    }
+
+    /// Close the reaction strip without reacting.
+    pub fn close_react(&mut self) {
+        if self.react_row.take().is_some() {
+            self.invalidate_layout();
+        }
+    }
+
     /// Click on the pinned banner: scroll to the pinned message.
     pub fn jump_to_pinned(&mut self) {
         let Some(pinned) = self.pinned_id else {
@@ -1776,7 +1879,9 @@ impl State {
     /// Submits the creation modal: sends the create request (groups carry the
     /// checked members) and closes the modal. Empty titles are ignored.
     pub fn submit_create(&mut self) {
-        let Some(kind) = self.create_dialog else { return };
+        let Some(kind) = self.create_dialog else {
+            return;
+        };
         let title = self.create_title.trim().to_string();
         if title.is_empty() {
             return;
@@ -1824,7 +1929,9 @@ impl State {
     /// dialog. The list itself refreshes when the network answers with
     /// `Dialogs` + `ChatGone`.
     pub fn confirm_yes(&mut self) {
-        let Some((kind, id)) = self.confirm_leave.take() else { return };
+        let Some((kind, id)) = self.confirm_leave.take() else {
+            return;
+        };
         let req = match kind {
             ConfirmKind::Leave => Request::LeaveChat { id },
             ConfirmKind::Delete => Request::DeleteChat { id },
@@ -1862,7 +1969,10 @@ impl State {
     pub fn toggle_mute(&mut self) {
         let Some(id) = self.open_chat else { return };
         self.muted = !self.muted;
-        let _ = self.req_tx.send(Request::SetMuted { id, muted: self.muted });
+        let _ = self.req_tx.send(Request::SetMuted {
+            id,
+            muted: self.muted,
+        });
     }
 
     /// "Remove" was clicked on a member row: arm the inline confirmation.
@@ -1941,8 +2051,16 @@ impl State {
             return;
         };
         let _ = self.req_tx.send(match kind {
-            AdminConfirm::Ban => Request::AdminBan { id, user_id, kick_only: false },
-            AdminConfirm::Remove => Request::AdminBan { id, user_id, kick_only: true },
+            AdminConfirm::Ban => Request::AdminBan {
+                id,
+                user_id,
+                kick_only: false,
+            },
+            AdminConfirm::Remove => Request::AdminBan {
+                id,
+                user_id,
+                kick_only: true,
+            },
         });
     }
 
@@ -1951,12 +2069,14 @@ impl State {
     // -----------------------------------------------------------------
 
     /// Thread membership, slice-1 style: the root row itself, or any message
-    /// whose reply header anchors it to the topic root. Server-side, every
-    /// message of a thread carries `reply_to_msg_id == topic id` (in-thread
-    /// replies add `reply_to_top_id` on top), and `MsgRow.reply_to` mirrors
-    /// exactly that field.
+    /// whose reply header anchors it to the topic root. Server-side, a
+    /// thread's *top-level* posts carry `reply_to_msg_id == topic id`; an
+    /// in-thread reply to another post points `reply_to_msg_id` at the post it
+    /// answers and only records the root in `reply_to_top_id`. Hence we must
+    /// match both, or everyone's nested replies get filtered out of the topic
+    /// view.
     fn topic_in_thread(m: &MsgRow, root: i32) -> bool {
-        m.id == root || m.reply_to == Some(root)
+        m.id == root || m.reply_to == Some(root) || m.reply_to_top == Some(root)
     }
 
     /// The visible subset of the history for a topic selection (`None` =
@@ -1983,12 +2103,13 @@ impl State {
             m.doc = row.doc;
             m.sticker = row.sticker;
             m.reply_to = row.reply_to;
+            m.reply_to_top = row.reply_to_top;
             m.forwarded_from = row.forwarded_from;
             m.uploading = None;
-        } else if let Some(i) = rows.iter().position(|m| {
-            m.id == 0
-                && (m.text == row.text || (m.uploading.is_some() && row.out))
-        }) {
+        } else if let Some(i) = rows
+            .iter()
+            .position(|m| m.id == 0 && (m.text == row.text || (m.uploading.is_some() && row.out)))
+        {
             let m = &mut rows[i];
             let optimistic = std::mem::replace(m, row);
             m.photo = optimistic.photo.or(m.photo.take());
@@ -2276,8 +2397,11 @@ impl State {
     /// image streams in via `StickerPathReady`.
     pub fn send_sticker(&mut self, set_idx: usize, doc_idx: usize) {
         let Some(id) = self.open_chat else { return };
-        let Some((doc_id, access_hash, alt)) =
-            self.sticker_sets.get(set_idx).and_then(|s| s.docs.get(doc_idx)).cloned()
+        let Some((doc_id, access_hash, alt)) = self
+            .sticker_sets
+            .get(set_idx)
+            .and_then(|s| s.docs.get(doc_idx))
+            .cloned()
         else {
             return;
         };
@@ -2286,7 +2410,11 @@ impl State {
             sticker: Some(StickerMeta { alt }),
             ..MsgRow::text(0, String::new(), 0, true)
         });
-        let _ = self.req_tx.send(Request::SendSticker { id, doc_id, access_hash });
+        let _ = self.req_tx.send(Request::SendSticker {
+            id,
+            doc_id,
+            access_hash,
+        });
         self.sticker_picker_open = false;
         self.scroll_to_bottom = true;
         self.invalidate_layout();
@@ -2325,12 +2453,16 @@ impl State {
                 // specific message keep the plain path: the server lands a
                 // reply in the thread of its target.
                 Some(root) if reply_to.is_none() => {
-                    let _ = self
-                        .req_tx
-                        .send(Request::SendTopicMessage { id, text, topic_root: root });
+                    let _ = self.req_tx.send(Request::SendTopicMessage {
+                        id,
+                        text,
+                        topic_root: root,
+                    });
                 }
                 _ => {
-                    let _ = self.req_tx.send(Request::SendMessage { id, text, reply_to });
+                    let _ = self
+                        .req_tx
+                        .send(Request::SendMessage { id, text, reply_to });
                 }
             }
             self.typing = false;
@@ -2425,7 +2557,7 @@ impl State {
         self.invalidate_layout();
     }
 
-/// Periodic tick (500 ms) while a voice note plays: advance the progress bar
+    /// Periodic tick (500 ms) while a voice note plays: advance the progress bar
     /// and clear the state once the audio thread reports the file finished.
     pub fn on_voice_tick(&mut self) {
         if self.playing_voice.is_none() {
@@ -2463,7 +2595,11 @@ impl State {
     /// [0, duration]. Live for inline playback; rewinds the simulation clock
     /// when progress is externally played.
     pub fn voice_seek(&mut self, secs: f32) {
-        let max = if self.voice_duration > 0.0 { self.voice_duration } else { secs };
+        let max = if self.voice_duration > 0.0 {
+            self.voice_duration
+        } else {
+            secs
+        };
         let t = secs.clamp(0.0, max);
         if crate::audio::is_active() {
             crate::audio::seek_to(t);
@@ -2489,6 +2625,7 @@ impl State {
         self.chat_title.clear();
         self.editing = None;
         self.context_menu = None;
+        self.react_row = None;
         self.reply_target = None;
         self.forward_pick = None;
         self.pending_jump_id = None;
@@ -2587,7 +2724,10 @@ impl State {
             Some(SearchMode::InChat) => self.open_chat,
             None => return,
         };
-        let _ = self.req_tx.send(Request::Search { id, query: q.to_string() });
+        let _ = self.req_tx.send(Request::Search {
+            id,
+            query: q.to_string(),
+        });
     }
 
     /// A result was clicked: jump to the message, or open its chat.
@@ -2596,9 +2736,7 @@ impl State {
             return;
         };
         // Jumping only works when the hit is the open chat's loaded history.
-        if self.search_mode == Some(SearchMode::InChat)
-            && self.open_chat == Some(hit.chat_id)
-        {
+        if self.search_mode == Some(SearchMode::InChat) && self.open_chat == Some(hit.chat_id) {
             if let Some(y) = self.message_top_of(hit.row.id) {
                 self.scroll_to_bottom = false;
                 self.scroll_target = Some(y);
@@ -2706,18 +2844,27 @@ mod tests {
         assert_eq!(state.pinned_id, None);
 
         // The network reports a pin in the open chat.
-        state.on_message(UiMessage::PinnedMessage { chat_id: 42, msg_id: Some(1) });
+        state.on_message(UiMessage::PinnedMessage {
+            chat_id: 42,
+            msg_id: Some(1),
+        });
         assert_eq!(state.pinned_id, Some(1));
         // Row flag synced.
         assert!(state.messages.iter().find(|m| m.id == 1).unwrap().pinned);
 
         // Unpin clears the banner and the row flag.
-        state.on_message(UiMessage::PinnedMessage { chat_id: 42, msg_id: None });
+        state.on_message(UiMessage::PinnedMessage {
+            chat_id: 42,
+            msg_id: None,
+        });
         assert_eq!(state.pinned_id, None);
         assert!(!state.messages.iter().find(|m| m.id == 1).unwrap().pinned);
 
         // A pin for another chat must not touch this one's banner.
-        state.on_message(UiMessage::PinnedMessage { chat_id: 7, msg_id: Some(2) });
+        state.on_message(UiMessage::PinnedMessage {
+            chat_id: 7,
+            msg_id: Some(2),
+        });
         assert_eq!(state.pinned_id, None);
     }
 
@@ -2730,7 +2877,14 @@ mod tests {
         state.context_pin();
         let reqs = drain(&mut req_rx);
         assert!(
-            reqs.iter().any(|r| matches!(r, Request::PinMessage { id: 42, msg_id: 1, pin: true })),
+            reqs.iter().any(|r| matches!(
+                r,
+                Request::PinMessage {
+                    id: 42,
+                    msg_id: 1,
+                    pin: true
+                }
+            )),
             "expected PinMessage request, got {reqs:?}"
         );
         assert_eq!(state.pinned_id, Some(1));
@@ -2742,7 +2896,14 @@ mod tests {
         state.context_pin();
         let reqs = drain(&mut req_rx);
         assert!(
-            reqs.iter().any(|r| matches!(r, Request::PinMessage { id: 42, msg_id: 1, pin: false })),
+            reqs.iter().any(|r| matches!(
+                r,
+                Request::PinMessage {
+                    id: 42,
+                    msg_id: 1,
+                    pin: false
+                }
+            )),
             "expected unpin request, got {reqs:?}"
         );
         assert_eq!(state.pinned_id, None);
@@ -2771,7 +2932,10 @@ mod tests {
         state.on_message(UiMessage::Messages {
             id: 43,
             title: "G".into(),
-            rows: vec![MsgRow { pinned: true, ..MsgRow::text(5, "topic", 10, false) }],
+            rows: vec![MsgRow {
+                pinned: true,
+                ..MsgRow::text(5, "topic", 10, false)
+            }],
         });
         assert_eq!(state.pinned_id, Some(5));
     }
@@ -2799,8 +2963,22 @@ mod tests {
         state.open_chat = None;
         state.initial_chat = Some(7);
         state.on_message(UiMessage::Dialogs(vec![
-            ChatRow { id: 1, title: "A".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
-            ChatRow { id: 7, title: "B".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
+            ChatRow {
+                id: 1,
+                title: "A".into(),
+                subtitle: String::new(),
+                date: 0,
+                unread: 0,
+                avatar_path: None,
+            },
+            ChatRow {
+                id: 7,
+                title: "B".into(),
+                subtitle: String::new(),
+                date: 0,
+                unread: 0,
+                avatar_path: None,
+            },
         ]));
         // The restore logic lives in the shell's `update`, so simulate the
         // fallback it applies when the persisted chat is in the list.
@@ -2811,7 +2989,9 @@ mod tests {
         assert_eq!(wanted, Some(7));
         state.open_chat(7);
         assert_eq!(state.open_chat, Some(7));
-        assert!(drain(&mut req_rx).iter().any(|r| matches!(r, Request::OpenChat { id: 7 })));
+        assert!(drain(&mut req_rx)
+            .iter()
+            .any(|r| matches!(r, Request::OpenChat { id: 7 })));
     }
 
     #[test]
@@ -2820,8 +3000,22 @@ mod tests {
         state.open_chat = None;
         state.initial_chat = Some(999); // not in the list anymore
         state.on_message(UiMessage::Dialogs(vec![
-            ChatRow { id: 1, title: "A".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
-            ChatRow { id: 2, title: "B".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
+            ChatRow {
+                id: 1,
+                title: "A".into(),
+                subtitle: String::new(),
+                date: 0,
+                unread: 0,
+                avatar_path: None,
+            },
+            ChatRow {
+                id: 2,
+                title: "B".into(),
+                subtitle: String::new(),
+                date: 0,
+                unread: 0,
+                avatar_path: None,
+            },
         ]));
         let wanted = state
             .initial_chat
@@ -2857,8 +3051,8 @@ mod tests {
     fn right_click_incoming_opens_menu_without_edit() {
         let (mut state, _) = demo_state();
         state.open_context(0); // row 0 is incoming
-        // The menu opens for any message now (reply/forward), but editing
-        // stays restricted to outgoing rows.
+                               // The menu opens for any message now (reply/forward), but editing
+                               // stays restricted to outgoing rows.
         assert!(state.context_menu.is_some());
         assert!(!state.context_can_edit());
     }
@@ -2926,9 +3120,11 @@ mod tests {
             photo: None,
             doc: None,
             reply_to: None,
+            reply_to_top: None,
             forwarded_from: None,
             sender_name: None,
             sender_id: None,
+            reactions: vec![],
             sticker: None,
         });
         assert_eq!(state.messages.len(), 3);
@@ -2956,16 +3152,21 @@ mod tests {
             photo: None,
             doc: None,
             reply_to: None,
+            reply_to_top: None,
             forwarded_from: None,
             sender_name: None,
             sender_id: None,
+            reactions: vec![],
             sticker: None,
         });
         // The open chat's rows must be untouched.
         assert_eq!(state.messages.len(), 2);
         assert_eq!(state.dialogs[0].subtitle, "ping");
         assert_eq!(state.dialogs[0].unread, 1);
-        assert!(!state.scroll_to_bottom, "other chat's message must not scroll");
+        assert!(
+            !state.scroll_to_bottom,
+            "other chat's message must not scroll"
+        );
     }
 
     #[test]
@@ -2986,9 +3187,11 @@ mod tests {
             photo: None,
             doc: None,
             reply_to: None,
+            reply_to_top: None,
             forwarded_from: None,
             sender_name: None,
             sender_id: None,
+            reactions: vec![],
             sticker: None,
         });
         // The update merged with the optimistic row: no duplicate.
@@ -3016,11 +3219,11 @@ mod tests {
     fn outbox_read_marks_only_the_open_chat_sent_messages() {
         let (mut state, _) = demo_state();
         state.messages.push(MsgRow {
-                ..MsgRow::text(55, "mine", 0, true)
-            });
+            ..MsgRow::text(55, "mine", 0, true)
+        });
         state.messages.push(MsgRow {
-                ..MsgRow::text(56, "mine too", 0, true)
-            });
+            ..MsgRow::text(56, "mine too", 0, true)
+        });
 
         // Read only up to id 55.
         state.on_message(UiMessage::OutboxRead {
@@ -3084,14 +3287,19 @@ mod tests {
             photo: None,
             doc: None,
             reply_to: None,
+            reply_to_top: None,
             forwarded_from: None,
             sender_name: None,
             sender_id: None,
+            reactions: vec![],
             sticker: None,
         });
         assert_eq!(state.dialogs[0].subtitle, "ping");
         assert_eq!(state.dialogs[0].unread, 1);
-        assert!(!state.scroll_to_bottom, "list view must not scroll messages");
+        assert!(
+            !state.scroll_to_bottom,
+            "list view must not scroll messages"
+        );
     }
 
     #[test]
@@ -3149,7 +3357,9 @@ mod tests {
         state.qr_started();
         assert_eq!(state.qr_stage, QrStage::AwaitingScan);
 
-        state.on_message(UiMessage::QrCodeReady { path: "/tmp/q.png".into() });
+        state.on_message(UiMessage::QrCodeReady {
+            path: "/tmp/q.png".into(),
+        });
         assert_eq!(state.qr_png_path.as_deref(), Some("/tmp/q.png"));
 
         // Leaving via the switcher stops the poller with no error shown.
@@ -3164,13 +3374,17 @@ mod tests {
         let (mut state, _) = demo_state();
         state.login_qr_selected = true;
         state.qr_started();
-        state.on_message(UiMessage::QrCodeReady { path: "/tmp/q.png".into() });
+        state.on_message(UiMessage::QrCodeReady {
+            path: "/tmp/q.png".into(),
+        });
         assert_eq!(state.qr_png_path.as_deref(), Some("/tmp/q.png"));
 
         state.on_message(UiMessage::QrScanConfirmed);
         assert_eq!(state.qr_stage, QrStage::ScanConfirmed);
 
-        state.on_message(UiMessage::LoginOk { name: "QR Demo".into() });
+        state.on_message(UiMessage::LoginOk {
+            name: "QR Demo".into(),
+        });
         assert!(state.authenticated);
         assert!(!state.login_qr_selected, "back on phone pane next login");
         assert_eq!(state.qr_stage, QrStage::Idle);
@@ -3182,7 +3396,9 @@ mod tests {
         let (mut state, _) = demo_state();
         state.login_qr_selected = true;
         state.qr_started();
-        state.on_message(UiMessage::QrCodeReady { path: "/tmp/q.png".into() });
+        state.on_message(UiMessage::QrCodeReady {
+            path: "/tmp/q.png".into(),
+        });
         state.on_message(UiMessage::QrLoginFailed {
             error: "QR sign-in failed".into(),
         });
@@ -3212,7 +3428,11 @@ mod tests {
         let reqs = drain(&mut req_rx);
         assert!(matches!(
             reqs.last(),
-            Some(Request::ForwardMessage { from_chat: 42, msg_id: 2, to_chat: 7 })
+            Some(Request::ForwardMessage {
+                from_chat: 42,
+                msg_id: 2,
+                to_chat: 7
+            })
         ));
         assert!(state.forward_pick.is_none(), "picker closes after send");
     }
@@ -3232,7 +3452,13 @@ mod tests {
         let token = last.upload_token.unwrap();
         let reqs = drain(&mut req_rx);
         match reqs.last() {
-            Some(Request::SendMedia { id: 42, path, is_photo, token: t, .. }) => {
+            Some(Request::SendMedia {
+                id: 42,
+                path,
+                is_photo,
+                token: t,
+                ..
+            }) => {
                 assert_eq!(path, "/tmp/vacances.png");
                 assert!(is_photo, "png must be detected as a photo");
                 assert_eq!(*t, token);
@@ -3241,7 +3467,11 @@ mod tests {
         }
 
         // Progress updates flow into the same row.
-        state.on_message(UiMessage::UploadProgress { chat_id: 42, token, progress: 0.5 });
+        state.on_message(UiMessage::UploadProgress {
+            chat_id: 42,
+            token,
+            progress: 0.5,
+        });
         assert_eq!(state.messages.last().unwrap().uploading, Some(0.5));
 
         // The server echo replaces the optimistic row.
@@ -3254,9 +3484,11 @@ mod tests {
             photo: Some((640, 480)),
             doc: None,
             reply_to: None,
+            reply_to_top: None,
             forwarded_from: None,
             sender_name: None,
             sender_id: None,
+            reactions: vec![],
             sticker: None,
         });
         assert_eq!(state.messages.len(), 3, "echo merges, no duplicate");
@@ -3276,7 +3508,10 @@ mod tests {
         let reqs = drain(&mut req_rx);
         assert!(matches!(
             reqs.last(),
-            Some(Request::SendMedia { is_photo: false, .. })
+            Some(Request::SendMedia {
+                is_photo: false,
+                ..
+            })
         ));
     }
 
@@ -3388,7 +3623,10 @@ mod tests {
             unread: 0,
             avatar_path: None,
         }]));
-        assert!(state.authenticated, "existing session must skip the login screen");
+        assert!(
+            state.authenticated,
+            "existing session must skip the login screen"
+        );
     }
 
     #[test]
@@ -3425,7 +3663,10 @@ mod tests {
         });
         assert!(!state.loading, "loading stops once history arrives");
         assert_eq!(state.messages.len(), 1);
-        assert!(state.scroll_to_bottom, "first history loads scroll to bottom");
+        assert!(
+            state.scroll_to_bottom,
+            "first history loads scroll to bottom"
+        );
         assert_eq!(state.chat_title, "Camille");
     }
 
@@ -3465,9 +3706,30 @@ mod tests {
 
     fn seed_dialogs(state: &mut State) {
         state.on_message(UiMessage::Dialogs(vec![
-            ChatRow { id: 1001, title: "Camille".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
-            ChatRow { id: 1002, title: "Rust Group".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
-            ChatRow { id: 1003, title: "Landscape Channel".into(), subtitle: String::new(), date: 0, unread: 0, avatar_path: None },
+            ChatRow {
+                id: 1001,
+                title: "Camille".into(),
+                subtitle: String::new(),
+                date: 0,
+                unread: 0,
+                avatar_path: None,
+            },
+            ChatRow {
+                id: 1002,
+                title: "Rust Group".into(),
+                subtitle: String::new(),
+                date: 0,
+                unread: 0,
+                avatar_path: None,
+            },
+            ChatRow {
+                id: 1003,
+                title: "Landscape Channel".into(),
+                subtitle: String::new(),
+                date: 0,
+                unread: 0,
+                avatar_path: None,
+            },
         ]));
     }
 
@@ -3480,7 +3742,10 @@ mod tests {
         assert!(state.create_menu_open, "+ picker menu opens");
         state.open_create(CreateKind::Group);
         assert_eq!(state.create_dialog, Some(CreateKind::Group));
-        assert!(!state.create_menu_open, "picker closes when the modal opens");
+        assert!(
+            !state.create_menu_open,
+            "picker closes when the modal opens"
+        );
         // Contacts seeded from the known dialogs, all unchecked.
         assert_eq!(state.member_pick.len(), 3);
         assert!(state.member_pick.iter().all(|(_, _, on)| !on));
@@ -3532,7 +3797,11 @@ mod tests {
 
         let reqs = drain(&mut req_rx);
         match reqs.last() {
-            Some(Request::CreateChannel { megagroup: true, members, .. }) => {
+            Some(Request::CreateChannel {
+                megagroup: true,
+                members,
+                ..
+            }) => {
                 assert_eq!(members, &[1001, 1003]);
             }
             other => panic!("expected group CreateChannel, got {other:?}"),
@@ -3615,11 +3884,13 @@ mod tests {
         assert!(state.info_open, "panel open");
         let reqs = drain(&mut req_rx);
         assert!(
-            reqs.iter().any(|r| matches!(r, Request::GetChatInfo { id: 42 })),
+            reqs.iter()
+                .any(|r| matches!(r, Request::GetChatInfo { id: 42 })),
             "expected GetChatInfo, got {reqs:?}"
         );
         assert!(
-            reqs.iter().any(|r| matches!(r, Request::GetParticipants { id: 42 })),
+            reqs.iter()
+                .any(|r| matches!(r, Request::GetParticipants { id: 42 })),
             "expected GetParticipants, got {reqs:?}"
         );
     }
@@ -3664,7 +3935,13 @@ mod tests {
         state.kick_confirmed();
         let reqs = drain(&mut req_rx);
         assert!(
-            reqs.iter().any(|r| matches!(r, Request::KickParticipant { id: 42, user_id: 2002 })),
+            reqs.iter().any(|r| matches!(
+                r,
+                Request::KickParticipant {
+                    id: 42,
+                    user_id: 2002
+                }
+            )),
             "expected KickParticipant, got {reqs:?}"
         );
         assert_eq!(state.participants.len(), 2);
@@ -3747,14 +4024,26 @@ mod tests {
         state.admin_action(2002, AdminAction::Promote);
         assert!(state.admin_menu.is_none(), "menu closes");
         assert!(
-            drain(&mut req_rx).iter().any(|r| matches!(r, Request::AdminPromote { id: 42, user_id: 2002 })),
+            drain(&mut req_rx).iter().any(|r| matches!(
+                r,
+                Request::AdminPromote {
+                    id: 42,
+                    user_id: 2002
+                }
+            )),
             "expected AdminPromote"
         );
 
         state.admin_open_menu(2003);
         state.admin_action(2003, AdminAction::Demote);
         assert!(
-            drain(&mut req_rx).iter().any(|r| matches!(r, Request::AdminDemote { id: 42, user_id: 2003 })),
+            drain(&mut req_rx).iter().any(|r| matches!(
+                r,
+                Request::AdminDemote {
+                    id: 42,
+                    user_id: 2003
+                }
+            )),
             "expected AdminDemote"
         );
     }
@@ -3763,9 +4052,10 @@ mod tests {
     fn admin_ban_and_remove_go_through_inline_confirmation() {
         let (mut state, mut req_rx) = demo_state();
         state.open_info();
-        state.on_message(UiMessage::Participants(vec![
-            part(2002, crate::bridge::ParticipantRole::Member),
-        ]));
+        state.on_message(UiMessage::Participants(vec![part(
+            2002,
+            crate::bridge::ParticipantRole::Member,
+        )]));
         drain(&mut req_rx);
 
         // Ban arms the confirmation; nothing is sent yet.
@@ -3785,7 +4075,14 @@ mod tests {
         assert_eq!(state.admin_confirm, Some((AdminConfirm::Remove, 2002)));
         state.admin_confirmed();
         assert!(
-            drain(&mut req_rx).iter().any(|r| matches!(r, Request::AdminBan { id: 42, user_id: 2002, kick_only: true })),
+            drain(&mut req_rx).iter().any(|r| matches!(
+                r,
+                Request::AdminBan {
+                    id: 42,
+                    user_id: 2002,
+                    kick_only: true
+                }
+            )),
             "expected AdminBan kick_only=true"
         );
         assert_eq!(state.admin_confirm, None);
@@ -3795,7 +4092,14 @@ mod tests {
         state.admin_action(2002, AdminAction::Ban);
         state.admin_confirmed();
         assert!(
-            drain(&mut req_rx).iter().any(|r| matches!(r, Request::AdminBan { id: 42, user_id: 2002, kick_only: false })),
+            drain(&mut req_rx).iter().any(|r| matches!(
+                r,
+                Request::AdminBan {
+                    id: 42,
+                    user_id: 2002,
+                    kick_only: false
+                }
+            )),
             "expected AdminBan kick_only=false"
         );
     }
@@ -3806,14 +4110,22 @@ mod tests {
         state.open_info();
         drain(&mut req_rx);
 
-        state.on_message(UiMessage::MemberUpdated { chat_id: 42, user_id: 2002 });
+        state.on_message(UiMessage::MemberUpdated {
+            chat_id: 42,
+            user_id: 2002,
+        });
         assert!(
-            drain(&mut req_rx).iter().any(|r| matches!(r, Request::GetParticipants { id: 42 })),
+            drain(&mut req_rx)
+                .iter()
+                .any(|r| matches!(r, Request::GetParticipants { id: 42 })),
             "expected the member list to be re-requested"
         );
 
         // Another chat's update must not touch this panel.
-        state.on_message(UiMessage::MemberUpdated { chat_id: 99, user_id: 2002 });
+        state.on_message(UiMessage::MemberUpdated {
+            chat_id: 99,
+            user_id: 2002,
+        });
         assert!(drain(&mut req_rx).is_empty());
     }
 
@@ -3821,9 +4133,10 @@ mod tests {
     fn escape_closes_admin_menu_before_the_info_panel() {
         let (mut state, _) = demo_state();
         state.open_info();
-        state.on_message(UiMessage::Participants(vec![
-            part(2002, crate::bridge::ParticipantRole::Member),
-        ]));
+        state.on_message(UiMessage::Participants(vec![part(
+            2002,
+            crate::bridge::ParticipantRole::Member,
+        )]));
         state.admin_open_menu(2002);
 
         state.escape();
@@ -3852,7 +4165,9 @@ mod tests {
         assert!(!state.muted);
         let reqs = drain(&mut req_rx);
         assert_eq!(
-            reqs.iter().filter(|r| matches!(r, Request::SetMuted { id: 42, .. })).count(),
+            reqs.iter()
+                .filter(|r| matches!(r, Request::SetMuted { id: 42, .. }))
+                .count(),
             2
         );
     }
@@ -3862,12 +4177,14 @@ mod tests {
         let (mut state, _) = demo_state();
         state.open_info();
         state.on_message(UiMessage::ChatInfo(group_detail(42)));
-        state.on_message(UiMessage::Participants(vec![crate::bridge::ParticipantRow {
-            id: 2001,
-            name: "Camille".into(),
-            username: None,
-            role: crate::bridge::ParticipantRole::Creator,
-        }]));
+        state.on_message(UiMessage::Participants(vec![
+            crate::bridge::ParticipantRow {
+                id: 2001,
+                name: "Camille".into(),
+                username: None,
+                role: crate::bridge::ParticipantRole::Creator,
+            },
+        ]));
         state.kick(2001);
         assert!(state.info_open && !state.participants.is_empty());
         assert!(!state.muted);
@@ -3887,12 +4204,14 @@ mod tests {
     fn escape_closes_kick_confirm_then_info_panel() {
         let (mut state, _) = demo_state();
         state.open_info();
-        state.on_message(UiMessage::Participants(vec![crate::bridge::ParticipantRow {
-            id: 2001,
-            name: "Camille".into(),
-            username: None,
-            role: crate::bridge::ParticipantRole::Creator,
-        }]));
+        state.on_message(UiMessage::Participants(vec![
+            crate::bridge::ParticipantRow {
+                id: 2001,
+                name: "Camille".into(),
+                username: None,
+                role: crate::bridge::ParticipantRole::Creator,
+            },
+        ]));
         state.kick(2001);
 
         // First Escape cancels only the inline confirmation.
@@ -3964,11 +4283,17 @@ mod tests {
         state.pick_emoji("😀".into());
         state.pick_emoji("🎉".into());
         assert_eq!(state.composer, "hi 😀🎉");
-        assert_eq!(state.emoji_recents, vec!["🎉".to_string(), "😀".to_string()]);
+        assert_eq!(
+            state.emoji_recents,
+            vec!["🎉".to_string(), "😀".to_string()]
+        );
 
         // Picking an existing emoji moves it to the front instead of duping.
         state.pick_emoji("😀".into());
-        assert_eq!(state.emoji_recents, vec!["😀".to_string(), "🎉".to_string()]);
+        assert_eq!(
+            state.emoji_recents,
+            vec!["😀".to_string(), "🎉".to_string()]
+        );
     }
 
     #[test]
@@ -3992,7 +4317,10 @@ mod tests {
 
         assert!(read_emoji_recents_at(&path).is_empty());
         write_emoji_recents_at(&path, &["🎉".into(), "😀".into()]);
-        assert_eq!(read_emoji_recents_at(&path), vec!["🎉".to_string(), "😀".to_string()]);
+        assert_eq!(
+            read_emoji_recents_at(&path),
+            vec!["🎉".to_string(), "😀".to_string()]
+        );
         // A missing/corrupt file must never crash: empty list fallback.
         std::fs::write(&path, "").unwrap();
         assert!(read_emoji_recents_at(&path).is_empty());
@@ -4092,7 +4420,11 @@ mod tests {
         assert!(
             matches!(
                 reqs.last(),
-                Some(Request::SendSticker { id: 42, doc_id: 900_000_002, access_hash: 22 })
+                Some(Request::SendSticker {
+                    id: 42,
+                    doc_id: 900_000_002,
+                    access_hash: 22
+                })
             ),
             "expected SendSticker with the picked doc, got {reqs:?}"
         );
@@ -4113,22 +4445,31 @@ mod tests {
             doc: None,
             sticker: Some(StickerMeta { alt: "⭐".into() }),
             reply_to: None,
+            reply_to_top: None,
             forwarded_from: None,
             sender_name: None,
             sender_id: None,
+            reactions: vec![],
         });
         assert!(
             !state.messages.iter().any(|m| m.id == 0),
             "optimistic row merged"
         );
-        let merged = state.messages.iter().find(|m| m.id == 777).expect("echo row");
+        let merged = state
+            .messages
+            .iter()
+            .find(|m| m.id == 777)
+            .expect("echo row");
         assert_eq!(merged.sticker.as_ref().map(|s| s.alt.as_str()), Some("⭐"));
         // The merge arms the image download for the merged row.
         let reqs = drain(&mut req_rx);
         assert!(
             matches!(
                 reqs.last(),
-                Some(Request::DownloadSticker { chat_id: 42, msg_id: 777 })
+                Some(Request::DownloadSticker {
+                    chat_id: 42,
+                    msg_id: 777
+                })
             ),
             "expected DownloadSticker for the merged row, got {reqs:?}"
         );
@@ -4156,11 +4497,17 @@ mod tests {
             doc: None,
             sticker: Some(StickerMeta { alt: "🎉".into() }),
             reply_to: None,
+            reply_to_top: None,
             forwarded_from: None,
             sender_name: None,
             sender_id: None,
+            reactions: vec![],
         });
-        let row = state.messages.iter().find(|m| m.id == 900).expect("row pushed");
+        let row = state
+            .messages
+            .iter()
+            .find(|m| m.id == 900)
+            .expect("row pushed");
         assert_eq!(row.sticker.as_ref().map(|s| s.alt.as_str()), Some("🎉"));
         assert!(row.doc.is_none(), "stickers are not document cards");
         assert!(preview_text("", &None, &None, &row.sticker).contains("🎉"));
@@ -4224,10 +4571,7 @@ mod tests {
             bio: None,
         }));
         assert_eq!(state.edit_name, "Typed");
-        assert_eq!(
-            state.my_profile.as_ref().unwrap().name,
-            "Demo User"
-        );
+        assert_eq!(state.my_profile.as_ref().unwrap().name, "Demo User");
     }
 
     #[test]
@@ -4360,7 +4704,10 @@ mod tests {
         state.edit_name = "Demo".into();
         state.search_mode = Some(SearchMode::Global);
         state.search_query = "rust".into();
-        state.reply_target = Some(ReplyTarget { msg_id: 1, snippet: "s".into() });
+        state.reply_target = Some(ReplyTarget {
+            msg_id: 1,
+            snippet: "s".into(),
+        });
         state.scroll_offset = 250.0;
         let epoch_before = state.layout_epoch;
 
@@ -4477,8 +4824,7 @@ mod tests {
             },
             MsgRow::text(50, "general row", 120, false),
         ];
-        state.messages =
-            State::topic_view(&state.topic_all_messages, state.topic_selected);
+        state.messages = State::topic_view(&state.topic_all_messages, state.topic_selected);
         (state, req_rx)
     }
 
@@ -4568,8 +4914,14 @@ mod tests {
         state.submit();
         let reqs = drain(&mut req_rx);
         assert!(
-            reqs.iter().any(|r| matches!(r,
-                Request::SendTopicMessage { id: 1002, topic_root: 20, .. })),
+            reqs.iter().any(|r| matches!(
+                r,
+                Request::SendTopicMessage {
+                    id: 1002,
+                    topic_root: 20,
+                    ..
+                }
+            )),
             "expected SendTopicMessage, got {reqs:?}"
         );
         // The optimistic row landed in the view AND the full history.
@@ -4591,14 +4943,20 @@ mod tests {
             doc: None,
             sticker: None,
             reply_to: Some(20),
+            reply_to_top: Some(20),
             forwarded_from: None,
             sender_name: None,
             sender_id: None,
+            reactions: vec![],
         });
         assert!(state.messages.iter().all(|m| m.id != 0), "row deduped");
         assert!(state.topic_all_messages.iter().all(|m| m.id != 0));
         assert_eq!(
-            state.messages.iter().find(|m| m.id == 70).map(|m| m.reply_to),
+            state
+                .messages
+                .iter()
+                .find(|m| m.id == 70)
+                .map(|m| m.reply_to),
             Some(Some(20))
         );
 
@@ -4607,14 +4965,12 @@ mod tests {
         state.composer = "general".into();
         state.submit();
         let reqs = drain(&mut req_rx);
-        assert!(
-            reqs.iter()
-                .any(|r| matches!(r, Request::SendMessage { id: 1002, .. }))
-        );
-        assert!(
-            !reqs.iter()
-                .any(|r| matches!(r, Request::SendTopicMessage { .. }))
-        );
+        assert!(reqs
+            .iter()
+            .any(|r| matches!(r, Request::SendMessage { id: 1002, .. })));
+        assert!(!reqs
+            .iter()
+            .any(|r| matches!(r, Request::SendTopicMessage { .. })));
     }
 
     #[test]
@@ -4653,9 +5009,11 @@ mod tests {
             doc: None,
             sticker: None,
             reply_to: None,
+            reply_to_top: None,
             forwarded_from: None,
             sender_name: None,
             sender_id: None,
+            reactions: vec![],
         });
         // Recorded in the full history, kept out of the filtered view.
         assert!(state.topic_all_messages.iter().any(|m| m.id == 80));
@@ -4664,6 +5022,42 @@ mod tests {
         // Selecting its topic would surface it (thread rows only).
         state.topic_select(None);
         assert!(state.messages.iter().any(|m| m.id == 80));
+    }
+
+    #[test]
+    fn topic_in_thread_keeps_nested_replies_from_everyone() {
+        // Real forum threads: a top-level post carries `reply_to == root`,
+        // but a reply *inside* the thread to another post only records the
+        // root in `reply_to_top`. Only matching both keeps other users'
+        // nested replies in the topic view (bug: only the current user's
+        // messages used to show up).
+        let mut root = MsgRow::text(1002, "topic root", 10, true);
+        root.id = 20;
+        assert!(State::topic_in_thread(&root, 20), "the root row itself");
+
+        let mut nested = MsgRow::text(1002, "reply to a post", 11, false);
+        nested.id = 71;
+        nested.reply_to = Some(55);
+        nested.reply_to_top = Some(20);
+        assert!(
+            State::topic_in_thread(&nested, 20),
+            "in-thread reply surfaces via reply_to_top even with reply_to != root"
+        );
+
+        let mut top_post = MsgRow::text(1002, "top-level post", 12, false);
+        top_post.id = 72;
+        top_post.reply_to = Some(20);
+        assert!(
+            State::topic_in_thread(&top_post, 20),
+            "top-level post via reply_to"
+        );
+
+        let mut general = MsgRow::text(1002, "unrelated", 13, false);
+        general.id = 73;
+        assert!(
+            !State::topic_in_thread(&general, 20),
+            "unrelated message stays out"
+        );
     }
 
     #[test]

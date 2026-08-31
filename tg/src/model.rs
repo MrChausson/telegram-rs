@@ -18,18 +18,40 @@ pub struct ChatInfo {
 /// Kind of media attached to a message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MediaKind {
-    Photo { width: u32, height: u32 },
+    Photo {
+        width: u32,
+        height: u32,
+    },
     /// A generic file (document): original file name and byte size.
-    Document { name: String, size: i64 },
+    Document {
+        name: String,
+        size: i64,
+    },
     /// A video message (document + video attributes).
-    Video { name: String, size: i64, duration: f64 },
+    Video {
+        name: String,
+        size: i64,
+        duration: f64,
+    },
     /// An animated GIF (document + animated attribute).
-    Gif { name: String, size: i64 },
+    Gif {
+        name: String,
+        size: i64,
+    },
     /// An audio file or voice note (document + audio attributes).
-    Audio { name: String, size: i64, voice: bool, duration: f64 },
+    Audio {
+        name: String,
+        size: i64,
+        voice: bool,
+        duration: f64,
+    },
     /// A sticker (document + sticker attribute): associated emoji, byte size
     /// and the original file name (usually empty for stickers).
-    Sticker { name: String, size: i64, alt: String },
+    Sticker {
+        name: String,
+        size: i64,
+        alt: String,
+    },
 }
 
 /// One sticker document inside a set (`messages.getAllStickers` listing).
@@ -61,6 +83,16 @@ pub struct ForwardInfo {
     pub name: Option<String>,
 }
 
+/// A reaction received on a message, as a renderable emoji chip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReactionInfo {
+    pub emoji: String,
+    pub count: u32,
+    /// True when this reaction was given by the current account (so a toggle
+    /// can be offered later).
+    pub mine: bool,
+}
+
 /// A message from a chat (history).
 #[derive(Debug, Clone)]
 pub struct MessageInfo {
@@ -72,8 +104,18 @@ pub struct MessageInfo {
     pub out: bool,
     /// Media attached to the message, if any.
     pub media: Option<MediaKind>,
+    /// Reactions received on the message, as emoji chips (most frequent
+    /// first, as Telegram orders the server-side list).
+    pub reactions: Vec<ReactionInfo>,
     /// Id of the message this one replies to, if any.
     pub reply_to: Option<i32>,
+    /// Id of the topic/thread root a message belongs to, when it lives inside
+    /// a forum topic (`reply_to_top_id`). In a thread, top-level posts carry
+    /// `reply_to_msg_id == topic id` while *in-thread* replies point their
+    /// `reply_to` at the message they answer and only record the root here —
+    /// so a topic filter must consult this field, or it drops everyone's
+    /// nested replies.
+    pub reply_to_top: Option<i32>,
     /// Forward header, if the message was forwarded from somewhere.
     pub forwarded: Option<ForwardInfo>,
     /// Display name of the sender in group chats (`None` in private chats
