@@ -8,7 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [v0.11.0] - 2026-08-31
 
+### Added
+- **Message reactions**: right-click a message → **React** opens a quick-reaction
+  strip (9 emojis) with a **+** button that expands a picker of 40+ emojis;
+  clicking one sends the Telegram reaction. Strip emojis render via the
+  color-emoji font and the strip closes on an outside click.
+- **Existing reactions** on a message are displayed as emoji chips under it
+  (highlighted when the current account reacted).
+
+### Fixed
+- **Forum-topic threading**: an in-thread reply to *another* post is now kept
+  in the topic view even when it isn't also a reply to the topic root (reads
+  the thread root `reply_to_top_id`).
+
 ## [v0.10.4] - 2026-08-31
+
+### Added
+- **Loading-chats state** shown while the dialog list first loads.
+- **Demo**: realistic letter avatars (avatar fallback) instead of abstract shapes.
+- **README**: AUR install guide + polished app screenshots.
+
+### Fixed
+- **QR login on account migration**: when the session is migrated to a new DC
+  (`MigrateTo`), the home DC and login token are now repointed to the migrated
+  DC and the token imported there, so QR login no longer stalls. QR-poll
+  outcomes are traced to surface stuck logins.
 
 ## [v0.10.3] - 2026-08-30
 

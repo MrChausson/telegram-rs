@@ -191,6 +191,15 @@ you measure garbage). Use it before blaming the loop.
 
 - Update `CHANGELOG.md` (Unreleased) on any user-facing change (features/fixes/
   perf); keep section order huge→fixed→performance.
+- **RELEASE TRAP — keep `## [Unreleased]` filled.** Release notes are NOT
+  auto-generated: `scripts/release-bump.py` only rotates whatever bullet points
+  are hand-written under `## [Unreleased]` into the new version's section (and
+  the GitHub release body). If `Unreleased` is empty when a release is cut, the
+  changelog entry AND the published release body go out **empty** (this
+  happened for v0.10.4 & v0.11.0 in 2026-08). Before merging ANY user-facing
+  PR, add its bullet under `## [Unreleased]` in the same commit the change
+  lands — never leave it for the release step, and never merge a feature PR
+  while `## [Unreleased]` still has nothing under it.
 - Commit messages are single-line conventional commits; perf work adds a body
   with measured numbers (before → after) so history stays the source of truth.
 - CI runs `cargo test --workspace` and a release build (`.github/workflows/`).
