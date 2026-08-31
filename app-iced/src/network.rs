@@ -15,7 +15,7 @@ use grammers_session::types::PeerRef;
 use grammers_session::updates::UpdatesLike;
 use tg::client::Telegram;
 use tg::session::load_or_new;
-use tg::auth::{export_login_token, import_login_token};
+use tg::auth::{export_login_token, import_login_token, import_login_token_in_dc};
 use grammers_client::tl;
 use tokio::sync::mpsc;
 
@@ -1869,6 +1869,11 @@ fn start_qr_login(
     tokio::spawn(async move {
         use std::sync::atomic::Ordering;
         let mut current: Option<Vec<u8>> = None;
+        // DC to import the login token on. `None` = home DC (default). Set once
+        // the server answers `LoginTokenMigrateTo` so subsequent imports are
+        // sent to the datacenter that actually owns the token (a token imported
+        // on the wrong DC never reaches `Success`).
+        let mut login_dc: Option<i32> = None;
         // Backoff grows while polls keep failing; the QR stays visible so a
         // scan still works even if the server is momentarily rejecting polls.
         let mut backoff = QR_POLL_INTERVAL;
@@ -1887,7 +1892,10 @@ fn start_qr_login(
             }
             let res = match current.as_ref() {
                 None => export_login_token(&client, api_id, &api_hash).await,
-                Some(bytes) => import_login_token(&client, bytes.clone()).await,
+                Some(bytes) => match login_dc {
+                    Some(dc) => import_login_token_in_dc(&client, dc, bytes.clone()).await,
+                    None => import_login_token(&client, bytes.clone()).await,
+                },
             };
             match res {
                 Ok(tl::enums::auth::LoginToken::Token(tok)) => {
@@ -1940,7 +1948,7 @@ fn start_qr_login(
                         }
                     } else {
                         unchanged += 1;
-                        if unchanged % QR_LOG_UNCHANGED_EVERY == 0 {
+                        if unchanged.is_multiple_of(QR_LOG_UNCHANGED_EVERY) {
                             eprintln!(
                                 "[telegram-rs] qr: same token still pending (poll #{unchanged})"
                             );
@@ -1950,14 +1958,16 @@ fn start_qr_login(
                 Ok(tl::enums::auth::LoginToken::MigrateTo(mig)) => {
                     consecutive_errors = 0;
                     backoff = QR_POLL_INTERVAL;
-                    // `mig.dc_id` is intentionally ignored: the client's
-                    // sender pool re-targets on the next invoke (grammers
-                    // follows the migration error path), so we just keep
-                    // polling with the migrated token.
+                    // The token belongs to `mig.dc_id`, not the home DC. Import
+                    // it on that DC; importing it here would keep failing
+                    // forever ("importing login token") because the account was
+                    // migrated. `login_dc` sticks for the rest of the login so
+                    // every subsequent poll targets the right DC until Success.
+                    login_dc = Some(mig.dc_id);
                     current = Some(mig.token.clone());
                     eprintln!(
-                        "[telegram-rs] qr: server asked to migrate to DC {} (token {}), \
-                         re-polling migrated token",
+                        "[telegram-rs] qr: server asked to migrate login to DC {} \
+                         (token {}), now importing there",
                         mig.dc_id,
                         short_hash(&mig.token)
                     );
@@ -1980,6 +1990,7 @@ fn start_qr_login(
                     // server-side: drop it so we re-export a fresh one.
                     if consecutive_errors >= QR_REFRESH_AFTER_ERRORS {
                         current = None;
+                        login_dc = None;
                         consecutive_errors = 0;
                     }
                     backoff = (backoff * 2).min(QR_POLL_MAX_BACKOFF);

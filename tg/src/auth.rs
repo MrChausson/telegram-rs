@@ -77,6 +77,20 @@ impl Telegram {
     pub async fn import_login_token(&self, token: Vec<u8>) -> Result<tl::enums::auth::LoginToken> {
         import_login_token(self.client(), token).await
     }
+
+    /// Re-imports a QR-login token on a specific DC, following a
+    /// `auth.LoginTokenMigrateTo` response. Telegram binds a login token to
+    /// the DC whose session list owns the account; importing it on any other
+    /// DC keeps returning errors (or stale tokens) and the login never
+    /// completes. Issues the request on `dc_id` so the poller can finish the
+    /// QR sign-in where it actually lives.
+    pub async fn import_login_token_in_dc(
+        &self,
+        dc_id: i32,
+        token: Vec<u8>,
+    ) -> Result<tl::enums::auth::LoginToken> {
+        import_login_token_in_dc(self.client(), dc_id, token).await
+    }
 }
 
 /// Raw `auth.exportLoginToken`. Free-standing over any [`Client`] because
@@ -105,4 +119,20 @@ pub async fn import_login_token(
         .invoke(&tl::functions::auth::ImportLoginToken { token })
         .await
         .context("importing login token")
+}
+
+/// Raw `auth.importLoginToken` on a specific DC, following a migration.
+///
+/// grammers `Client::invoke_in_dc` numbers the request for `dc_id`;
+/// the sender pool connects there (or reuses an existing connection) and
+/// runs the MTProto authorization key handshake for that DC as needed.
+pub async fn import_login_token_in_dc(
+    client: &Client,
+    dc_id: i32,
+    token: Vec<u8>,
+) -> Result<tl::enums::auth::LoginToken> {
+    client
+        .invoke_in_dc(dc_id, &tl::functions::auth::ImportLoginToken { token })
+        .await
+        .context("importing login token after DC migration")
 }
