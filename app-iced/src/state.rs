@@ -994,6 +994,12 @@ impl State {
                     self.scroll_to_bottom = true;
                     if !out {
                         self.typing = false;
+                        // MarkRead is only sent once, on open. Without this,
+                        // a message that arrives while the chat is already
+                        // open is merged into the view but never marked read
+                        // server-side — the sender's read receipt only updates
+                        // after closing and reopening the chat.
+                        let _ = self.req_tx.send(Request::MarkRead { id: chat_id });
                     }
                     self.invalidate_layout();
                     return;
@@ -3159,6 +3165,72 @@ mod tests {
         assert_eq!(state.messages.len(), 3);
         assert!(!state.typing);
         assert!(state.scroll_to_bottom, "new message must scroll to bottom");
+    }
+
+    #[test]
+    fn incoming_message_in_the_open_chat_re_marks_it_read() {
+        let (mut state, mut req_rx) = demo_state();
+        let _ = drain(&mut req_rx); // drop nothing sent during setup
+        state.on_message(UiMessage::NewMessage {
+            chat_id: 42,
+            id: 13,
+            text: "hi".into(),
+            code: vec![],
+            date: 0,
+            out: false,
+            photo: None,
+            doc: None,
+            reply_to: None,
+            reply_to_top: None,
+            forwarded_from: None,
+            sender_name: None,
+            sender_id: None,
+            reactions: vec![],
+            sticker: None,
+        });
+        // The user is looking at this chat: the incoming message must be
+        // re-marked read server-side (not just rendered).
+        let reqs = drain(&mut req_rx);
+        assert!(
+            reqs.iter().any(|r| matches!(r, Request::MarkRead { id: 42 })),
+            "live message in the open chat must re-send MarkRead"
+        );
+    }
+
+    #[test]
+    fn no_mark_read_for_a_message_in_a_non_open_chat() {
+        let (mut state, mut req_rx) = demo_state();
+        state.dialogs = vec![ChatRow {
+            id: 7,
+            title: "Other".into(),
+            subtitle: String::new(),
+            date: 0,
+            unread: 0,
+            avatar_path: None,
+        }];
+        let _ = drain(&mut req_rx);
+        state.on_message(UiMessage::NewMessage {
+            chat_id: 7,
+            id: 9,
+            text: "ping".into(),
+            code: vec![],
+            date: 0,
+            out: false,
+            photo: None,
+            doc: None,
+            reply_to: None,
+            reply_to_top: None,
+            forwarded_from: None,
+            sender_name: None,
+            sender_id: None,
+            reactions: vec![],
+            sticker: None,
+        });
+        let reqs = drain(&mut req_rx);
+        assert!(
+            !reqs.iter().any(|r| matches!(r, Request::MarkRead { id: 7 })),
+            "message in a non-open chat must not be marked read"
+        );
     }
 
     #[test]
