@@ -409,6 +409,7 @@ pub enum Message {
     CloseInfo,
     /// The info panel's Mute button was pressed.
     ToggleMute,
+    ToggleBlock,
     /// The @username line in the info panel was clicked (copy).
     CopyUsername,
     /// "Remove" was clicked on a member row (arms the inline confirmation).
@@ -649,6 +650,7 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         }
         Message::CloseInfo => state.close_info(),
         Message::ToggleMute => state.toggle_mute(),
+        Message::ToggleBlock => state.toggle_block(),
         Message::CopyUsername => {
             if let Some(handle) = state.copy_username() {
                 return iced::clipboard::write::<Message>(handle);
@@ -2401,33 +2403,49 @@ fn info_panel(state: &State) -> Element<'_> {
         }
     }
 
-    // Quick actions: mute toggle + in-chat search.
-    col = col.push(
-        row![
+    // Quick actions: mute toggle + in-chat search (+ block for private users).
+    let is_user = matches!(detail.map(|d| d.kind), Some(ChatKind::User));
+    let mut quick_actions: Vec<Element<'_>> = vec![
+        button(
+            text(if state.muted { "Unmute" } else { "Mute" })
+                .size(theme::font::TIMESTAMP)
+                .color(rgb(theme::ICON())),
+        )
+        .on_press(Message::ToggleMute)
+        .padding([6, 12])
+        .style(flat_button)
+        .into(),
+    ];
+    if is_user {
+        quick_actions.push(
             button(
-                text(if state.muted { "Unmute" } else { "Mute" })
+                text(if state.blocked { "Unblock" } else { "Block" })
                     .size(theme::font::TIMESTAMP)
                     .color(rgb(theme::ICON())),
             )
-            .on_press(Message::ToggleMute)
+            .on_press(Message::ToggleBlock)
             .padding([6, 12])
-            .style(flat_button),
-            button(
-                row![
-                    icon(Icon::Search, theme::ICON(), 14.0),
-                    text("Search in chat")
-                        .size(theme::font::TIMESTAMP)
-                        .color(rgb(theme::ICON())),
-                ]
-                .spacing(6)
-                .align_y(Alignment::Center),
-            )
-            .on_press(Message::OpenInChatSearch)
-            .padding([6, 12])
-            .style(flat_button),
-        ]
-        .spacing(8),
+            .style(flat_button)
+            .into(),
+        );
+    }
+    quick_actions.push(
+        button(
+            row![
+                icon(Icon::Search, theme::ICON(), 14.0),
+                text("Search in chat")
+                    .size(theme::font::TIMESTAMP)
+                    .color(rgb(theme::ICON())),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .on_press(Message::OpenInChatSearch)
+        .padding([6, 12])
+        .style(flat_button)
+        .into(),
     );
+    col = col.push(row(quick_actions).spacing(8));
 
     // Members section (groups/channels only).
     let show_members = matches!(

@@ -444,6 +444,9 @@ pub struct State {
     pub admin_self_id: Option<i64>,
     /// Local mute flag of the open chat (optimistic; drives the button label).
     pub muted: bool,
+    /// Whether the open chat's user is blocked (toggled via the info panel;
+    /// optimistic mirror of the server-side block state).
+    pub blocked: bool,
 
     // -----------------------------------------------------------------
     // Forum topics (chips bar of forum supergroups; namespaced `topic_`)
@@ -637,6 +640,7 @@ impl State {
             admin_confirm: None,
             admin_self_id: None,
             muted: false,
+            blocked: false,
             topic_topics: Vec::new(),
             topic_is_forum: false,
             topic_selected: None,
@@ -2009,6 +2013,17 @@ impl State {
         let _ = self.req_tx.send(Request::SetMuted {
             id,
             muted: self.muted,
+        });
+    }
+
+    /// "Block"/"Unblock" clicked in a user chat's info panel: flip the local
+    /// flag optimistically and push the request.
+    pub fn toggle_block(&mut self) {
+        let Some(id) = self.open_chat else { return };
+        self.blocked = !self.blocked;
+        let _ = self.req_tx.send(Request::SetBlocked {
+            id,
+            blocked: self.blocked,
         });
     }
 
@@ -4348,6 +4363,29 @@ mod tests {
                 .filter(|r| matches!(r, Request::SetMuted { id: 42, .. }))
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn toggle_block_flips_and_sends() {
+        let (mut state, mut req_rx) = demo_state();
+        assert!(!state.blocked);
+        state.toggle_block();
+        assert!(state.blocked);
+        state.toggle_block();
+        assert!(!state.blocked);
+        let reqs = drain(&mut req_rx);
+        assert_eq!(
+            reqs.iter()
+                .filter(|r| matches!(r, Request::SetBlocked { id: 42, blocked: true }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            reqs.iter()
+                .filter(|r| matches!(r, Request::SetBlocked { id: 42, blocked: false }))
+                .count(),
+            1
         );
     }
 

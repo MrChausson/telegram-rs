@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod block;
 pub mod client;
 pub mod forum;
 pub mod model;

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 - **Persistent drafts**: unsent composer text is kept per chat and restored
   when you reopen the conversation; it is dropped once the message is sent.
+- **Block / unblock users**: a chat-info quick action for private chats lets
+  you block a user (and unblock them) with a single tap; it sends
+  `messages.block`/`messages.unblock`.
 
 ### Changed
 - **README roadmap resynced**: moved the features now shipped (logout & QR

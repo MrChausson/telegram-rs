@@ -1644,6 +1644,7 @@ async fn serve_demo(
                     });
                 }
                 Request::SetMuted { .. } => {}
+                Request::SetBlocked { .. } => {}
                 Request::SendReaction { id, msg_id, emoji } => {
                     // Demo has no live back-end: echo the reaction
                     // optimistically so the chip appears on the message, as the
@@ -3388,6 +3389,20 @@ async fn handle_request(
             if let Some((_, peer_ref)) = peers.get(&id) {
                 if let Err(e) = tg.set_muted(peer_ref, muted).await {
                     let _ = ui_tx.send(UiMessage::Error(format!("Could not update mute: {e}")));
+                }
+            }
+        }
+        Request::SetBlocked { id, blocked } => {
+            if let Some((_, peer_ref)) = peers.get(&id) {
+                let res = if blocked {
+                    tg.block_user(peer_ref).await
+                } else {
+                    tg.unblock_user(peer_ref).await
+                };
+                if let Err(e) = res {
+                    let _ = ui_tx.send(UiMessage::Error(format!(
+                        "Could not update block status: {e}"
+                    )));
                 }
             }
         }

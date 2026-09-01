@@ -315,6 +315,9 @@ pub enum Request {
     GetChatInfo { id: i64 },
     /// Mutes (`muted=true`) or unmutes a chat server-side.
     SetMuted { id: i64, muted: bool },
+    /// Blocks (`blocked=true`) or unblocks a user chat server-side
+    /// (`messages.block` / `messages.unblock`).
+    SetBlocked { id: i64, blocked: bool },
     /// Lists the members of a group/channel (info panel).
     GetParticipants { id: i64 },
     /// Removes a member from the open group/channel.
