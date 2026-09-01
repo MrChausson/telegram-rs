@@ -1243,7 +1243,7 @@ async fn serve_demo(
                         msg_id: (id == 1002).then_some(1),
                     });
                 }
-                Request::SendMessage { id, text, reply_to } => {
+                Request::SendMessage { id, text, reply_to, schedule_at: _ } => {
                     let nid = next_id;
                     next_id += 1;
                     // The server would echo the outgoing message back through
@@ -2972,9 +2972,16 @@ async fn handle_request(
                 );
             }
         }
-        Request::SendMessage { id, text, reply_to } => match peers.get(&id) {
+        Request::SendMessage { id, text, reply_to, schedule_at } => match peers.get(&id) {
             Some((_, peer_ref)) => {
-                if let Err(e) = tg.send_message(peer_ref, &text, reply_to).await {
+                let schedule = schedule_at.map(|secs| {
+                    std::time::SystemTime::UNIX_EPOCH
+                        + std::time::Duration::from_secs(secs as u64)
+                });
+                if let Err(e) = tg
+                    .send_message(peer_ref, &text, reply_to, schedule)
+                    .await
+                {
                     let _ = ui_tx.send(UiMessage::Error(format!("Send failed: {e}")));
                 }
             }

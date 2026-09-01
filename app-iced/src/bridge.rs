@@ -263,11 +263,13 @@ pub enum Request {
     MarkRead { id: i64 },
     /// Notifies the server that the user is (or stopped) typing in a chat.
     Typing { id: i64, typing: bool },
-    /// Sends a text message to a chat, optionally as a reply.
+    /// Sends a text message to a chat, optionally as a reply, and optionally
+    /// scheduled at a future unix-second timestamp (`schedule_at`).
     SendMessage {
         id: i64,
         text: String,
         reply_to: Option<i32>,
+        schedule_at: Option<i64>,
     },
     /// Uploads and sends a file to a chat (`is_photo` picks compressed-photo
     /// vs document), optionally with a caption and as a reply. `token` ties

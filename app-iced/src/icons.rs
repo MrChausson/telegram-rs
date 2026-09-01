@@ -53,6 +53,8 @@ pub enum Icon {
     Sticker,
     /// Gear (chat-list header settings button).
     Settings,
+    /// Clock (composer's schedule/send-later button).
+    Clock,
 }
 
 fn rgb(c: (u8, u8, u8)) -> Color {
@@ -641,6 +643,22 @@ fn draw_icon(pixmap: &mut Pixmap, kind: Icon, cx: f32, cy: f32, size: f32, color
                     w,
                 );
             }
+        }
+        Icon::Clock => {
+            // Clock/schedule: outline ring, hour + minute hands, pivot dot.
+            let w = size * 0.11;
+            let r = half * 0.82;
+            if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
+                stroke(pixmap, &path, color, w);
+            }
+            polyline(pixmap, &[(cx, cy), (cx, cy - r * 0.52)], color, w);
+            polyline(
+                pixmap,
+                &[(cx, cy), (cx + r * 0.36, cy - r * 0.60)],
+                color,
+                w,
+            );
+            fill_circle(pixmap, cx, cy, size * 0.05, color);
         }
         Icon::Tick { read } => {
             let w = size * 0.09;

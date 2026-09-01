@@ -410,6 +410,8 @@ pub enum Message {
     /// The info panel's Mute button was pressed.
     ToggleMute,
     ToggleBlock,
+    ToggleSchedulePopup,
+    Schedule(Option<i64>),
     /// The @username line in the info panel was clicked (copy).
     CopyUsername,
     /// "Remove" was clicked on a member row (arms the inline confirmation).
@@ -651,6 +653,8 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::CloseInfo => state.close_info(),
         Message::ToggleMute => state.toggle_mute(),
         Message::ToggleBlock => state.toggle_block(),
+        Message::ToggleSchedulePopup => state.toggle_schedule_popup(),
+        Message::Schedule(ts) => state.set_schedule(ts),
         Message::CopyUsername => {
             if let Some(handle) = state.copy_username() {
                 return iced::clipboard::write::<Message>(handle);
@@ -3230,14 +3234,33 @@ fn composer_bar(state: &State) -> Element<'_> {
             .style(accent_circle_button)
     };
 
-    // Smiley opens the emoji panel; it sits left of the field.
+    // Smiley opens the emoji panel; it sits left of the field. The clock
+    // toggles the "send later" schedule popover (hidden while editing).
     let emoji_btn = button(icon(Icon::Smile, theme::ICON(), 20.0))
         .on_press(Message::EmojiToggle)
         .padding(8)
         .style(flat_button);
 
+    let sched_label = state.schedule_at.is_some();
+    let clock_btn = button(icon(Icon::Clock, theme::ICON(), 20.0))
+        .on_press(Message::ToggleSchedulePopup)
+        .padding(8)
+        .style(if sched_label {
+            accent_circle_button
+        } else {
+            flat_button
+        });
+
+    // The clock (schedule) button is hidden while editing.
+    let clock_bar_slot: Element<'_> = if state.editing.is_some() {
+        iced::widget::Space::new().into()
+    } else {
+        clock_btn.into()
+    };
+
     let bar = row![
         emoji_btn,
+        clock_bar_slot,
         container(field)
             .width(Length::Fill)
             .height(theme::layout::INPUT_H)
@@ -3287,6 +3310,57 @@ fn composer_bar(state: &State) -> Element<'_> {
                 },
                 ..container::Style::default()
             }),
+        );
+        col = col.push(iced::widget::Space::new().height(6.0));
+    }
+    // "Send at" popover with quick presets, plus a chip showing an active
+    // schedule (both sit above the input bar).
+    if state.schedule_popup {
+        let mut opts = column![].spacing(4).width(Length::Fill);
+        for (label, ts) in state.schedule_presets() {
+            opts = opts.push(
+                button(text(label).size(theme::font::TIMESTAMP).align_x(Alignment::Start))
+                    .on_press(Message::Schedule(Some(ts)))
+                    .style(flat_button)
+                    .padding([6, 10]),
+            );
+        }
+        if state.schedule_at.is_some() {
+            opts = opts.push(
+                button(text("Send now instead").size(theme::font::TIMESTAMP).color(rgb(theme::ACCENT())))
+                    .on_press(Message::Schedule(None))
+                    .style(flat_button)
+                    .padding([6, 10]),
+            );
+        }
+        col = col.push(
+            container(opts)
+                .width(Length::Fill)
+                .padding([8, 12])
+                .style(schedule_popover_style),
+        );
+        col = col.push(iced::widget::Space::new().height(6.0));
+    } else if let Some(ts) = state.schedule_at {
+        let hh = ts.rem_euclid(86400) / 3600;
+        let mm = (ts.rem_euclid(86400) % 3600) / 60;
+        col = col.push(
+            container(
+                row![
+                    icon(Icon::Clock, theme::ACCENT(), 15.0),
+                    text(format!("Scheduled · {hh:02}:{mm:02} UTC"))
+                        .size(theme::font::TIMESTAMP)
+                        .color(rgb(theme::TEXT_SECONDARY())),
+                    button(icon(Icon::Close, theme::ICON(), 14.0))
+                        .on_press(Message::Schedule(None))
+                        .padding(6)
+                        .style(flat_button),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([6, 12])
+            .style(schedule_popover_style),
         );
         col = col.push(iced::widget::Space::new().height(6.0));
     }
@@ -4964,6 +5038,19 @@ fn field_rounded(_theme: &iced::Theme) -> container::Style {
         background: Some(iced::Background::Color(rgb(theme::INPUT_FILL()))),
         border: iced::Border {
             radius: theme::layout::INPUT_RADIUS.into(),
+            ..iced::Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+/// Rounded panel used for the composer's schedule popover / active-schedule
+/// chip (muted background with a subtle border).
+fn schedule_popover_style(_theme: &iced::Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(rgb(theme::INPUT_FILL()))),
+        border: iced::Border {
+            radius: 10.0.into(),
             ..iced::Border::default()
         },
         ..container::Style::default()
