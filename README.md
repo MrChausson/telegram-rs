@@ -157,22 +157,31 @@ batches — each release moves the needle, not dribbles.
   owner/admin badges
 - 🧩 **Stickers** — frameless rendering in chats, a picker panel next to the
   composer (packs + thumbnail grid) and sending by document reference
+- 🧾 **Code & `pre` preview** — Telegram code blocks and pre-formatted text
+  render in monospace
+- ✉️ **Message reactions** — right-click → quick-reaction strip (with a `+`
+  picker) sends a Telegram reaction; existing reactions render as emoji chips
+- 🔐 **Logout & QR login** — sign out in-app (Settings → Account), or sign in
+  by scanning a QR code from the phone app
+- 🛡️ **Group admin tools** — promote/demote admins and kick/ban members from
+  the member list, each destructive action gated behind a confirmation
+- 🧵 **Forum topics** — topic chip bar for forum chats, create topics,
+  thread-aware replies (`reply_to_top`)
 
 > 📋 **Copy / paste note:** message text can be copied from the message's
 > context menu (right-click → “Copy”), and text pastes into the composer
 > with Ctrl/⌘-V. Drag-to-select inside message bubbles isn't supported by the
 > Iced text widget — a documented trade-off.
 
-### 🚧 Next up
+### 🚧 Remaining for V1
 
 | Area | In V1 |
 |---|---|
-| 👤 Accounts | Logout, QR login *(multi-account: not planned for now)* |
-| 👥 Groups | Admin tools (promote/demote, ban/kick), then forum topics *(create/manage groups & channels, member list with roles already shipped)* |
+| 📞 Calls | Voice and video calls — the main missing piece for full parity |
 | 🔐 Privacy | Secret (end-to-end) chats *(later)* |
-| 📞 Calls | Voice and video calls |
 
-> Custom emoji is premium-gated upstream and deliberately out of scope.
+> Out of scope for now: **multi-account** and **custom emoji** (premium-gated
+> upstream).
 
 ## Why it's light
 

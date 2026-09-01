@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **README roadmap resynced**: moved the features now shipped (logout & QR
+  login, group admin tools, forum topics, message reactions, code preview)
+  from "Next up" into "Already there"; the remaining-for-V1 list now reflects
+  reality (voice/video calls + secret chats).
+
 ## [v0.11.0] - 2026-08-31
 
 ### Added
