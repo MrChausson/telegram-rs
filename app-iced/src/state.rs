@@ -251,6 +251,8 @@ pub enum SettingsTab {
     Storage,
     /// Active account sessions.
     Sessions,
+    /// Coarse privacy settings (who can see / reach you).
+    Privacy,
 }
 
 /// Where the search UI is currently searching.
@@ -508,6 +510,8 @@ pub struct State {
     pub settings_open: bool,
     /// Which settings tab is displayed.
     pub settings_tab: SettingsTab,
+    /// Current policy per privacy key (filled by `UiMessage::Privacy`).
+    pub privacy: HashMap<tg::privacy::PrivacyKey, tg::privacy::PrivacyPreset>,
     /// The signed-in user's own profile (`None` until `GetMe` answers).
     pub my_profile: Option<MyProfile>,
     /// First-name input of the profile edit form.
@@ -662,6 +666,7 @@ impl State {
             sticker_thumbs: HashMap::new(),
             settings_open: false,
             settings_tab: SettingsTab::Profile,
+            privacy: HashMap::new(),
             my_profile: None,
             edit_name: String::new(),
             edit_last_name: String::new(),
@@ -1400,6 +1405,7 @@ impl State {
                 }
                 self.status = e;
             }
+            UiMessage::Privacy { key, preset } => self.on_privacy(key, preset),
         }
     }
 
@@ -2304,7 +2310,39 @@ impl State {
 
     /// Switches the active settings tab.
     pub fn set_settings_tab(&mut self, tab: SettingsTab) {
+        if tab == SettingsTab::Privacy && self.settings_tab != SettingsTab::Privacy {
+            self.open_privacy();
+        }
         self.settings_tab = tab;
+    }
+
+    /// Opens the privacy tab: fetch the current policy for every known key
+    /// (responses land in [`Self::privacy`] via `UiMessage::Privacy`).
+    pub fn open_privacy(&mut self) {
+        self.privacy.clear();
+        use tg::privacy::PrivacyKey::{AddToGroups, Calls, LastSeen};
+        for key in [LastSeen, AddToGroups, Calls] {
+            let _ = self.req_tx.send(Request::GetPrivacy { key });
+        }
+    }
+
+    /// A privacy preset was chosen: mirror it locally and push the change.
+    pub fn select_privacy(
+        &mut self,
+        key: tg::privacy::PrivacyKey,
+        preset: tg::privacy::PrivacyPreset,
+    ) {
+        self.privacy.insert(key, preset);
+        let _ = self.req_tx.send(Request::SetPrivacy { key, preset });
+    }
+
+    /// Applies a fetched current value for a privacy key.
+    pub fn on_privacy(
+        &mut self,
+        key: tg::privacy::PrivacyKey,
+        preset: tg::privacy::PrivacyPreset,
+    ) {
+        self.privacy.insert(key, preset);
     }
 
     /// Submits the profile edit form (First name / Last name / Bio). Telegram
@@ -2393,6 +2431,7 @@ impl State {
         self.drafts.clear();
         self.schedule_at = None;
         self.schedule_popup = false;
+        self.privacy.clear();
         self.viewer = None;
         self.reply_target = None;
         self.forward_pick = None;
@@ -4467,6 +4506,54 @@ mod tests {
                 }
             )
         }));
+    }
+
+    #[test]
+    fn opening_the_privacy_tab_fetches_every_key() {
+        use tg::privacy::PrivacyKey;
+        let (mut state, mut req_rx) = demo_state();
+        state.set_settings_tab(SettingsTab::Privacy);
+        let reqs = drain(&mut req_rx);
+        for key in [PrivacyKey::LastSeen, PrivacyKey::AddToGroups, PrivacyKey::Calls] {
+            assert!(reqs
+                .iter()
+                .any(|r| matches!(r, Request::GetPrivacy { key: k } if k == &key)));
+        }
+    }
+
+    #[test]
+    fn selecting_a_privacy_preset_applies_and_mirrors_it() {
+        use tg::privacy::{PrivacyKey, PrivacyPreset};
+        let (mut state, mut req_rx) = demo_state();
+        state.select_privacy(PrivacyKey::Calls, PrivacyPreset::Nobody);
+        let reqs = drain(&mut req_rx);
+        assert!(reqs.iter().any(|r| {
+            matches!(
+                r,
+                Request::SetPrivacy {
+                    key: PrivacyKey::Calls,
+                    preset: PrivacyPreset::Nobody
+                }
+            )
+        }));
+        assert_eq!(
+            state.privacy.get(&PrivacyKey::Calls),
+            Some(&PrivacyPreset::Nobody)
+        );
+    }
+
+    #[test]
+    fn fetched_privacy_value_is_stored() {
+        use tg::privacy::{PrivacyKey, PrivacyPreset};
+        let (mut state, _) = demo_state();
+        state.on_message(UiMessage::Privacy {
+            key: PrivacyKey::LastSeen,
+            preset: PrivacyPreset::Contacts,
+        });
+        assert_eq!(
+            state.privacy.get(&PrivacyKey::LastSeen),
+            Some(&PrivacyPreset::Contacts)
+        );
     }
 
     #[test]

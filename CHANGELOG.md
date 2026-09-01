@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `messages.block`/`messages.unblock`.
 - **Scheduled messages**: the composer's clock button opens a "send later"
   picker; choosing a preset delays the message instead of sending it now.
+- **Privacy settings**: a new Settings → Privacy tab exposes coarse "Who can"
+  rules (last seen & online, added to groups, calls) as Everyone / Contacts /
+  Nobody presets via `account.setPrivacy`.
 
 ### Changed
 - **README roadmap resynced**: moved the features now shipped (logout & QR

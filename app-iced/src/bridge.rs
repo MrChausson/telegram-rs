@@ -317,6 +317,13 @@ pub enum Request {
     GetChatInfo { id: i64 },
     /// Mutes (`muted=true`) or unmutes a chat server-side.
     SetMuted { id: i64, muted: bool },
+    /// Fetches the current policy for a privacy key.
+    GetPrivacy { key: tg::privacy::PrivacyKey },
+    /// Applies a policy to a privacy key.
+    SetPrivacy {
+        key: tg::privacy::PrivacyKey,
+        preset: tg::privacy::PrivacyPreset,
+    },
     /// Blocks (`blocked=true`) or unblocks a user chat server-side
     /// (`messages.block` / `messages.unblock`).
     SetBlocked { id: i64, blocked: bool },
@@ -543,4 +550,9 @@ pub enum UiMessage {
     TopicCreated { chat_id: i64, topic: TopicRow },
     /// Error to display (status).
     Error(String),
+    /// A privacy key's current policy was fetched (`account.getPrivacy`).
+    Privacy {
+        key: tg::privacy::PrivacyKey,
+        preset: tg::privacy::PrivacyPreset,
+    },
 }

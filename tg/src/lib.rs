@@ -6,4 +6,5 @@ pub mod block;
 pub mod client;
 pub mod forum;
 pub mod model;
+pub mod privacy;
 pub mod session;
