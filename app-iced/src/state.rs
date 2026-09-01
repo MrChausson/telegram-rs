@@ -405,6 +405,10 @@ pub struct State {
 
     /// Composer text (fresh message, or the edited text).
     pub composer: String,
+    /// Per-chat unsent draft text. Saved when leaving a chat and restored on
+    /// reopening it, so typing isn't lost when switching conversations
+    /// (Telegram Desktop parity). Empty on send.
+    pub drafts: HashMap<i64, String>,
     /// Full-screen photo viewer path, if any.
     pub viewer: Option<String>,
     /// Open the first chat once the list arrives (test/demo convenience).
@@ -618,6 +622,7 @@ impl State {
             qr_png_path: None,
             qr_error: None,
             composer: String::new(),
+            drafts: HashMap::new(),
             viewer: None,
             auto_open_first: false,
             persist_ui: false,
@@ -2339,6 +2344,7 @@ impl State {
         self.context_menu = None;
         self.editing = None;
         self.composer.clear();
+        self.drafts.clear();
         self.viewer = None;
         self.reply_target = None;
         self.forward_pick = None;
@@ -2500,6 +2506,10 @@ impl State {
             }
             self.typing = false;
         }
+        if let Some(id) = self.open_chat {
+            // The message is on its way: drop the draft for this chat.
+            self.drafts.remove(&id);
+        }
         self.composer.clear();
         self.scroll_to_bottom = true;
         self.invalidate_layout();
@@ -2644,9 +2654,26 @@ impl State {
         }
     }
 
+    /// Stores the current composer text as the (possibly `None`) chat's draft.
+    /// Empty text drops the draft entry. Chat-scoped so unsent text survives
+    /// switching conversations.
+    fn save_draft_if_open(&mut self, chat_id: Option<i64>) {
+        if let Some(id) = chat_id {
+            if self.composer.is_empty() {
+                self.drafts.remove(&id);
+            } else {
+                self.drafts.insert(id, self.composer.clone());
+            }
+        }
+    }
+
     /// Open a chat.
     pub fn open_chat(&mut self, id: i64) {
         crate::audio::stop();
+        // Persist the outgoing draft of the chat we're leaving (if any) before
+        // the composer is reset, then restore the target chat's draft.
+        let prev = self.open_chat;
+        self.save_draft_if_open(prev);
         self.playing_voice = None;
         self.voice_playing = false;
         self.voice_elapsed = 0.0;
@@ -2665,6 +2692,9 @@ impl State {
         self.pending_jump_id = None;
         self.pinned_id = None;
         self.composer.clear();
+        if let Some(draft) = self.drafts.get(&id) {
+            self.composer = draft.clone();
+        }
         self.info_open = false;
         self.chat_info = None;
         self.participants.clear();
@@ -2689,7 +2719,9 @@ impl State {
     /// Back to the chat list: closes the open chat and clears the
     /// conversation-scoped state (also forgets the `last-chat` marker).
     pub fn close_chat(&mut self) {
+        self.save_draft_if_open(self.open_chat);
         self.open_chat = None;
+        self.composer.clear();
         self.messages.clear();
         self.editing = None;
         self.context_menu = None;
@@ -3230,6 +3262,48 @@ mod tests {
         assert!(
             !reqs.iter().any(|r| matches!(r, Request::MarkRead { id: 7 })),
             "message in a non-open chat must not be marked read"
+        );
+    }
+
+    #[test]
+    fn draft_survives_switching_away_and_back() {
+        let (mut state, _) = demo_state(); // open_chat == 42
+        state.composer = "hello, world".into();
+        state.open_chat(7); // leave 42 -> save draft
+        assert!(
+            state.composer.is_empty(),
+            "composer is cleared when leaving a chat"
+        );
+        state.open_chat(42); // return -> restore draft
+        assert_eq!(
+            state.composer, "hello, world",
+            "unsent text is restored when reopening the chat"
+        );
+    }
+
+    #[test]
+    fn draft_is_dropped_after_sending() {
+        let (mut state, _) = demo_state();
+        state.composer = "on its way".into();
+        state.submit();
+        state.open_chat(7);
+        state.open_chat(42); // reopening must not resurrect the sent draft
+        assert!(
+            state.composer.is_empty(),
+            "a sent message must not leave a leftover draft"
+        );
+    }
+
+    #[test]
+    fn draft_survives_close_and_reopen() {
+        let (mut state, _) = demo_state();
+        state.composer = "draft".into();
+        state.close_chat();
+        assert!(state.composer.is_empty());
+        state.open_chat(42);
+        assert_eq!(
+            state.composer, "draft",
+            "draft is restored after closing the chat"
         );
     }
 

@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Persistent drafts**: unsent composer text is kept per chat and restored
+  when you reopen the conversation; it is dropped once the message is sent.
+
 ### Changed
 - **README roadmap resynced**: moved the features now shipped (logout & QR
   login, group admin tools, forum topics, message reactions, code preview)
