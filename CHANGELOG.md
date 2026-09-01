@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `messages.block`/`messages.unblock`.
 - **Scheduled messages**: the composer's clock button opens a "send later"
   picker; choosing a preset delays the message instead of sending it now.
+  **Custom scheduling** was added: a "Custom date & time…" option opens an
+  inline editor (`YYYY-MM-DD HH:MM`, UTC) for an arbitrary send time.
 - **Privacy settings**: a new Settings → Privacy tab exposes coarse "Who can"
   rules (last seen & online, added to groups, calls) as Everyone / Contacts /
   Nobody presets via `account.setPrivacy`.
@@ -29,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   was already open was shown in the UI but never marked read server-side — the
   sender's "read" receipt only updated after closing and reopening the chat.
   Incoming messages in the open chat now re-send `MarkRead`.
+- **Message reactions now appear immediately**: reacting to a message no longer
+  waits for the server round-trip before showing the reaction chip — the UI
+  echoes the toggle optimistically (and the server update still lands to keep
+  the count authoritative).
+- **Schedule popover visibility**: the composer's "send later" popover (and the
+  active "Scheduled · HH:MM" chip) used the input bar's flat fill with no
+  border, so they blended into the chat canvas and were hard to distinguish; it
+  now uses the app's elevated menu surface with a visible border.
 
 ## [v0.11.0] - 2026-08-31
 
