@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from "Next up" into "Already there"; the remaining-for-V1 list now reflects
   reality (voice/video calls + secret chats).
 
+### Fixed
+- **Read receipts for live messages**: a message that arrived while its chat
+  was already open was shown in the UI but never marked read server-side — the
+  sender's "read" receipt only updated after closing and reopening the chat.
+  Incoming messages in the open chat now re-send `MarkRead`.
+
 ## [v0.11.0] - 2026-08-31
 
 ### Added
