@@ -1645,6 +1645,13 @@ async fn serve_demo(
                 }
                 Request::SetMuted { .. } => {}
                 Request::SetBlocked { .. } => {}
+                Request::GetPrivacy { key } => {
+                    let _ = ui_tx.send(UiMessage::Privacy {
+                        key,
+                        preset: tg::privacy::PrivacyPreset::Everyone,
+                    });
+                }
+                Request::SetPrivacy { .. } => {}
                 Request::SendReaction { id, msg_id, emoji } => {
                     // Demo has no live back-end: echo the reaction
                     // optimistically so the chip appears on the message, as the
@@ -3411,6 +3418,25 @@ async fn handle_request(
                         "Could not update block status: {e}"
                     )));
                 }
+            }
+        }
+        Request::GetPrivacy { key } => {
+            match tg.get_privacy(key).await {
+                Ok(preset) => {
+                    let _ = ui_tx.send(UiMessage::Privacy { key, preset });
+                }
+                Err(e) => {
+                    let _ = ui_tx.send(UiMessage::Error(format!(
+                        "Could not read privacy setting: {e}"
+                    )));
+                }
+            }
+        }
+        Request::SetPrivacy { key, preset } => {
+            if let Err(e) = tg.set_privacy(key, preset).await {
+                let _ = ui_tx.send(UiMessage::Error(format!(
+                    "Could not update privacy setting: {e}"
+                )));
             }
         }
         Request::GetParticipants { id } => match peers.get(&id) {

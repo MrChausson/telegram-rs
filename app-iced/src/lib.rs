@@ -412,6 +412,11 @@ pub enum Message {
     ToggleBlock,
     ToggleSchedulePopup,
     Schedule(Option<i64>),
+    /// A privacy preset was chosen in the Settings → Privacy tab.
+    SetPrivacy {
+        key: tg::privacy::PrivacyKey,
+        preset: tg::privacy::PrivacyPreset,
+    },
     /// The @username line in the info panel was clicked (copy).
     CopyUsername,
     /// "Remove" was clicked on a member row (arms the inline confirmation).
@@ -655,6 +660,7 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::ToggleBlock => state.toggle_block(),
         Message::ToggleSchedulePopup => state.toggle_schedule_popup(),
         Message::Schedule(ts) => state.set_schedule(ts),
+        Message::SetPrivacy { key, preset } => state.select_privacy(key, preset),
         Message::CopyUsername => {
             if let Some(handle) = state.copy_username() {
                 return iced::clipboard::write::<Message>(handle);
@@ -1493,6 +1499,11 @@ fn settings_panel(state: &State) -> Element<'_> {
             state::SettingsTab::Sessions,
             state.settings_tab == state::SettingsTab::Sessions
         ),
+        settings_tab_header(
+            "Privacy",
+            state::SettingsTab::Privacy,
+            state.settings_tab == state::SettingsTab::Privacy
+        ),
         horizontal_spacer(),
     ]
     .spacing(6)
@@ -1522,6 +1533,7 @@ fn settings_panel(state: &State) -> Element<'_> {
         state::SettingsTab::Profile => col = col.push(settings_profile_tab(state)),
         state::SettingsTab::Storage => col = col.push(settings_storage_tab(state)),
         state::SettingsTab::Sessions => col = col.push(settings_sessions_tab(state)),
+        state::SettingsTab::Privacy => col = col.push(settings_privacy_tab(state)),
     }
 
     scrollable(col.width(SETTINGS_W - 2.0).height(Length::Fill)).into()
@@ -1852,6 +1864,67 @@ fn settings_sessions_tab(state: &State) -> Element<'_> {
             .align_y(Alignment::Center)
             .padding([6, 0]),
         );
+    }
+
+    col.into()
+}
+
+/// Privacy tab: three "Who can …" settings, each with a Everyone / Contacts /
+/// Nobody segmented choice (fetching current values when the tab opens).
+fn settings_privacy_tab(state: &State) -> Element<'_> {
+    use tg::privacy::{PrivacyKey as K, PrivacyPreset as P};
+
+    let mut col = column![].spacing(8);
+    col = col.push(
+        text("Privacy")
+            .size(theme::font::TIMESTAMP)
+            .color(rgb(theme::ICON()))
+            .font(iced::Font {
+                weight: iced::font::Weight::Bold,
+                ..iced::Font::DEFAULT
+            }),
+    );
+    col = col.push(
+        text("Who can see or reach you")
+            .size(theme::font::TIMESTAMP)
+            .color(rgb(theme::TEXT_SECONDARY())),
+    );
+
+    let current = |k: K| state.privacy.get(&k).copied().unwrap_or(P::Everyone);
+    for (label, key) in [
+        ("Last seen & online", K::LastSeen),
+        ("Added to groups", K::AddToGroups),
+        ("Phone calls", K::Calls),
+    ] {
+        let selected = current(key);
+        let segment = |p: P, txt: &'static str| -> iced::widget::Button<'static, Message> {
+            button(
+                text(txt)
+                    .size(theme::font::TIMESTAMP)
+                    .color(if selected == p {
+                        Color::WHITE
+                    } else {
+                        rgb(theme::TEXT_SECONDARY())
+                    }),
+            )
+            .on_press(Message::SetPrivacy { key, preset: p })
+            .padding([5, 10])
+            .style(if selected == p {
+                accent_circle_button
+            } else {
+                flat_button
+            })
+        };
+        col = col.push(settings_row(
+            label,
+            row![
+                segment(P::Everyone, "Everyone"),
+                segment(P::Contacts, "Contacts"),
+                segment(P::Nobody, "Nobody"),
+            ]
+            .spacing(4),
+        ));
+        col = col.push(settings_divider());
     }
 
     col.into()
