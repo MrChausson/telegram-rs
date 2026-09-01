@@ -142,3 +142,29 @@ report `Nobody` for every row because it grabs the unselected third button,
 when the *actual* default is `Everyone`. **Cross-check selection with pixel
 colour** (does the segment carry the accent background?), never just with which
 word OCR flags.
+
+## Common pitfall: a surface that blends into its background
+
+A popover/menu that sits *directly on* the chat canvas and shares the canvas
+background colour becomes **invisible as a distinct element** — and that's a
+real UI defect, not just a QA-precision issue. A QA pass that only checks "is
+the button there and does it work" will happily green-light it.
+
+How to catch it deterministically (no vision):
+
+1. Capture the floating surface; sample its **interior fill** and the
+   **background it sits over** (a few pixels just outside its border).
+2. Compare them: if they are the *same* colour, and the surface has **no
+   visible border** (border width 0 / transparent), it "reads" as part of the
+   backdrop. A dropdown, context menu or date picker must be distinguishable
+   from the layer beneath.
+3. Cross-check against a sibling that *does* look right (e.g. the input bar
+   with a slightly lighter fill + a 1px border): note what elevation props make
+   the difference.
+4. Fix by giving the surface the app's *menu* surface treatment (its accent
+   background + a visible border), not the fill used by inline input fields.
+
+Rule of thumb: **any floating/overlay surface should be measurable as a
+distinct colour region, with a visible boundary, against its backdrop.** If
+your pixel scan can't find the surface's edge without a prior guess, a human
+probably can't see it either.

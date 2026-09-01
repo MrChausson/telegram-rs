@@ -412,6 +412,12 @@ pub enum Message {
     ToggleBlock,
     ToggleSchedulePopup,
     Schedule(Option<i64>),
+    /// The "Custom date & time…" editor in the schedule popover was toggled.
+    ToggleScheduleCustom,
+    /// The custom schedule text field changed.
+    ScheduleCustomInput(String),
+    /// The custom schedule text field was submitted.
+    ScheduleCustomSubmit,
     /// A privacy preset was chosen in the Settings → Privacy tab.
     SetPrivacy {
         key: tg::privacy::PrivacyKey,
@@ -660,6 +666,9 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::ToggleBlock => state.toggle_block(),
         Message::ToggleSchedulePopup => state.toggle_schedule_popup(),
         Message::Schedule(ts) => state.set_schedule(ts),
+        Message::ToggleScheduleCustom => state.toggle_schedule_custom(),
+        Message::ScheduleCustomInput(s) => state.schedule_custom_input = s,
+        Message::ScheduleCustomSubmit => state.schedule_custom_submit(),
         Message::SetPrivacy { key, preset } => state.select_privacy(key, preset),
         Message::CopyUsername => {
             if let Some(handle) = state.copy_username() {
@@ -3398,6 +3407,42 @@ fn composer_bar(state: &State) -> Element<'_> {
                     .padding([6, 10]),
             );
         }
+        // Toggle for the custom date/time editor.
+        opts = opts.push(
+            button(
+                text(if state.schedule_custom_edit {
+                    "Cancel custom…"
+                } else {
+                    "Custom date & time…"
+                })
+                .size(theme::font::TIMESTAMP)
+                .align_x(Alignment::Start)
+                .color(rgb(theme::ACCENT())),
+            )
+            .on_press(Message::ToggleScheduleCustom)
+            .style(flat_button)
+            .padding([6, 10]),
+        );
+        // Inline custom date/time editor (YYYY-MM-DD HH:MM, interpreted UTC).
+        if state.schedule_custom_edit {
+            let custom_row: Element<'_> = row![
+                text_input("YYYY-MM-DD HH:MM", &state.schedule_custom_input)
+                    .on_input(Message::ScheduleCustomInput)
+                    .on_submit(Message::ScheduleCustomSubmit)
+                    .size(theme::font::TIMESTAMP)
+                    .width(Length::Fill)
+                    .padding([6, 8])
+                    .style(text_input_style),
+                button(text("Schedule").size(theme::font::TIMESTAMP))
+                    .on_press(Message::ScheduleCustomSubmit)
+                    .style(accent_button)
+                    .padding([6, 10]),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .into();
+            opts = opts.push(container(custom_row).padding([2, 0]));
+        }
         if state.schedule_at.is_some() {
             opts = opts.push(
                 button(text("Send now instead").size(theme::font::TIMESTAMP).color(rgb(theme::ACCENT())))
@@ -5118,13 +5163,15 @@ fn field_rounded(_theme: &iced::Theme) -> container::Style {
 }
 
 /// Rounded panel used for the composer's schedule popover / active-schedule
-/// chip (muted background with a subtle border).
+/// chip (elevated menu surface so it visually floats above the chat, unlike
+/// the input bar's flush `INPUT_FILL`).
 fn schedule_popover_style(_theme: &iced::Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(rgb(theme::INPUT_FILL()))),
+        background: Some(iced::Background::Color(rgb(theme::MENU_BG()))),
         border: iced::Border {
-            radius: 10.0.into(),
-            ..iced::Border::default()
+            radius: 12.0.into(),
+            width: 1.0,
+            color: rgb(theme::MENU_BORDER()),
         },
         ..container::Style::default()
     }

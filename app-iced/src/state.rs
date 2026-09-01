@@ -454,6 +454,10 @@ pub struct State {
     pub schedule_at: Option<i64>,
     /// Whether the composer's schedule popover is open.
     pub schedule_popup: bool,
+    /// Whether the schedule popover is showing the custom date/time editor.
+    pub schedule_custom_edit: bool,
+    /// Current text of the custom date/time editor, `YYYY-MM-DD HH:MM` (UTC).
+    pub schedule_custom_input: String,
 
     // -----------------------------------------------------------------
     // Forum topics (chips bar of forum supergroups; namespaced `topic_`)
@@ -652,6 +656,8 @@ impl State {
             blocked: false,
             schedule_at: None,
             schedule_popup: false,
+            schedule_custom_edit: false,
+            schedule_custom_input: String::new(),
             topic_topics: Vec::new(),
             topic_is_forum: false,
             topic_selected: None,
@@ -1836,7 +1842,8 @@ impl State {
     }
 
     /// A reaction emoji was picked from the strip: send a toggle request for
-    /// the message under the strip, then close it.
+    /// the message under the strip, then close it. The chip is echoed
+    /// optimistically so it appears immediately, before the server round-trip.
     pub fn react(&mut self, emoji: &str) {
         let Some(row) = self.react_row.take() else {
             return;
@@ -1846,9 +1853,36 @@ impl State {
             self.invalidate_layout();
             return;
         };
+        let msg_id = m.id;
+
+        // Optimistic local toggle (added if not already chosen by us, removed
+        // otherwise), mirroring the server's reaction semantics.
+        let chip = crate::bridge::ReactionChip {
+            emoji: emoji.to_string(),
+            count: 1,
+            chosen: true,
+        };
+        // Remove the chip if we had already reacted with this emoji.
+        if let Some(m) = self.messages.get_mut(row) {
+            let already = m.reactions.iter().any(|c| c.emoji == emoji && c.chosen);
+            if already {
+                m.reactions.retain(|c| c.emoji != emoji);
+            } else {
+                merge_reactions(&mut m.reactions, &[chip.clone()]);
+            }
+        }
+        if let Some(m) = self.topic_all_messages.iter_mut().find(|m| m.id == msg_id) {
+            let already = m.reactions.iter().any(|c| c.emoji == emoji && c.chosen);
+            if already {
+                m.reactions.retain(|c| c.emoji != emoji);
+            } else {
+                merge_reactions(&mut m.reactions, &[chip.clone()]);
+            }
+        }
+
         let _ = self.req_tx.send(Request::SendReaction {
             id: self.open_chat.unwrap_or(0),
-            msg_id: m.id,
+            msg_id,
             emoji: emoji.to_string(),
         });
         self.invalidate_layout();
@@ -2043,12 +2077,46 @@ impl State {
     /// Opens/closes the composer's schedule popover.
     pub fn toggle_schedule_popup(&mut self) {
         self.schedule_popup = !self.schedule_popup;
+        self.schedule_custom_edit = false;
     }
 
     /// Sets (or, with `None`, clears) the pending send schedule.
     pub fn set_schedule(&mut self, ts: Option<i64>) {
         self.schedule_at = ts;
         self.schedule_popup = false;
+        self.schedule_custom_edit = false;
+    }
+
+    /// Toggles the custom date/time editor in the schedule popover, seeding
+    /// the text field with the current UTC time (rounded to the next minute).
+    pub fn toggle_schedule_custom(&mut self) {
+        if !self.schedule_custom_edit && self.schedule_custom_input.is_empty() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let rounded = (now / 60 + 1) * 60;
+            if let Some(dt) = chrono::DateTime::<chrono::Utc>::from_timestamp(rounded, 0) {
+                self.schedule_custom_input = dt.format("%Y-%m-%d %H:%M").to_string();
+            }
+        }
+        self.schedule_custom_edit = !self.schedule_custom_edit;
+    }
+
+    /// Parses the custom date/time editor text (`YYYY-MM-DD HH:MM`, UTC) and
+    /// applies it as the pending schedule. Invalid input is treated as a no-op
+    /// (the editor stays open so the user can correct it).
+    pub fn schedule_custom_submit(&mut self) {
+        let Ok(ts) = chrono::NaiveDateTime::parse_from_str(
+            self.schedule_custom_input.trim(),
+            "%Y-%m-%d %H:%M",
+        ) else {
+            return;
+        };
+        let ts = ts.and_utc().timestamp();
+        self.schedule_at = Some(ts);
+        self.schedule_popup = false;
+        self.schedule_custom_edit = false;
     }
 
     /// Preset scheduling options for the composer popover: (label, unix ts).
@@ -4506,6 +4574,59 @@ mod tests {
                 }
             )
         }));
+    }
+
+    #[test]
+    fn custom_schedule_parses_and_applies_utc_timestamp() {
+        let (mut state, _) = demo_state();
+        state.toggle_schedule_custom(); // opens the editor, seeds a timestamp
+        assert!(state.schedule_custom_edit);
+        assert!(!state.schedule_custom_input.is_empty());
+
+        // A valid entry applies and closes the popover / editor.
+        state.schedule_custom_input = "2026-09-01 12:00".into();
+        state.schedule_custom_submit();
+        assert_eq!(state.schedule_at, Some(1788264000));
+        assert!(!state.schedule_popup);
+        assert!(!state.schedule_custom_edit);
+    }
+
+    #[test]
+    fn invalid_custom_schedule_is_a_noop() {
+        let (mut state, _) = demo_state();
+        state.schedule_custom_edit = true;
+        state.schedule_custom_input = "not-a-date".into();
+        state.schedule_custom_submit();
+        assert_eq!(state.schedule_at, None);
+        assert!(state.schedule_custom_edit); // editor stays open for correction
+    }
+
+    #[test]
+    fn reacting_echoes_the_chip_optimistically() {
+        let (mut state, mut req_rx) = demo_state();
+        // Open the reaction strip on the second row (own message, id 2).
+        state.react_row = Some(1);
+        assert!(state.messages[1].reactions.is_empty());
+        state.react("👍");
+        // The chip appears immediately (no server round-trip needed).
+        assert!(state
+            .messages
+            .get(1)
+            .and_then(|m| m.reactions.iter().find(|c| c.emoji == "👍"))
+            .is_some());
+        assert!(state.react_row.is_none()); // strip closed
+        // And the toggle request is sent too.
+        assert!(req_rx
+            .try_recv()
+            .is_ok_and(|r| matches!(r, Request::SendReaction { msg_id: 2, emoji, .. } if emoji == "👍")));
+        // Pick the same emoji again => optimistically removed (server semantics).
+        state.react_row = Some(1);
+        state.react("👍");
+        assert!(state
+            .messages
+            .get(1)
+            .and_then(|m| m.reactions.iter().find(|c| c.emoji == "👍"))
+            .is_none());
     }
 
     #[test]
