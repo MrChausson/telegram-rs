@@ -285,16 +285,22 @@ impl Telegram {
         Ok(())
     }
 
-    /// Sends a text message to a chat, optionally as a reply to `reply_to`.
+    /// Sends a text message to a chat, optionally as a reply, and optionally
+    /// scheduled (`schedule` is the wall-clock instant to send at; if `Some`,
+    /// the server holds the message until then instead of delivering it now).
     pub async fn send_message(
         &self,
         peer: &grammers_session::types::PeerRef,
         text: &str,
         reply_to: Option<i32>,
+        schedule: Option<std::time::SystemTime>,
     ) -> Result<()> {
-        let input = grammers_client::message::InputMessage::new()
+        let mut input = grammers_client::message::InputMessage::new()
             .text(text)
             .reply_to(reply_to);
+        if let Some(at) = schedule {
+            input = input.schedule_date(Some(at));
+        }
         self.client
             .send_message(*peer, input)
             .await

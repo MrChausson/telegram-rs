@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Block / unblock users**: a chat-info quick action for private chats lets
   you block a user (and unblock them) with a single tap; it sends
   `messages.block`/`messages.unblock`.
+- **Scheduled messages**: the composer's clock button opens a "send later"
+  picker; choosing a preset delays the message instead of sending it now.
 
 ### Changed
 - **README roadmap resynced**: moved the features now shipped (logout & QR

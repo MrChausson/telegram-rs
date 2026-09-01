@@ -447,6 +447,11 @@ pub struct State {
     /// Whether the open chat's user is blocked (toggled via the info panel;
     /// optimistic mirror of the server-side block state).
     pub blocked: bool,
+    /// Unix timestamp at which the next message should be sent, or `None` to
+    /// send immediately. Set via the composer's schedule popover.
+    pub schedule_at: Option<i64>,
+    /// Whether the composer's schedule popover is open.
+    pub schedule_popup: bool,
 
     // -----------------------------------------------------------------
     // Forum topics (chips bar of forum supergroups; namespaced `topic_`)
@@ -641,6 +646,8 @@ impl State {
             admin_self_id: None,
             muted: false,
             blocked: false,
+            schedule_at: None,
+            schedule_popup: false,
             topic_topics: Vec::new(),
             topic_is_forum: false,
             topic_selected: None,
@@ -2027,6 +2034,30 @@ impl State {
         });
     }
 
+    /// Opens/closes the composer's schedule popover.
+    pub fn toggle_schedule_popup(&mut self) {
+        self.schedule_popup = !self.schedule_popup;
+    }
+
+    /// Sets (or, with `None`, clears) the pending send schedule.
+    pub fn set_schedule(&mut self, ts: Option<i64>) {
+        self.schedule_at = ts;
+        self.schedule_popup = false;
+    }
+
+    /// Preset scheduling options for the composer popover: (label, unix ts).
+    pub fn schedule_presets(&self) -> Vec<(String, i64)> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        [(15, "In 15 minutes"), (60, "In 1 hour"), (180, "In 3 hours")]
+            .into_iter()
+            .map(|(m, label)| (label.to_string(), now + m * 60))
+            .chain(std::iter::once(("In 1 day".to_string(), now + 86400)))
+            .collect()
+    }
+
     /// "Remove" was clicked on a member row: arm the inline confirmation.
     pub fn kick(&mut self, user_id: i64) {
         if self.participants.iter().any(|p| p.id == user_id) {
@@ -2360,6 +2391,8 @@ impl State {
         self.editing = None;
         self.composer.clear();
         self.drafts.clear();
+        self.schedule_at = None;
+        self.schedule_popup = false;
         self.viewer = None;
         self.reply_target = None;
         self.forward_pick = None;
@@ -2516,7 +2549,15 @@ impl State {
                 _ => {
                     let _ = self
                         .req_tx
-                        .send(Request::SendMessage { id, text, reply_to });
+                        .send(Request::SendMessage {
+                            id,
+                            text,
+                            reply_to,
+                            schedule_at: self.schedule_at,
+                        });
+                    // The pending schedule (if any) is consumed by this send.
+                    self.schedule_at = None;
+                    self.schedule_popup = false;
                 }
             }
             self.typing = false;
@@ -3521,7 +3562,7 @@ mod tests {
         let reqs = drain(&mut req_rx);
         assert!(matches!(
             reqs.last(),
-            Some(Request::SendMessage { id: _, reply_to: Some(1), text }) if text == "ma réponse"
+            Some(Request::SendMessage { id: _, reply_to: Some(1), text, schedule_at: _ }) if text == "ma réponse"
         ));
         let last = state.messages.last().unwrap();
         assert_eq!(last.reply_to, Some(1));
@@ -4387,6 +4428,45 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn scheduled_message_sends_with_the_pending_timestamp() {
+        let (mut state, mut req_rx) = demo_state();
+        state.composer = "later".into();
+        state.set_schedule(Some(1_600_000_000));
+        state.submit();
+        let reqs = drain(&mut req_rx);
+        assert!(reqs.iter().any(|r| {
+            matches!(
+                r,
+                Request::SendMessage {
+                    id: 42,
+                    schedule_at: Some(1_600_000_000),
+                    ..
+                }
+            )
+        }));
+        // The schedule is consumed once the message goes out.
+        assert_eq!(state.schedule_at, None);
+    }
+
+    #[test]
+    fn unscheduled_message_sends_without_a_timestamp() {
+        let (mut state, mut req_rx) = demo_state();
+        state.composer = "now".into();
+        state.submit();
+        let reqs = drain(&mut req_rx);
+        assert!(reqs.iter().any(|r| {
+            matches!(
+                r,
+                Request::SendMessage {
+                    id: 42,
+                    schedule_at: None,
+                    ..
+                }
+            )
+        }));
     }
 
     #[test]
