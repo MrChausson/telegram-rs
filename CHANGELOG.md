@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   was already open was shown in the UI but never marked read server-side — the
   sender's "read" receipt only updated after closing and reopening the chat.
   Incoming messages in the open chat now re-send `MarkRead`.
+- **Ctrl+V image paste on Wayland**: pasting an image only worked under X11 — on
+  a Wayland session arboard's clipboard backend could not reach the native
+  Wayland clipboard, so the paste silently did nothing. Image paste now reads
+  the Wayland clipboard directly with the `wl-paste` CLI (every compositor),
+  falling back to arboard for X11/Windows/macOS.
 - **Message reactions now appear immediately**: reacting to a message no longer
   waits for the server round-trip before showing the reaction chip — the UI
   echoes the toggle optimistically (and the server update still lands to keep
