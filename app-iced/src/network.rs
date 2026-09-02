@@ -3349,15 +3349,8 @@ async fn handle_request(
             }
         }
         Request::LeaveChat { id } | Request::DeleteChat { id } => {
-            let leave = matches!(req, Request::LeaveChat { .. });
             let result = match peers.get(&id) {
-                Some((_, peer_ref)) => {
-                    if leave {
-                        tg.leave_chat(peer_ref).await
-                    } else {
-                        tg.delete_chat(peer_ref).await
-                    }
-                }
+                Some((_, peer_ref)) => tg.leave_chat(peer_ref).await,
                 None => Err(anyhow::anyhow!("unknown chat")),
             };
             match result {

@@ -1996,10 +1996,8 @@ impl State {
         self.create_menu_open = false;
     }
 
-    /// Dismisses the chat-row mini menu (click elsewhere).
-    pub fn dismiss_row_menu(&mut self) {
-        self.row_menu = None;
-    }
+    /// Dismisses the chat-row mini menu (click elsewhere) — done inline via
+    /// `self.row_menu = None`.
 
     /// Asks for confirmation before leaving/deleting a chat (closes the row
     /// menu that raised it).
@@ -2906,16 +2904,7 @@ impl State {
     }
 
     /// Path of the photo attached to row, if any and already downloaded.
-    #[allow(dead_code)]
-    fn photo_at(&self, row: usize) -> Option<String> {
-        let m = self.messages.get(row)?;
-        if m.photo.is_some() {
-            m.photo_path.clone()
-        } else {
-            None
-        }
-    }
-
+    ///
     // -------------------------------------------------------------------
     // Search (global + in-chat)
     // -------------------------------------------------------------------

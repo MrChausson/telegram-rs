@@ -59,7 +59,7 @@ pub fn emoji_ranges(s: &str) -> Vec<std::ops::Range<usize>> {
         if matches!(c, '0'..='9' | '#' | '*') {
             if let Some(end) = keycap_end(&chars[i..]) {
                 ranges.push(start..end);
-                i += byte_step(&chars[i..], end);
+                i += advance_to(&chars[i..], end);
                 continue;
             }
         }
@@ -87,12 +87,6 @@ pub fn emoji_ranges(s: &str) -> Vec<std::ops::Range<usize>> {
         }
     }
     ranges
-}
-
-/// True when `s` contains at least one emoji run.
-pub fn has_emoji(s: &str) -> bool {
-    // Cheap scan: any char a run can start with (plus VS16 after ©-likes).
-    s.chars().any(is_emoji_char)
 }
 
 fn run_end(chars: &[(usize, char)], i: usize) -> usize {
@@ -133,13 +127,6 @@ fn keycap_end(chars: &[(usize, char)]) -> Option<usize> {
         Some((pos, c)) if *c == '\u{20E3}' => Some(pos + c.len_utf8()),
         _ => None,
     }
-}
-
-fn byte_step(chars: &[(usize, char)], end: usize) -> usize {
-    chars
-        .iter()
-        .position(|(pos, _)| *pos >= end)
-        .unwrap_or(chars.len())
 }
 
 fn next_pos(chars: &[(usize, char)], i: usize) -> usize {
@@ -224,12 +211,6 @@ mod tests {
     fn keycaps_are_one_run() {
         assert_eq!(ranges("presse #️⃣"), vec!["#️⃣"]);
         assert_eq!(ranges("1️⃣2️⃣"), vec!["1️⃣", "2️⃣"]);
-    }
-
-    #[test]
-    fn has_emoji_matches_ranges() {
-        assert!(has_emoji("hey 🔥"));
-        assert!(!has_emoji("nope"));
     }
 
     #[test]
