@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Privacy settings**: a new Settings → Privacy tab exposes coarse "Who can"
   rules (last seen & online, added to groups, calls) as Everyone / Contacts /
   Nobody presets via `account.setPrivacy`.
+- **Paste an image into the chat**: `Ctrl+V` pastes an image from the system
+  clipboard (screenshots, copied files) and sends it through the same
+  attachment path as the 📎 button — upload progress, then the message echo.
 
 ### Changed
 - **README roadmap resynced**: moved the features now shipped (logout & QR
@@ -39,6 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   active "Scheduled · HH:MM" chip) used the input bar's flat fill with no
   border, so they blended into the chat canvas and were hard to distinguish; it
   now uses the app's elevated menu surface with a visible border.
+- **Reaction strip position on sent messages**: the quick-reaction strip opened
+  via right-click → React was always anchored to the left edge, so on a *sent*
+  message (right-aligned bubble) it floated detached at the far left and
+  overlapped the bubble tip. It now hugs the same edge as the message bubble
+  (right for sent, left for received), matching the context menu.
 
 ## [v0.11.0] - 2026-08-31
 

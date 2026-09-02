@@ -48,6 +48,29 @@ pub fn looks_like_image(path: &str) -> bool {
     tg::client::is_image(std::path::Path::new(path))
 }
 
+/// Ctrl+V paste: read an image off the system clipboard (if one is there),
+/// write it to a temp PNG, and hand the path back for the normal media-send
+/// path. Returns `None` when the clipboard holds text instead of an image.
+fn paste_clipboard_image() -> Option<String> {
+    let mut clip = arboard::Clipboard::new().ok()?;
+    let img = clip.get_image().ok()?;
+    let rgba = ::image_codec::RgbaImage::from_raw(
+        img.width as u32,
+        img.height as u32,
+        img.bytes.to_vec(),
+    )?;
+    let mut buf: Vec<u8> = Vec::new();
+    ::image_codec::DynamicImage::ImageRgba8(rgba)
+        .write_to(&mut std::io::Cursor::new(&mut buf), ::image_codec::ImageFormat::Png)
+        .ok()?;
+    let path = std::env::temp_dir().join(format!(
+        "telegram-rs-paste-{}.png",
+        std::process::id()
+    ));
+    std::fs::write(&path, buf).ok()?;
+    Some(path.to_string_lossy().into_owned())
+}
+
 /// Characters that terminate an inline URL (whitespace + closing
 /// punctuation). `.`/`:`/`?`/`!` are NOT terminators — they occur inside
 /// URLs ("www.", "https://", "?query=1"); trailing ones are stripped from
@@ -443,6 +466,8 @@ pub enum Message {
     ForwardTo(i64),
     /// The attach 📎 button was pressed: open a file dialog.
     AttachFile,
+    /// Ctrl+V: paste an image from the clipboard (screenshots, copied files).
+    PasteImage,
     /// The file dialog returned a path (None = cancelled).
     FilePicked(Option<String>),
     /// The sticker button was pressed: toggle the picker panel.
@@ -695,6 +720,13 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
                     .map(|f| f.path().to_string_lossy().into_owned());
                 Message::FilePicked(picked)
             });
+            return task;
+        }
+        // Ctrl+V: pull an image off the clipboard into a temp file, then feed
+        // it through the same `FilePicked` → `state.send_media` path as the
+        // attach dialog (upload progress, optimistic row, server echo).
+        Message::PasteImage => {
+            let task = iced::Task::future(async { Message::FilePicked(paste_clipboard_image()) });
             return task;
         }
         Message::FilePicked(Some(path)) => {
@@ -4667,14 +4699,24 @@ pub fn messages_list(state: &State, pane_w: f32, view_h: f32) -> Element<'_> {
         };
         let desired_vp = desired_vp.min((view_h - strip_h - 8.0).max(2.0));
         let y = (desired_vp + state.scroll_offset - top_pad).max(0.0);
-        let x = 8.0; // left-anchored to the bubble edge, Telegram-style
+        // Anchor the strip to the bubble's own edge: sent messages are
+        // right-aligned, so the strip must hug the right side (like the
+        // context menu does) or it floats detached at the far left.
+        let m = &state.messages[row];
+        let x = 8.0;
         let layer = mouse_area(
             container(reaction_strip(state.react_picker))
                 .width(Length::Fill)
                 .height(Length::Fill)
+                .align_x(if m.out {
+                    iced::alignment::Horizontal::Right
+                } else {
+                    iced::alignment::Horizontal::Left
+                })
                 .padding(iced::Padding {
                     top: y,
-                    left: x,
+                    left: if m.out { x } else { 8.0 },
+                    right: if m.out { theme::layout::MSG_PAD_X } else { 0.0 },
                     ..Default::default()
                 }),
         )
@@ -5210,6 +5252,15 @@ fn subscription(state: &State) -> iced::Subscription<Message> {
             key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
             ..
         } => Some(Message::Escape),
+        iced::keyboard::Event::KeyPressed {
+            key, modifiers, ..
+        } if modifiers.control()
+            && matches!(
+                key.as_ref(),
+                iced::keyboard::Key::Character("v") | iced::keyboard::Key::Character("V")
+            ) => {
+            Some(Message::PasteImage)
+        }
         _ => None,
     });
     let timer = if state.scroll_perf_dur > 0.0 {
