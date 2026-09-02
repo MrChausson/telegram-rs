@@ -749,15 +749,8 @@ impl Telegram {
     }
 
     /// Deletes a chat from the account (clears history and leaves it).
-    /// Same mechanics as leaving — this is Telegram's "delete dialog".
-    pub async fn delete_chat(&self, peer: &grammers_session::types::PeerRef) -> Result<()> {
-        self.client
-            .delete_dialog(*peer)
-            .await
-            .context("deleting chat")?;
-        Ok(())
-    }
-
+    /// Same mechanics as leaving — `leave_chat`.
+    ///
     /// Renames a chat: `channels.editTitle` for channels/supergroups,
     /// `messages.editChatTitle` for basic groups.
     pub async fn edit_chat_title(

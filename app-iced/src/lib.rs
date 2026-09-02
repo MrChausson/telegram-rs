@@ -1009,7 +1009,7 @@ fn search_view(state: &State) -> Element<'_> {
     .width(Length::Fill)
     .height(theme::layout::CHAT_HEADER_H)
     .padding([0, 12])
-    .style(header_bg);
+    .style(list_bg);
 
     column![
         header,
@@ -3184,7 +3184,7 @@ fn chat_header(
         left: 14.0,
     })
     .align_y(Alignment::Center)
-    .style(header_bg)
+    .style(list_bg)
     .into()
 }
 
@@ -3455,7 +3455,7 @@ fn composer_bar(state: &State) -> Element<'_> {
             container(opts)
                 .width(Length::Fill)
                 .padding([8, 12])
-                .style(schedule_popover_style),
+                .style(menu_bg),
         );
         col = col.push(iced::widget::Space::new().height(6.0));
     } else if let Some(ts) = state.schedule_at {
@@ -3478,7 +3478,7 @@ fn composer_bar(state: &State) -> Element<'_> {
             )
             .width(Length::Fill)
             .padding([6, 12])
-            .style(schedule_popover_style),
+            .style(menu_bg),
         );
         col = col.push(iced::widget::Space::new().height(6.0));
     }
@@ -4985,13 +4985,6 @@ fn divider(_theme: &iced::Theme) -> container::Style {
     }
 }
 
-fn header_bg(_theme: &iced::Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(rgb(theme::LIST_BG()))),
-        ..container::Style::default()
-    }
-}
-
 fn row_style(
     _theme: &iced::Theme,
     status: iced::widget::button::Status,
@@ -5157,21 +5150,6 @@ fn field_rounded(_theme: &iced::Theme) -> container::Style {
         border: iced::Border {
             radius: theme::layout::INPUT_RADIUS.into(),
             ..iced::Border::default()
-        },
-        ..container::Style::default()
-    }
-}
-
-/// Rounded panel used for the composer's schedule popover / active-schedule
-/// chip (elevated menu surface so it visually floats above the chat, unlike
-/// the input bar's flush `INPUT_FILL`).
-fn schedule_popover_style(_theme: &iced::Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(rgb(theme::MENU_BG()))),
-        border: iced::Border {
-            radius: 12.0.into(),
-            width: 1.0,
-            color: rgb(theme::MENU_BORDER()),
         },
         ..container::Style::default()
     }
