@@ -1575,6 +1575,23 @@ async fn serve_demo(
                         topics,
                     });
                 }
+                Request::GetTopicMessages { id, topic_root } => {
+                    // Mirror the server thread reply: only the topic's own
+                    // messages (root message + its in-thread replies).
+                    let rows = msgs_for(id)
+                        .into_iter()
+                        .filter(|m| {
+                            m.id == topic_root
+                                || m.reply_to == Some(topic_root)
+                                || m.reply_to_top == Some(topic_root)
+                        })
+                        .collect();
+                    let _ = ui_tx.send(UiMessage::TopicMessages {
+                        id,
+                        root: topic_root,
+                        rows,
+                    });
+                }
                 Request::CreateTopic { id, title } => {
                     // New topic: its id is the root service message id, as
                     // the server does (topic keyed by its root message).
@@ -3534,6 +3551,34 @@ async fn handle_request(
                     is_forum: forum,
                     topics: topics.into_iter().map(topic_to_bridge).collect(),
                 });
+            }
+            None => {
+                let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));
+            }
+        },
+        Request::GetTopicMessages { id, topic_root } => match peers.get(&id) {
+            Some((_, peer_ref)) => {
+                let msgs = tg
+                    .get_topic_messages(peer_ref, topic_root, MESSAGE_LIMIT)
+                    .await;
+                match msgs {
+                    Ok(msgs) => {
+                        let rows: Vec<MsgRow> = msgs
+                            .iter()
+                            .map(|m| msg_row_from_info(m.clone(), id, downloads, peers))
+                            .collect();
+                        let _ = ui_tx.send(UiMessage::TopicMessages {
+                            id,
+                            root: topic_root,
+                            rows,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = ui_tx.send(UiMessage::Error(format!(
+                            "Could not load topic: {e}"
+                        )));
+                    }
+                }
             }
             None => {
                 let _ = ui_tx.send(UiMessage::Error("Unknown chat".to_string()));

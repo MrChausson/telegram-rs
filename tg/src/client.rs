@@ -103,6 +103,69 @@ impl Telegram {
         Ok(out)
     }
 
+    /// Fetches the messages of a single forum topic (the thread anchored by
+    /// `topic_root`) via `messages.getReplies`. Unlike [`Telegram::get_messages`]
+    /// — which only covers the most recent `MESSAGE_LIMIT` chat messages — this
+    /// reaches every message of the topic regardless of age, so a topic whose
+    /// posts are older than the loaded slice no longer renders empty.
+    pub async fn get_topic_messages(
+        &self,
+        peer: &grammers_session::types::PeerRef,
+        topic_root: i32,
+        limit: usize,
+    ) -> Result<Vec<MessageInfo>> {
+        let res = self
+            .client
+            .invoke(&tl::functions::messages::GetReplies {
+                peer: (*peer).into(),
+                msg_id: topic_root,
+                offset_id: 0,
+                offset_date: 0,
+                add_offset: 0,
+                limit: limit as i32,
+                max_id: 0,
+                min_id: 0,
+                hash: 0,
+            })
+            .await
+            .context("fetching forum topic messages")?;
+        let ids: Vec<i32> = match res {
+            tl::enums::messages::Messages::Messages(m) => m.messages,
+            tl::enums::messages::Messages::Slice(s) => s.messages,
+            tl::enums::messages::Messages::ChannelMessages(c) => c.messages,
+            tl::enums::messages::Messages::NotModified(_) => return Ok(Vec::new()),
+        }
+        .into_iter()
+        .filter_map(|m| match m {
+            tl::enums::Message::Message(msg) => (msg.id > 0).then_some(msg.id),
+            _ => None,
+        })
+        .collect();
+        if ids.is_empty() {
+            // Topic has no messages (freshly-created, root pending) or the
+            // reply silently dropped it; nothing to render.
+            return Ok(Vec::new());
+        }
+        // Reuse grammers' high-level `get_messages_by_id`: it builds a proper
+        // peer map from the response's users/chats, so sender names resolve.
+        // (grammers exposes no public way to construct a `PeerMap` for a
+        // generic raw history response, so we let it fetch by id instead.)
+        let fetched = self
+            .client
+            .get_messages_by_id(*peer, &ids)
+            .await
+            .context("fetching topic message details")?;
+        // getReplies is newest-first; the UI expects chronological.
+        let mut infos: Vec<MessageInfo> = fetched
+            .into_iter()
+            .flatten()
+            .map(|m| message_info(&m))
+            .collect();
+        infos.sort_by_key(|m| m.id);
+        infos.reverse();
+        Ok(infos)
+    }
+
     /// Searches a chat's history for `query`, newest-first, mapped to the
     /// display model like [`Telegram::get_messages`].
     pub async fn search_chat(

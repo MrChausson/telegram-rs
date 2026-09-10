@@ -385,6 +385,9 @@ pub enum Request {
     },
     /// Loads the forum topics of a chat (empty list for non-forum chats).
     GetTopics { id: i64 },
+    /// Fetches the messages of the single forum topic anchored by `topic_root`
+    /// (the chat-level history slice may not reach an old topic's posts).
+    GetTopicMessages { id: i64, topic_root: i32 },
     /// Creates a forum topic titled `title` in the chat.
     CreateTopic { id: i64, title: String },
     /// Sends a text message into the topic thread anchored by `topic_root`.
@@ -408,6 +411,12 @@ pub enum UiMessage {
     Messages {
         id: i64,
         title: String,
+        rows: Vec<MsgRow>,
+    },
+    /// A single forum topic's messages were loaded (keyed by its root id).
+    TopicMessages {
+        id: i64,
+        root: i32,
         rows: Vec<MsgRow>,
     },
     /// A new message was received live (incoming, or sent from another
