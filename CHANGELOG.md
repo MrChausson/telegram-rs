@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.12.0] - 2026-09-10
+
 ### Added
 - **Persistent drafts**: unsent composer text is kept per chat and restored
   when you reopen the conversation; it is dropped once the message is sent.
