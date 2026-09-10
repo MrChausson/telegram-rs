@@ -5311,6 +5311,9 @@ pub fn run() -> iced::Result {
         .window(iced::window::Settings {
             // Taskbar/compositor icon: the same code-drawn logo as the tray.
             icon: Some(window_icon()),
+            // Enforce a sane floor so the chat pane cannot collapse to nothing
+            // when the window is shrunk (the sidebar keeps ~283px).
+            min_size: Some(iced::Size::new(420.0, 320.0)),
             ..Default::default()
         })
         .window_size((w, h))
