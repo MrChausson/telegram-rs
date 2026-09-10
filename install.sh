@@ -26,6 +26,7 @@ cat > "$APPDIR/telegram-rs.desktop" <<EOF
 Type=Application
 Name=Telegram RS
 Comment=Minimalist Telegram client in Rust
+Icon=telegram-rs
 Exec=$DEST
 Terminal=false
 Categories=Network;Chat;
