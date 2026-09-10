@@ -92,17 +92,22 @@ fn paste_via_wl_paste() -> Option<String> {
         return None;
     }
     let types = String::from_utf8_lossy(&types.stdout);
-    if !types.split_whitespace().any(|t| t.starts_with("image/")) {
-        return None;
-    }
-    // Pipe the raw PNG bytes straight to a temp file (avoid shell escaping).
+    // Use the exact advertised image mime instead of assuming `image/png`:
+    // hardcoding png made JPEG/WebP clips silently fail on Wayland.
+    let pid = std::process::id();
+    let sub = types
+        .split_whitespace()
+        .map(|t| t.strip_prefix("image/"))
+        .flatten()
+        .find(|s| matches!(*s, "png" | "jpeg" | "jpg" | "webp" | "gif" | "bmp"))?;
+    let ext = if sub == "jpeg" { "jpg" } else { sub };
     let path = std::env::temp_dir().join(format!(
-        "telegram-rs-paste-{}.png",
-        std::process::id()
+        "telegram-rs-paste-{}.{ext}",
+        pid
     ));
     let out = Command::new("wl-paste")
         .arg("-t")
-        .arg("image/png")
+        .arg(format!("image/{sub}"))
         .stdin(std::process::Stdio::null())
         .output()
         .ok()?;
