@@ -52,6 +52,15 @@ pub fn looks_like_image(path: &str) -> bool {
 /// write it to a temp PNG, and hand the path back for the normal media-send
 /// path. Returns `None` when the clipboard holds text instead of an image.
 fn paste_clipboard_image() -> Option<String> {
+    // Try the native Wayland clipboard first (wl-paste), then fall back to
+    // arboard for X11/Windows/macOS. arboard's own Wayland support only works
+    // on wlroots compositors; wl-paste works on every compositor.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        if let Some(path) = paste_via_wl_paste() {
+            return Some(path);
+        }
+    }
     let mut clip = arboard::Clipboard::new().ok()?;
     let img = clip.get_image().ok()?;
     let rgba = ::image_codec::RgbaImage::from_raw(
@@ -68,6 +77,39 @@ fn paste_clipboard_image() -> Option<String> {
         std::process::id()
     ));
     std::fs::write(&path, buf).ok()?;
+    Some(path.to_string_lossy().into_owned())
+}
+
+/// Reads an image from the Wayland clipboard via the `wl-paste` CLI
+/// (part of wl-clipboard). Returns a temp PNG path, or `None` if the
+/// clipboard holds no image or wl-paste isn't available.
+#[cfg(target_os = "linux")]
+fn paste_via_wl_paste() -> Option<String> {
+    use std::process::Command;
+    // Confirm there is an image offered, not just text.
+    let types = Command::new("wl-paste").arg("--list-types").output().ok()?;
+    if !types.status.success() {
+        return None;
+    }
+    let types = String::from_utf8_lossy(&types.stdout);
+    if !types.split_whitespace().any(|t| t.starts_with("image/")) {
+        return None;
+    }
+    // Pipe the raw PNG bytes straight to a temp file (avoid shell escaping).
+    let path = std::env::temp_dir().join(format!(
+        "telegram-rs-paste-{}.png",
+        std::process::id()
+    ));
+    let out = Command::new("wl-paste")
+        .arg("-t")
+        .arg("image/png")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() || out.stdout.is_empty() {
+        return None;
+    }
+    std::fs::write(&path, &out.stdout).ok()?;
     Some(path.to_string_lossy().into_owned())
 }
 
