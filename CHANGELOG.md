@@ -52,6 +52,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   message (right-aligned bubble) it floated detached at the far left and
   overlapped the bubble tip. It now hugs the same edge as the message bubble
   (right for sent, left for received), matching the context menu.
+- **Image paste works on any Wayland compositor**: `Ctrl+V` only pasted on
+  wlroots-based compositors before; it now reads the clipboard via `wl-paste`,
+  so pasting images works on GNOME and other non-wlroots compositors.
+- **Image paste accepts more image types**: the Wayland paste path reads the
+  mime type the clipboard actually advertises instead of assuming PNG, so
+  "Copy image" from sources offering JPEG / WebP / GIF / BMP pastes correctly.
+- **Window can no longer be squeezed below 420×320 px**: the minimum window
+  size is now enforced, so the chat pane can't be collapsed out of existence
+  by small resize.
 
 ## [v0.11.0] - 2026-08-31
 
