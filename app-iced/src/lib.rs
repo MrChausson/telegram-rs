@@ -4238,7 +4238,7 @@ fn pinned_banner(m: &MsgRow) -> Element<'static> {
 // ---------------------------------------------------------------------------
 
 /// Height of the topic chips bar (chips + vertical padding).
-const TOPIC_BAR_H: f32 = 34.0;
+const TOPIC_BAR_H: f32 = 44.0;
 
 /// The topic chips bar of a forum chat: an "All messages" chip, one chip
 /// per topic and a "+" chip that opens the inline create-topic field. Only
@@ -4308,12 +4308,20 @@ fn topic_chips_bar(state: &State) -> Element<'_> {
         chips = chips.push(topic_chip("+", false, Message::TopicCreateOpen));
     }
     container(
-        scrollable(chips).direction(iced::widget::scrollable::Direction::Horizontal(
-            // Hidden: a visible scroller overlaps the chips in the 34px bar
-            // and makes the topic labels unreadable. The bar still scrolls
-            // when the chips overflow (trackpad / Shift+scroll).
-            iced::widget::scrollable::Scrollbar::hidden(),
-        )),
+        scrollable(chips)
+            .height(Length::Fill)
+            .direction(iced::widget::scrollable::Direction::Horizontal(
+                // Visible so the far topics are reachable by dragging the bar:
+                // a hidden scroller + relying on Shift+wheel (Iced ignores a
+                // plain vertical wheel on a horizontal-only scrollable) left the
+                // right-hand topics inaccessible. `.height(Fill)` + a thin 4px
+                // scroller keep it in the bar's bottom margin, clear of the
+                // chips (a Scrollable with no height hugs its content and would
+                // draw the scroller right over the chip labels).
+                iced::widget::scrollable::Scrollbar::new()
+                    .width(4.0)
+                    .scroller_width(4.0),
+            )),
     )
     .width(Length::Fill)
     .height(TOPIC_BAR_H)

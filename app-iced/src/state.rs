@@ -477,9 +477,13 @@ pub struct State {
     /// of it (identical when no topic is selected). Slice-1 trade-off: thread
     /// filtering runs over the already-loaded history only — a topic whose
     /// older messages were never fetched (beyond `MESSAGE_LIMIT`) shows a
-    /// partial thread; fetch-on-demand via `messages.getReplies` is future
-    /// work.
+    /// partial thread. Selecting such a topic triggers `GetTopicMessages`
+    /// (`messages.getReplies`) and the reply is cached in `topic_messages`.
     pub(crate) topic_all_messages: Vec<MsgRow>,
+    /// Per-topic threads loaded on demand via `messages.getReplies` (root id →
+    /// the topic's own messages, chronological). `topic_view` prefers these
+    /// over the chat-level slice so old topics never render empty.
+    pub(crate) topic_messages: HashMap<i32, Vec<MsgRow>>,
 
     // -----------------------------------------------------------------
     // Theme (light/dark)
@@ -664,6 +668,7 @@ impl State {
             topic_creating: false,
             topic_title: String::new(),
             topic_all_messages: Vec::new(),
+            topic_messages: std::collections::HashMap::new(),
             theme_mode: ThemeMode::Dark,
             emoji_panel_open: false,
             emoji_recents: Vec::new(),
@@ -947,6 +952,19 @@ impl State {
                     }
                     self.resolve_pending_jump();
                     self.invalidate_layout();
+                }
+            }
+            UiMessage::TopicMessages { id, root, rows } => {
+                // Cache the on-demand thread fetch (messages.getReplies); the
+                // view is restored right away if that topic is selected.
+                if self.open_chat == Some(id) {
+                    self.topic_messages.insert(root, rows);
+                    if self.topic_selected == Some(root) {
+                        self.messages =
+                            self.topic_messages.get(&root).cloned().unwrap_or_default();
+                        self.loading = false;
+                        self.invalidate_layout();
+                    }
                 }
             }
             UiMessage::NewMessage {
@@ -2285,9 +2303,17 @@ impl State {
         self.topic_is_forum && !self.topic_topics.is_empty()
     }
 
-    /// Rebuilds `messages` from the full history for the current selection.
+    /// Rebuilds `messages` from the full history (or the on-demand topic
+    /// thread when one was fetched) for the current selection.
     fn apply_topic_filter(&mut self) {
-        self.messages = Self::topic_view(&self.topic_all_messages, self.topic_selected);
+        self.messages = match self.topic_selected {
+            Some(root) => self
+                .topic_messages
+                .get(&root)
+                .cloned()
+                .unwrap_or_else(|| Self::topic_view(&self.topic_all_messages, Some(root))),
+            None => self.topic_all_messages.clone(),
+        };
         self.invalidate_layout();
     }
 
@@ -2298,6 +2324,20 @@ impl State {
         }
         self.topic_selected = root;
         self.apply_topic_filter();
+        // A topic's posts may lie beyond the loaded chat-history slice, in
+        // which case filtering it yields nothing. Fetch the thread on demand
+        // via `messages.getReplies` so old topics never render empty.
+        if let Some(r) = root {
+            if !self.topic_messages.contains_key(&r)
+                && Self::topic_view(&self.topic_all_messages, Some(r)).is_empty()
+            {
+                if let Some(id) = self.open_chat {
+                    let _ = self
+                        .req_tx
+                        .send(Request::GetTopicMessages { id, topic_root: r });
+                }
+            }
+        }
         self.scroll_to_bottom = true;
     }
 
@@ -2334,6 +2374,7 @@ impl State {
         self.topic_creating = false;
         self.topic_title.clear();
         self.topic_all_messages.clear();
+        self.topic_messages.clear();
     }
 
     /// The @username line was clicked: returns the text to copy.
@@ -5362,6 +5403,56 @@ mod tests {
         // client-side filter; older messages may not be cached).
         state.topic_select(Some(30));
         assert!(state.messages.is_empty());
+    }
+
+    #[test]
+    fn selecting_an_empty_topic_fetches_and_shows_its_thread() {
+        let (mut state, mut req_rx) = forum_state();
+
+        // Topic root 40 is not part of the loaded slice: selecting it asks the
+        // backend for the thread via messages.getReplies.
+        state.topic_select(Some(40));
+        assert!(state.messages.is_empty(), "async fetch, still pending");
+        let reqs = drain(&mut req_rx);
+        assert!(
+            reqs.iter().any(|r| matches!(
+                r,
+                Request::GetTopicMessages { id: 1002, topic_root: 40 }
+            )),
+            "an empty topic must be fetched, got {reqs:?}"
+        );
+
+        // The thread reply arrives: the topic renders its own messages even
+        // though they lie outside the loaded chat-history slice.
+        state.on_message(UiMessage::TopicMessages {
+            id: 1002,
+            root: 40,
+            rows: vec![
+                MsgRow::text(40, "old topic root", 100, false),
+                MsgRow {
+                    reply_to: Some(40),
+                    ..MsgRow::text(41, "old reply", 110, false)
+                },
+            ],
+        });
+        assert_eq!(state.messages.len(), 2);
+        assert_eq!(state.topic_messages.len(), 1);
+
+        // Back to "All messages", then to the topic again: served from the
+        // cache, no second round-trip.
+        state.topic_select(None);
+        assert_eq!(state.messages.len(), 3);
+        state.topic_select(Some(40));
+        assert_eq!(
+            state.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![40, 41]
+        );
+        assert!(
+            drain(&mut req_rx)
+                .iter()
+                .all(|r| !matches!(r, Request::GetTopicMessages { .. })),
+            "cached topic must not be fetched again"
+        );
     }
 
     #[test]
