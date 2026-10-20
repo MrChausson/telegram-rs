@@ -139,7 +139,7 @@ batches — each release moves the needle, not dribbles.
 - 🎬 **Media cards** — videos, GIFs and audio files render as dedicated cards (duration shown); open in the system player
 - 🎙️ **Voice notes** — recorded voice messages play in-app with a play/pause bar and progress
 - 🔔 **Desktop notifications** — new messages in non-open chats raise a desktop notification
-- 🫗 **System tray** — tray icon with "Open" / "Quit" actions (StatusNotifier, no GTK)
+- 🫗 **System tray** — close the window to keep running in the tray; click the icon or "Open Telegram RS" to restore, "Quit" to exit (StatusNotifier, no GTK). Without a tray, closing exits normally. The minimize button still minimizes to the taskbar.
 - 🔗 **Clickable links** — URLs in messages open in the system browser
 - 🚪 **Reopen last chat** — the app relaunches straight into the chat you had open
 - ↩️ **Replies & forwards** — quote a message in reply, or forward it to any chat

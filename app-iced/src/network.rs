@@ -125,7 +125,7 @@ pub fn cache_dir() -> PathBuf {
     data_dir().join("data")
 }
 
-/// Shared notifications on/off flag (same pattern as [`crate::tray::TrayActions`]):
+/// Shared notifications on/off flag:
 /// the settings panel flips it, the network runtime consults it before raising
 /// a desktop notification.
 #[derive(Debug, Default)]

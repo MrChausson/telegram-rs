@@ -168,3 +168,28 @@ Rule of thumb: **any floating/overlay surface should be measurable as a
 distinct colour region, with a visible boundary, against its backdrop.** If
 your pixel scan can't find the surface's edge without a prior guess, a human
 probably can't see it either.
+## Close-to-tray regression (2026-10-20)
+
+The tray/window lifecycle has 14 headless unit tests in `shell.rs` and
+`tray.rs`. Run `cargo test --workspace --locked` (162 tests passed when this
+change was prepared). No Telegram account is required for these tests.
+
+Functional checks were also exercised against the debug binary in `--demo`
+mode, with an isolated `TG_DATA_DIR`, Xvfb, Openbox and a private session bus
+with a mock StatusNotifierWatcher. All nine checks passed:
+
+1. Startup creates exactly one visible window.
+2. Closing the window removes it but leaves the client process alive.
+3. **Open Telegram RS** recreates exactly one visible window.
+4. **Open Telegram RS** also restores an ordinarily minimized window.
+5. Repeated icon activation never creates duplicate windows.
+6. Losing the tray watcher while hidden automatically restores the window.
+7. Closing after tray loss exits normally.
+8. Starting without a tray still permits normal close/exit.
+9. **Quit** exits normally while the window is hidden.
+
+The ordinary minimize button remains a taskbar action; close-to-tray is bound
+to the close request. The shell deliberately destroys/recreates the native
+window instead of using `Mode::Hidden`, which winit does not implement on
+Wayland. Native Wayland compositor testing is still required; the functional
+checks above are X11-only. No release-build RAM benchmark was performed.

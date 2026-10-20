@@ -388,9 +388,6 @@ pub struct State {
     /// progress events back to their row).
     next_media_token: u64,
 
-    /// Shared tray flags (open/quit) polled by the shell.
-    pub tray_actions: Arc<crate::tray::TrayActions>,
-
     pub login_step: LoginStep,
     pub login_input: String,
 
@@ -634,7 +631,6 @@ impl State {
             voice_sim_started: None,
             voice_paused_path: None,
             next_media_token: 1,
-            tray_actions: Arc::new(crate::tray::TrayActions::default()),
             login_step: LoginStep::Phone,
             login_input: String::new(),
             login_qr_selected: false,

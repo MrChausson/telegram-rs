@@ -1,19 +1,18 @@
-//! App tray (StatusNotifier on Linux/X11/Wayland; no GTK).
+//! Event-driven StatusNotifier tray (Linux/X11/Wayland; no GTK).
 //!
-//! `ksni` is pure Rust. The tray writes two flags the shell polls:
-//! "open" and "quit". On machines without a StatusNotifier host, ksni fails
-//! quietly on its thread — always a no-op, never a crash.
+//! The subscription wakes Iced directly, even when no window is open. There
+//! are no polling timers, process-wide flags, or extra tray runtime threads.
 
+use iced::futures::SinkExt;
 use ksni::TrayMethods;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::sync::OnceLock;
+use tokio::sync::mpsc;
 
-/// Flags the iced shell reacts to.
-#[derive(Debug, Default)]
-pub struct TrayActions {
-    pub open: AtomicBool,
-    pub quit: AtomicBool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event {
+    Open,
+    Quit,
+    Available(bool),
 }
 
 /// The app logo as `ksni::Icon`s (32 px + 64 px), rendered once.
@@ -45,7 +44,13 @@ fn tray_icons() -> Vec<ksni::Icon> {
 }
 
 struct TgTray {
-    actions: Arc<TrayActions>,
+    events: mpsc::UnboundedSender<Event>,
+}
+
+impl TgTray {
+    fn send(&self, event: Event) {
+        let _ = self.events.send(event);
+    }
 }
 
 impl ksni::Tray for TgTray {
@@ -65,49 +70,109 @@ impl ksni::Tray for TgTray {
             ..Default::default()
         }
     }
+    fn activate(&mut self, _x: i32, _y: i32) {
+        self.send(Event::Open);
+    }
+    fn watcher_online(&self) {
+        self.send(Event::Available(true));
+    }
+    fn watcher_offline(&self, _reason: ksni::OfflineReason) -> bool {
+        self.send(Event::Available(false));
+        // Keep the service alive so a panel restart can register it again.
+        true
+    }
     fn menu(&self) -> Vec<ksni::menu::MenuItem<Self>> {
         use ksni::menu::{MenuItem, StandardItem};
         vec![
             MenuItem::Standard(StandardItem {
                 label: "Open Telegram RS".into(),
-                activate: Box::new(|tray: &mut Self| {
-                    tray.actions.open.store(true, Ordering::SeqCst);
-                }),
+                activate: Box::new(|tray: &mut Self| tray.send(Event::Open)),
                 ..Default::default()
             }),
             MenuItem::Standard(StandardItem {
                 label: "Quit".into(),
-                activate: Box::new(|tray: &mut Self| {
-                    tray.actions.quit.store(true, Ordering::SeqCst);
-                }),
+                activate: Box::new(|tray: &mut Self| tray.send(Event::Quit)),
                 ..Default::default()
             }),
         ]
     }
 }
 
-/// Start the tray. Spawns an inner current-thread tokio runtime so the async
-/// `spawn()` future can be polled; a missing StatusNotifier host makes `spawn`
-/// return `Err`, and the thread silently exits.
-pub fn start(actions: Arc<TrayActions>) {
-    std::thread::Builder::new()
-        .name("telegram-rs-tray".into())
-        .spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("tray tokio rt");
-            rt.block_on(async move {
-                let tray = TgTray { actions };
-                let Ok(handle) = tray.spawn().await else {
-                    return;
-                };
-                // Keep `handle` (and the tray) alive for this thread's lifetime.
-                let _ = handle;
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-                }
-            });
-        })
-        .ok();
+pub fn subscription() -> iced::Subscription<Event> {
+    iced::Subscription::run(events)
+}
+
+fn events() -> impl iced::futures::Stream<Item = Event> {
+    iced::stream::channel(16, async move |mut output| {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // Queue readiness before spawning, but do not forward it until spawn
+        // succeeds. A racing watcher_offline callback then follows readiness
+        // in the same FIFO instead of being overwritten by stale readiness.
+        let _ = tx.send(Event::Available(true));
+        let tray = TgTray { events: tx };
+        let Ok(handle) = tray.spawn().await else {
+            let _ = output.send(Event::Available(false)).await;
+            // Iced subscriptions must not end spontaneously. Close will exit
+            // normally without a tray, and no retry/polling timer is needed.
+            iced::futures::future::pending::<()>().await;
+            return;
+        };
+        // Keep the service handle for the subscription's entire lifetime.
+        while let Some(event) = rx.recv().await {
+            if output.send(event).await.is_err() {
+                break;
+            }
+        }
+        handle.shutdown().await;
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ksni::Tray;
+
+    fn tray() -> (TgTray, mpsc::UnboundedReceiver<Event>) {
+        let (events, rx) = mpsc::unbounded_channel();
+        (TgTray { events }, rx)
+    }
+
+    #[test]
+    fn icon_activation_sends_open_without_an_unrelated_ui_event() {
+        let (mut tray, mut rx) = tray();
+        tray.activate(0, 0);
+        assert_eq!(rx.try_recv().unwrap(), Event::Open);
+    }
+
+    #[test]
+    fn menu_actions_send_open_and_quit_in_order() {
+        let (mut tray, mut rx) = tray();
+        for item in tray.menu() {
+            if let ksni::menu::MenuItem::Standard(item) = item {
+                (item.activate)(&mut tray);
+            }
+        }
+        assert_eq!(rx.try_recv().unwrap(), Event::Open);
+        assert_eq!(rx.try_recv().unwrap(), Event::Quit);
+    }
+
+    #[test]
+    fn watcher_changes_are_delivered_and_allow_reconnection() {
+        let (tray, mut rx) = tray();
+        assert!(tray.watcher_offline(ksni::OfflineReason::No));
+        tray.watcher_online();
+        assert_eq!(rx.try_recv().unwrap(), Event::Available(false));
+        assert_eq!(rx.try_recv().unwrap(), Event::Available(true));
+    }
+
+    #[tokio::test]
+    async fn channel_wakes_a_sleeping_receiver() {
+        let (tray, mut rx) = tray();
+        let send = tokio::spawn(async move { tray.send(Event::Open) });
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("tray event should wake the receiver");
+        assert_eq!(event, Some(Event::Open));
+        send.await.unwrap();
+    }
 }

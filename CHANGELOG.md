@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Close to tray**: closing the window keeps Telegram running when a working
+  system tray is available. Clicking the tray icon or **Open Telegram RS**
+  restores the window; **Quit** exits even with no window open. The window
+  lifecycle works on Wayland as well as X11 without polling or new dependencies.
+- **Tray safety**: without a tray, closing the window exits normally. If the
+  tray watcher disappears while the app is hidden, the window is restored.
+
 ## [v0.12.0] - 2026-09-10
 
 ### Added

@@ -13,11 +13,11 @@ pub mod emoji;
 pub mod icons;
 pub mod network;
 pub mod qr_png;
+mod shell;
 pub mod state;
 pub mod theme;
 pub mod tray;
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 
 use iced::widget::{
     button, column, container, image, mouse_area, rich_text, row, scrollable, text, text_input,
@@ -656,14 +656,10 @@ fn boot() -> (State, Task<Message>) {
         })
         .unwrap_or(0.0);
     // Shared notifications preference: the panel flips it, the network
-    // runtime consults it (same wiring pattern as the tray flags).
+    // runtime consults it.
     let notify_pref = std::sync::Arc::new(network::NotifyPref::default());
     let req_tx = network::spawn_network(demo, big, notify_pref.clone());
-    // System tray: best-effort (silent no-op without a StatusNotifier host).
-    let tray_actions = std::sync::Arc::new(tray::TrayActions::default());
-    tray::start(tray_actions.clone());
     let mut state = State::new(req_tx);
-    state.tray_actions = tray_actions;
     state.notify_pref = notify_pref;
     let state = state
         .with_auto_open_first(open_first || demo)
@@ -929,13 +925,6 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         if let Some(y) = state.take_scroll_target() {
             return scroll_to::<Message>(MSG_LIST_ID, AbsoluteOffset { x: 0.0, y });
         }
-    }
-    // Tray: consume the open/quit requests from the tray thread.
-    if state.tray_actions.open.swap(false, Ordering::SeqCst) {
-        // Save the window to show (dealt with by the shell; unsaved is fine).
-    }
-    if state.tray_actions.quit.swap(false, Ordering::SeqCst) {
-        std::process::exit(0);
     }
     if state.scroll_to_bottom {
         state.scroll_to_bottom = false;
@@ -5360,24 +5349,7 @@ fn default_wgpu_backend() {
 
 pub fn run() -> iced::Result {
     default_wgpu_backend();
-    let (w, h) = window_size_from_args();
-    iced::application(boot, update, view)
-        .subscription(subscription)
-        .window(iced::window::Settings {
-            // Taskbar/compositor icon: the same code-drawn logo as the tray.
-            icon: Some(window_icon()),
-            // Enforce a sane floor so the chat pane cannot collapse to nothing
-            // when the window is shrunk (the sidebar keeps ~283px).
-            min_size: Some(iced::Size::new(420.0, 320.0)),
-            ..Default::default()
-        })
-        .window_size((w, h))
-        .title("Telegram RS")
-        // Base iced palette follows our mode: default-styled widgets (and
-        // the login screen, which has no explicit background) adapt too.
-        // Custom colors all come from `theme::*()` regardless.
-        .theme(app_theme)
-        .run()
+    shell::run()
 }
 
 /// The window icon: the app logo rasterized off the shared `Icon::Logo`
