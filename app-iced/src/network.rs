@@ -15,7 +15,10 @@ use grammers_client::update::Update;
 use grammers_session::types::PeerRef;
 use grammers_session::updates::UpdatesLike;
 use grammers_session::Session;
-use tg::auth::{export_login_token, import_login_token, import_login_token_in_dc};
+use tg::auth::{
+    export_login_token, import_login_token, import_login_token_in_dc, needs_password,
+    password_token,
+};
 use tg::client::{code_entities_of, Telegram};
 use tg::session::{load_or_new, FileSession};
 use tokio::sync::mpsc;
@@ -1946,12 +1949,17 @@ async fn serve_login(
     // generation-counter cancellation (`qr_cancel`) stays the only way a
     // poller stops otherwise.
     let (qr_success_tx, qr_success_rx) = tokio::sync::watch::channel(false);
+    let (qr_password_tx, mut qr_password_rx) = mpsc::unbounded_channel::<PasswordToken>();
 
     loop {
         // QR sign-in succeeded elsewhere: the login phase is over, hand
         // control (and `req_rx`) back to the caller.
         if *qr_success_rx.borrow() {
             return;
+        }
+        while let Ok(t) = qr_password_rx.try_recv() {
+            token = None;
+            password = Some(t);
         }
         let pending: Vec<Request> = std::iter::from_fn(|| req_rx.try_recv().ok()).collect();
         for req in pending {
@@ -1972,7 +1980,7 @@ async fn serve_login(
                         }
                         Err(e) => {
                             let _ = ui_tx
-                                .send(UiMessage::Error(format!("Could not send the code: {e}")));
+                                .send(UiMessage::Error(format!("Could not send the code: {e:#}")));
                         }
                     }
                 }
@@ -2006,10 +2014,10 @@ async fn serve_login(
                             ));
                         }
                         Ok(Err(e)) => {
-                            let _ = ui_tx.send(UiMessage::Error(format!("Sign in failed: {e}")));
+                            let _ = ui_tx.send(UiMessage::Error(format!("Sign in failed: {e:#}")));
                         }
                         Err(e) => {
-                            let _ = ui_tx.send(UiMessage::Error(format!("Sign in failed: {e}")));
+                            let _ = ui_tx.send(UiMessage::Error(format!("Sign in failed: {e:#}")));
                         }
                     }
                 }
@@ -2028,7 +2036,7 @@ async fn serve_login(
                                 .send(UiMessage::Error("Wrong password, try again".to_string()));
                         }
                         Err(e) => {
-                            let _ = ui_tx.send(UiMessage::Error(format!("2FA failed: {e}")));
+                            let _ = ui_tx.send(UiMessage::Error(format!("2FA failed: {e:#}")));
                         }
                     }
                 }
@@ -2052,6 +2060,7 @@ async fn serve_login(
                         ui_tx.clone(),
                         qr_cancel.clone(),
                         qr_success_tx.clone(),
+                        qr_password_tx.clone(),
                     );
                 }
                 Request::QrLoginCancel => {
@@ -2079,6 +2088,7 @@ fn start_qr_login(
     ui_tx: mpsc::UnboundedSender<UiMessage>,
     cancel: Arc<std::sync::atomic::AtomicU64>,
     success: tokio::sync::watch::Sender<bool>,
+    password_tx: mpsc::UnboundedSender<PasswordToken>,
 ) {
     tokio::spawn(async move {
         use std::sync::atomic::Ordering;
@@ -2201,6 +2211,23 @@ fn start_qr_login(
                     let _ = success.send(true);
                     return;
                 }
+                Err(e) if needs_password(&e) => {
+                    eprintln!("[telegram-rs] qr: scan accepted, 2FA password required");
+                    match password_token(&client).await {
+                        Ok(t) => {
+                            let hint = t.hint().map(|s| s.to_string()).unwrap_or_default();
+                            let _ = password_tx.send(t);
+                            let _ = ui_tx.send(UiMessage::LoginPasswordRequired { hint });
+                        }
+                        Err(e) => {
+                            eprintln!("[telegram-rs] qr: {e:#}");
+                            let _ = ui_tx.send(UiMessage::QrLoginFailed {
+                                error: format!("Could not start 2FA: {e:#}"),
+                            });
+                        }
+                    }
+                    return;
+                }
                 Err(e) => {
                     // Do NOT blank the QR here: a transient failure (flood,
                     // network blip) shouldn't kill a still-scanable code. Keep
@@ -2214,7 +2241,7 @@ fn start_qr_login(
                         consecutive_errors = 0;
                     }
                     backoff = (backoff * 2).min(QR_POLL_MAX_BACKOFF);
-                    eprintln!("[telegram-rs] qr sign-in poll failed, backing off: {e}");
+                    eprintln!("[telegram-rs] qr sign-in poll failed, backing off: {e:#}");
                     tokio::time::sleep(backoff).await;
                     continue;
                 }

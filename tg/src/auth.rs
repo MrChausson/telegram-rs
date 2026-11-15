@@ -136,3 +136,19 @@ pub async fn import_login_token_in_dc(
         .await
         .context("importing login token after DC migration")
 }
+
+pub fn needs_password(err: &anyhow::Error) -> bool {
+    err.chain().any(|e| {
+        e.downcast_ref::<grammers_client::InvocationError>()
+            .is_some_and(|ie| ie.is("SESSION_PASSWORD_NEEDED"))
+    })
+}
+
+pub async fn password_token(client: &Client) -> Result<PasswordToken> {
+    let password: tl::types::account::Password = client
+        .invoke(&tl::functions::account::GetPassword {})
+        .await
+        .context("fetching 2FA parameters")?
+        .into();
+    Ok(PasswordToken::new(password))
+}
