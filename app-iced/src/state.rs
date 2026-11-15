@@ -1361,6 +1361,8 @@ impl State {
                 self.status = "Enter the code received by Telegram".to_string();
             }
             UiMessage::LoginPasswordRequired { hint } => {
+                self.qr_cancelled();
+                self.login_qr_selected = false;
                 self.login_step = LoginStep::Password;
                 self.login_input.clear();
                 self.login_error = false;
@@ -1423,6 +1425,7 @@ impl State {
             }
             UiMessage::LoggedOut => self.reset_to_login(),
             UiMessage::Error(e) => {
+                eprintln!("[telegram-rs] error: {e}");
                 self.loading = false;
                 if !self.authenticated {
                     self.login_error = true;
